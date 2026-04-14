@@ -81,11 +81,12 @@ async function runCampaign(campaignId, client) {
       sendSSE(campaignId, { type: 'log', message: msg });
     });
 
-    const posts = generated.posts.slice(0, 96);
+    const posts = generated.posts.slice(0, 3);
     updateCampaign(campaignId, {
       stage: 'generating_images',
       progress: 30,
       posts_generated: posts.length,
+      total_posts: 3,
       posts_json: JSON.stringify(posts)
     });
     sendSSE(campaignId, { type: 'progress', stage: 'generating_images', posts_generated: posts.length });
