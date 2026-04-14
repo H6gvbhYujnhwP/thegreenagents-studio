@@ -42,6 +42,7 @@ router.post('/sync', requireAuth, async (req, res) => {
 
   try {
     const workspaces = await listWorkspaces(masterApiKey);
+    console.log(`[sync] list_workspaces returned ${workspaces.length} workspace(s):`, workspaces.map(w => w.name || w.id));
     let added = 0;
     let skipped = 0;
 
@@ -62,10 +63,10 @@ router.post('/sync', requireAuth, async (req, res) => {
       added++;
     }
 
+    console.log(`[sync] done — added: ${added}, skipped: ${skipped}`);
     res.json({ added, skipped });
   } catch (err) {
-    // Non-fatal — dashboard still loads
-    console.error('Supergrow sync error:', err.message);
+    console.error('[sync] Supergrow sync error:', err.message);
     res.json({ added: 0, skipped: 0, error: err.message });
   }
 });
