@@ -29,6 +29,8 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
     onRefresh();
     onBack();
   }
+
+  async function startCampaign() {
     setStarting(true);
     const res = await fetch(`/api/campaigns/start/${clientId}`, { method:'POST' });
     const data = await res.json();
