@@ -18,7 +18,19 @@ export default function Dashboard({ onLogout }) {
     setLoading(false);
   }
 
-  useEffect(() => { loadClients(); }, []);
+  async function syncAndLoad() {
+    // Silently sync new Supergrow workspaces in the background
+    try {
+      const res = await fetch('/api/clients/sync', { method: 'POST' });
+      const { added } = await res.json();
+      // If new workspaces were added, reload the client list
+      if (added > 0) await loadClients(); else await loadClients();
+    } catch (_) {
+      await loadClients();
+    }
+  }
+
+  useEffect(() => { syncAndLoad(); }, []);
 
   const totalPosts = clients.reduce((acc, c) => acc + (c.campaign_count || 0) * 96, 0);
   const activeRuns = clients.filter(c => c.last_status === 'running').length;

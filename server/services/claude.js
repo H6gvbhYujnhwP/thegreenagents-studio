@@ -29,9 +29,9 @@ Follow this workflow:
 2. Build the client operating profile as a canonical source of truth.
 3. Add current platform and sector context relevant to this client.
 4. Create a topic and deployment plan - commercially useful content matrix spanning 8 weeks.
-5. Generate exactly 96 LinkedIn posts in the client voice, optimized for enquiries, written for real buyers.${contentDna ? ' Match the Content DNA writing style precisely.' : ''}
+5. Generate exactly 3 LinkedIn posts in the client voice, optimized for enquiries, written for real buyers.${contentDna ? ' Match the Content DNA writing style precisely.' : ''}
    Each post must be substantive (100-250 words), use line breaks for readability, and end with a clear CTA relevant to this client.
-   Vary formats: stories, insights, lists, questions, case studies, tips. Cover all 8 weeks of the topic schedule.
+   Vary formats across the 3 posts: e.g. a story, a list, and an insight.
 6. Validate all posts — remove weak, generic, or off-brand copy.
 
 Return ONLY valid JSON in this exact structure, no other text:
@@ -61,9 +61,9 @@ Return ONLY valid JSON in this exact structure, no other text:
   ]
 }
 
-Generate all 96 posts. Each post needs a unique image_prompt that visually represents the post content.`;
+Generate all 3 posts. Each post needs a unique image_prompt that visually represents the post content.`;
 
-  onProgress('Sending to Claude API (generating 96 posts — this takes 3-5 minutes)...');
+  onProgress('Sending to Claude API (generating 3 posts for smoke test)...');
 
   const message = await anthropic.messages.create({
     model: 'claude-opus-4-5',

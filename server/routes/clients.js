@@ -24,6 +24,52 @@ router.get('/workspaces', requireAuth, async (req, res) => {
   }
 });
 
+// ─── Auto-sync: add new Supergrow workspaces to the DB automatically ──────────
+// Uses the master api_key embedded in SUPERGROW_MCP_URL env var.
+// Safe to call on every dashboard load — existing clients are never modified.
+
+router.post('/sync', requireAuth, async (req, res) => {
+  const mcpUrl = process.env.SUPERGROW_MCP_URL;
+  if (!mcpUrl) return res.json({ added: 0, skipped: 0 });
+
+  let masterApiKey;
+  try {
+    masterApiKey = new URL(mcpUrl).searchParams.get('api_key');
+  } catch (_) {
+    return res.json({ added: 0, skipped: 0 });
+  }
+  if (!masterApiKey) return res.json({ added: 0, skipped: 0 });
+
+  try {
+    const workspaces = await listWorkspaces(masterApiKey);
+    let added = 0;
+    let skipped = 0;
+
+    for (const ws of workspaces) {
+      const wsId = ws.id || ws.workspace_id;
+      const wsName = ws.name || ws.workspace_name || wsId;
+      if (!wsId) continue;
+
+      const exists = db.prepare('SELECT id FROM clients WHERE supergrow_workspace_id = ?').get(wsId);
+      if (exists) { skipped++; continue; }
+
+      db.prepare(`
+        INSERT INTO clients
+          (id, name, brand, supergrow_workspace_name, supergrow_workspace_id,
+           supergrow_api_key, timezone, cadence, posting_identity, approval_mode)
+        VALUES (?, ?, ?, ?, ?, ?, 'Europe/London', 'Daily', 'personal', 'auto')
+      `).run(uuid(), wsName, wsName, wsName, wsId, masterApiKey);
+      added++;
+    }
+
+    res.json({ added, skipped });
+  } catch (err) {
+    // Non-fatal — dashboard still loads
+    console.error('Supergrow sync error:', err.message);
+    res.json({ added: 0, skipped: 0, error: err.message });
+  }
+});
+
 // ─── Standard CRUD ────────────────────────────────────────────────────────────
 
 router.get('/', requireAuth, (req, res) => {

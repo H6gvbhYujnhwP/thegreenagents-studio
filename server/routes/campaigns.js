@@ -102,14 +102,14 @@ async function runCampaign(campaignId, client) {
       sendSSE(campaignId, { type: 'log', message: msg });
     }, contentDna);
 
-    // All 96 posts (smoke-test slice removed)
-    const posts = generated.posts;
+    // Smoke test: 3 posts. Change to generated.posts when going to production.
+    const posts = generated.posts.slice(0, 3);
 
     updateCampaign(campaignId, {
       stage: 'scoring_posts',
       progress: 25,
       posts_generated: posts.length,
-      total_posts: posts.length,
+      total_posts: 3,
       posts_json: JSON.stringify(posts)
     });
     sendSSE(campaignId, { type: 'progress', stage: 'scoring_posts', posts_generated: posts.length });
