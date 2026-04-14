@@ -20,7 +20,15 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
 
   useEffect(() => { load(); }, [clientId]);
 
-  async function startCampaign() {
+  const [deleting, setDeleting] = useState(false);
+
+  async function deleteClient() {
+    if (!window.confirm(`Delete ${client.name}? This will also delete all campaign history. This cannot be undone.`)) return;
+    setDeleting(true);
+    await fetch(`/api/clients/${clientId}`, { method: 'DELETE' });
+    onRefresh();
+    onBack();
+  }
     setStarting(true);
     const res = await fetch(`/api/campaigns/start/${clientId}`, { method:'POST' });
     const data = await res.json();
@@ -66,6 +74,9 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
         </div>
         <div style={{ display:'flex', gap:10 }}>
           <button onClick={() => setShowEdit(true)} style={{ padding:'7px 14px', border:'0.5px solid #d0d0cc', borderRadius:8, background:'#fff', color:'#555', fontSize:13 }}>Edit client</button>
+          <button onClick={deleteClient} disabled={deleting} style={{ padding:'7px 14px', border:'0.5px solid #F7C1C1', borderRadius:8, background:'#fff', color:'#E24B4A', fontSize:13 }}>
+            {deleting ? 'Deleting...' : 'Delete'}
+          </button>
           <button
             onClick={startCampaign}
             disabled={starting || !client.rag_content}
