@@ -2,9 +2,10 @@ import React, { useEffect, useState, useRef } from 'react';
 
 const STAGES = [
   { key: 'generating_posts', label: 'Generating posts', desc: 'Claude writing 96 LinkedIn posts' },
+  { key: 'scoring_posts',    label: 'Quality gate',     desc: 'Scoring & auto-fixing posts' },
   { key: 'generating_images', label: 'Generating images', desc: 'Nano Banana creating visuals' },
-  { key: 'deploying', label: 'Deploying to Supergrow', desc: 'Queuing posts via MCP' },
-  { key: 'done', label: 'Complete', desc: 'Campaign deployed successfully' }
+  { key: 'deploying',        label: 'Deploying',         desc: 'Queuing posts via Supergrow MCP' },
+  { key: 'done',             label: 'Complete',          desc: 'Campaign deployed successfully' }
 ];
 
 export default function CampaignProgress({ campaignId, onComplete }) {
@@ -66,10 +67,10 @@ export default function CampaignProgress({ campaignId, onComplete }) {
   const currentStageIdx = STAGES.findIndex(s => s.key === campaign?.stage);
 
   return (
-    <div style={{ padding:'28px', maxWidth:700 }}>
+    <div style={{ padding:'28px', maxWidth:740 }}>
       <div style={{ marginBottom:24 }}>
         <div style={{ fontSize:16, fontWeight:500, color:'#1a1a1a', marginBottom:4 }}>Campaign in progress</div>
-        <div style={{ fontSize:13, color:'#888' }}>Do not close this page. This will take 15–30 minutes.</div>
+        <div style={{ fontSize:13, color:'#888' }}>Do not close this page. This will take 20–35 minutes.</div>
       </div>
 
       <div style={{ background:'#fff', border:'0.5px solid #e0e0dc', borderRadius:12, padding:20, marginBottom:16 }}>
@@ -82,11 +83,10 @@ export default function CampaignProgress({ campaignId, onComplete }) {
         </div>
       </div>
 
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:8, marginBottom:16 }}>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(5, 1fr)', gap:8, marginBottom:16 }}>
         {STAGES.map((stage, i) => {
           const done = currentStageIdx > i || campaign?.stage === 'done';
           const active = campaign?.stage === stage.key;
-          const waiting = currentStageIdx < i && campaign?.stage !== 'done';
           return (
             <div key={stage.key} style={{
               background: done ? '#E1F5EE' : active ? '#FAEEDA' : '#fff',
@@ -97,8 +97,9 @@ export default function CampaignProgress({ campaignId, onComplete }) {
               <div style={{ fontSize:11, fontWeight:500, color: done ? '#085041' : active ? '#633806' : '#999' }}>{stage.label}</div>
               {active && campaign && (
                 <div style={{ fontSize:10, color:'#888', marginTop:2 }}>
+                  {stage.key === 'scoring_posts'    && `${campaign.posts_generated || 0} posts`}
                   {stage.key === 'generating_images' && `${campaign.images_generated || 0}/${campaign.total_posts || 96}`}
-                  {stage.key === 'deploying' && `${campaign.posts_deployed || 0}/${campaign.total_posts || 96}`}
+                  {stage.key === 'deploying'         && `${campaign.posts_deployed || 0}/${campaign.total_posts || 96}`}
                 </div>
               )}
             </div>

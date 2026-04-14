@@ -187,6 +187,9 @@ async function runCampaign(campaignId, client) {
 
       const progress = 25 + Math.round((i + 1) / posts.length * 10);
       updateCampaign(campaignId, { progress, posts_json: JSON.stringify(scoredPosts) });
+
+      // Small pause between MCP score calls to avoid rate limits
+      await sleep(300);
     }
 
     sendSSE(campaignId, {
