@@ -3,9 +3,28 @@ import multer from 'multer';
 import { v4 as uuid } from 'uuid';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
+import { listWorkspaces } from '../services/supergrow.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+// ─── Improvement 1: fetch workspaces for a given API key ─────────────────────
+// NOTE: this route MUST come before /:id to avoid "workspaces" matching as an id
+
+router.get('/workspaces', requireAuth, async (req, res) => {
+  const { api_key } = req.query;
+  if (!api_key) return res.status(400).json({ error: 'api_key query param required' });
+
+  try {
+    const workspaces = await listWorkspaces(api_key);
+    res.json({ workspaces });
+  } catch (err) {
+    console.error('list_workspaces error:', err.message);
+    res.status(502).json({ error: `Failed to fetch workspaces: ${err.message}` });
+  }
+});
+
+// ─── Standard CRUD ────────────────────────────────────────────────────────────
 
 router.get('/', requireAuth, (req, res) => {
   const clients = db.prepare(`

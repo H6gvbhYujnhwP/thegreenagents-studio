@@ -37,7 +37,48 @@ export default function NewClientModal({ onClose, onCreated, existing }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  // ── Improvement 1: workspace fetch state ─────────────────────────────────
+  const [workspaces, setWorkspaces] = useState([]);
+  const [fetchingWs, setFetchingWs] = useState(false);
+  const [wsError, setWsError] = useState('');
+  const [wsSelected, setWsSelected] = useState(false);
+
   const set = e => setForm(f => ({ ...f, [e.target.name]: e.target.value }));
+
+  async function fetchWorkspaces() {
+    if (!form.supergrow_api_key) {
+      setWsError('Enter the Supergrow API key first.');
+      return;
+    }
+    setFetchingWs(true);
+    setWsError('');
+    try {
+      const res = await fetch(`/api/clients/workspaces?api_key=${encodeURIComponent(form.supergrow_api_key)}`);
+      const data = await res.json();
+      if (!res.ok) { setWsError(data.error || 'Failed to fetch workspaces'); return; }
+      if (!data.workspaces || data.workspaces.length === 0) {
+        setWsError('No workspaces found for this API key.');
+        return;
+      }
+      setWorkspaces(data.workspaces);
+    } catch (e) {
+      setWsError('Network error fetching workspaces.');
+    } finally {
+      setFetchingWs(false);
+    }
+  }
+
+  function handleWorkspaceSelect(e) {
+    const id = e.target.value;
+    const ws = workspaces.find(w => (w.id || w.workspace_id) === id);
+    if (!ws) return;
+    setForm(f => ({
+      ...f,
+      supergrow_workspace_id: ws.id || ws.workspace_id || '',
+      supergrow_workspace_name: ws.name || ws.workspace_name || ''
+    }));
+    setWsSelected(true);
+  }
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -76,9 +117,78 @@ export default function NewClientModal({ onClose, onCreated, existing }) {
           <FIELD label="Website" name="website" value={form.website} onChange={set} />
 
           <div style={{ fontSize:11, fontWeight:500, color:'#1D9E75', textTransform:'uppercase', letterSpacing:'0.06em', marginBottom:12, marginTop:8 }}>Supergrow</div>
-          <FIELD label="Workspace name" name="supergrow_workspace_name" value={form.supergrow_workspace_name} onChange={set} required />
-          <FIELD label="Workspace ID" name="supergrow_workspace_id" value={form.supergrow_workspace_id} onChange={set} required hint="Found in your Supergrow workspace URL" />
-          <FIELD label="API key" name="supergrow_api_key" value={form.supergrow_api_key} onChange={set} required type="password" hint="From Supergrow MCP settings page" />
+
+          {/* API key + fetch button */}
+          <div style={{ marginBottom:14 }}>
+            <label style={{ display:'block', fontSize:12, color:'#555', marginBottom:5, fontWeight:500 }}>
+              API key <span style={{ color:'#E24B4A' }}>*</span>
+            </label>
+            <div style={{ display:'flex', gap:8 }}>
+              <input
+                type="password" name="supergrow_api_key" value={form.supergrow_api_key} onChange={set} required
+                style={{ flex:1, padding:'8px 10px', border:'0.5px solid #d0d0cc', borderRadius:7, outline:'none', background:'#fff', color:'#1a1a1a' }}
+              />
+              <button
+                type="button" onClick={fetchWorkspaces} disabled={fetchingWs}
+                style={{ padding:'8px 14px', background:'#1D9E75', color:'#fff', border:'none', borderRadius:7, fontWeight:500, fontSize:12, whiteSpace:'nowrap', opacity: fetchingWs ? 0.7 : 1, cursor: fetchingWs ? 'wait' : 'pointer' }}
+              >
+                {fetchingWs ? 'Loading...' : '↓ Fetch workspaces'}
+              </button>
+            </div>
+            <div style={{ fontSize:11, color:'#999', marginTop:4 }}>From Supergrow MCP settings page</div>
+          </div>
+
+          {wsError && (
+            <div style={{ fontSize:12, color:'#E24B4A', background:'#FCEBEB', padding:'7px 10px', borderRadius:6, marginBottom:10 }}>
+              {wsError}
+            </div>
+          )}
+
+          {/* Workspace dropdown — shown after fetch */}
+          {workspaces.length > 0 && (
+            <div style={{ marginBottom:14 }}>
+              <label style={{ display:'block', fontSize:12, color:'#555', marginBottom:5, fontWeight:500 }}>
+                Select workspace <span style={{ color:'#E24B4A' }}>*</span>
+              </label>
+              <select
+                onChange={handleWorkspaceSelect}
+                defaultValue=""
+                style={{ width:'100%', padding:'8px 10px', border: wsSelected ? '0.5px solid #1D9E75' : '0.5px solid #d0d0cc', borderRadius:7, outline:'none', background:'#fff', color:'#1a1a1a' }}
+              >
+                <option value="" disabled>— choose a workspace —</option>
+                {workspaces.map(ws => (
+                  <option key={ws.id || ws.workspace_id} value={ws.id || ws.workspace_id}>
+                    {ws.name || ws.workspace_name}{ws.language ? ` (${ws.language})` : ''}
+                  </option>
+                ))}
+              </select>
+              {wsSelected && (
+                <div style={{ fontSize:11, color:'#1D9E75', marginTop:4 }}>
+                  ✓ Workspace selected — ID and name auto-filled below
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Manual fallback fields — pre-filled from dropdown selection */}
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 16px' }}>
+            <FIELD
+              label="Workspace name"
+              name="supergrow_workspace_name"
+              value={form.supergrow_workspace_name}
+              onChange={set}
+              required
+              hint={workspaces.length === 0 ? 'Or enter manually' : ''}
+            />
+            <FIELD
+              label="Workspace ID"
+              name="supergrow_workspace_id"
+              value={form.supergrow_workspace_id}
+              onChange={set}
+              required
+              hint={workspaces.length === 0 ? 'Found in Supergrow workspace URL' : ''}
+            />
+          </div>
 
           <div style={{ fontSize:11, fontWeight:500, color:'#1D9E75', textTransform:'uppercase', letterSpacing:'0.06em', marginBottom:12, marginTop:8 }}>Deployment settings</div>
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 16px' }}>
