@@ -8,6 +8,19 @@ import { listWorkspaces } from '../services/supergrow.js';
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
+// TEMP TEST ENDPOINT — remove after confirming Supergrow MCP works
+router.get('/test-supergrow', requireAuth, async (req, res) => {
+  const mcpUrl = process.env.SUPERGROW_MCP_URL;
+  if (!mcpUrl) return res.json({ error: 'SUPERGROW_MCP_URL not set' });
+  const masterApiKey = new URL(mcpUrl).searchParams.get('api_key');
+  try {
+    const workspaces = await listWorkspaces(masterApiKey);
+    res.json({ ok: true, count: workspaces.length, workspaces });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
 // ─── Improvement 1: fetch workspaces for a given API key ─────────────────────
 // NOTE: this route MUST come before /:id to avoid "workspaces" matching as an id
 
