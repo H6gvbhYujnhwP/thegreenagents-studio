@@ -1,8 +1,10 @@
 import 'dotenv/config';
 import express from 'express';
 import session from 'express-session';
+import BetterSqlite3Store from 'better-sqlite3-session-store';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import db from './db.js';
 import authRoutes from './routes/auth.js';
 import clientRoutes from './routes/clients.js';
 import campaignRoutes from './routes/campaigns.js';
@@ -11,16 +13,19 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+const SqliteStore = BetterSqlite3Store(session);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use(session({
+  store: new SqliteStore({ client: db }),
   secret: process.env.SESSION_SECRET || 'fallback-secret',
   resave: false,
   saveUninitialized: false,
   cookie: {
     secure: process.env.NODE_ENV === 'production',
-    maxAge: 24 * 60 * 60 * 1000
+    maxAge: 7 * 24 * 60 * 60 * 1000  // 7 days — survives redeploys
   }
 }));
 
