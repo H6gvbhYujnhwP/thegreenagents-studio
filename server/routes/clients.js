@@ -30,15 +30,22 @@ router.get('/workspaces', requireAuth, async (req, res) => {
 
 router.post('/sync', requireAuth, async (req, res) => {
   const mcpUrl = process.env.SUPERGROW_MCP_URL;
-  if (!mcpUrl) return res.json({ added: 0, skipped: 0 });
+  if (!mcpUrl) {
+    console.warn('[sync] SUPERGROW_MCP_URL is not set — skipping sync');
+    return res.json({ added: 0, skipped: 0 });
+  }
 
   let masterApiKey;
   try {
     masterApiKey = new URL(mcpUrl).searchParams.get('api_key');
   } catch (_) {
+    console.warn('[sync] SUPERGROW_MCP_URL is not a valid URL — skipping sync');
     return res.json({ added: 0, skipped: 0 });
   }
-  if (!masterApiKey) return res.json({ added: 0, skipped: 0 });
+  if (!masterApiKey) {
+    console.warn('[sync] No api_key param found in SUPERGROW_MCP_URL — skipping sync');
+    return res.json({ added: 0, skipped: 0 });
+  }
 
   try {
     const workspaces = await listWorkspaces(masterApiKey);
