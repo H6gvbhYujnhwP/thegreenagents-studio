@@ -9,7 +9,6 @@ import {
   queuePost,
   createDraft,
   getContentDna,
-  getCompanyPageId,
   scorePost
 } from '../services/supergrow.js';
 
@@ -93,23 +92,6 @@ async function runCampaign(campaignId, client) {
     } catch (dnaErr) {
       console.error('Content DNA fetch failed (non-fatal):', dnaErr.message);
       sendSSE(campaignId, { type: 'log', message: `Content DNA unavailable (${dnaErr.message}) — proceeding.` });
-    }
-
-    // ── Improvement 3: pre-fetch company page ID if needed ───────────────────
-    let companyPageId = null;
-    if (client.posting_identity === 'company') {
-      try {
-        sendSSE(campaignId, { type: 'log', message: 'Fetching company page ID from Supergrow...' });
-        companyPageId = await getCompanyPageId(client.supergrow_workspace_id, client.supergrow_api_key);
-        if (companyPageId) {
-          sendSSE(campaignId, { type: 'log', message: `Company page found: ${companyPageId}` });
-        } else {
-          sendSSE(campaignId, { type: 'log', message: 'No company page connected — will post to personal profile instead.' });
-        }
-      } catch (pgErr) {
-        console.error('Company page fetch failed (non-fatal):', pgErr.message);
-        sendSSE(campaignId, { type: 'log', message: `Could not fetch company page (${pgErr.message}) — will post to personal profile.` });
-      }
     }
 
     // ── Stage 1: Generate posts via Claude ───────────────────────────────────
@@ -239,8 +221,7 @@ async function runCampaign(campaignId, client) {
           workspaceId: client.supergrow_workspace_id,
           apiKey: client.supergrow_api_key,
           postText: post.linkedin_post_text,
-          imageUrls: post.image_url ? [post.image_url] : [],
-          companyPageId  // null for personal, populated for company
+          imageUrls: post.image_url ? [post.image_url] : []
         });
         results.push({ postId: post.id, status: 'success', result });
         deployed++;
@@ -253,8 +234,7 @@ async function runCampaign(campaignId, client) {
             workspaceId: client.supergrow_workspace_id,
             apiKey: client.supergrow_api_key,
             postText: post.linkedin_post_text,
-            imageUrls: post.image_url ? [post.image_url] : [],
-            companyPageId
+            imageUrls: post.image_url ? [post.image_url] : []
           });
           results.push({ postId: post.id, status: 'success_retry', result: retry });
           deployed++;
@@ -270,7 +250,7 @@ async function runCampaign(campaignId, client) {
       await sleep(500);
     }
 
-    const files = buildOutputFiles(client, generated, enrichedPosts, results, companyPageId);
+    const files = buildOutputFiles(client, generated, enrichedPosts, results);
 
     updateCampaign(campaignId, {
       status: 'completed',
@@ -291,18 +271,13 @@ async function runCampaign(campaignId, client) {
   }
 }
 
-function buildOutputFiles(client, generated, posts, results, companyPageId) {
-  const companyNote = companyPageId
-    ? `\n**Company Page ID:** ${companyPageId}`
-    : '';
-
+function buildOutputFiles(client, generated, posts, results) {
   const clientProfile = `# Client Profile: ${client.name}
 
 **Brand:** ${client.brand}
 **Website:** ${client.website}
 **Timezone:** ${client.timezone}
 **Posting Cadence:** ${client.cadence}
-**Posting Identity:** ${client.posting_identity}${companyNote}
 
 ## Operating Profile
 ${JSON.stringify(generated.client_profile, null, 2)}
@@ -349,7 +324,6 @@ Campaign Run: ${new Date().toISOString()}
 Total Posts: ${posts.length}
 Successfully Deployed: ${successCount}
 Failed: ${failedResults.length}
-Company Page: ${companyPageId || 'Personal profile'}
 
 ## Quality Gate Summary
 Posts scored below 7 and auto-fixed: ${posts.filter(p => p.quality_score_fixed).length}
@@ -366,7 +340,6 @@ Run completed: ${new Date().toISOString()}
 Client: ${client.name} (${client.brand})
 Workspace: ${client.supergrow_workspace_name} (${client.supergrow_workspace_id})
 Mode: ${client.approval_mode === 'draft' ? 'Draft only' : 'Queue post'}
-Posting identity: ${client.posting_identity}${companyPageId ? ` (page: ${companyPageId})` : ''}
 Posts generated: ${posts.length}
 Images generated: ${posts.filter(p => p.image_url).length}
 Posts deployed: ${successCount}
@@ -378,7 +351,6 @@ Auto-fixed (quality gate): ${posts.filter(p => p.quality_score_fixed).length}
     client: client.name,
     workspace_id: client.supergrow_workspace_id,
     mode: client.approval_mode,
-    company_page_id: companyPageId || null,
     quality_gate: {
       total: posts.length,
       scored: posts.filter(p => p.quality_score != null).length,
