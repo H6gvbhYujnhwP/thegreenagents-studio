@@ -1,5 +1,5 @@
 # THEGREENAGENTS STUDIO — COMPLETE BLUEPRINT
-**Last updated: April 2026 — Session 1 complete**
+**Last updated: April 2026 — Session 2 complete**
 > This document is the single source of truth for any new session working on this codebase. Read this entirely before touching any code.
 
 ---
@@ -45,7 +45,7 @@ The app generates LinkedIn posts using GPT-4o (with the LinkedIn New Client Mast
 | Web framework | Express.js | API + static file serving |
 | Database | SQLite via `better-sqlite3` | Client and campaign storage |
 | Frontend | React 18 + Vite | UI |
-| Auth | DISABLED for testing (passthrough) | See auth section below |
+| Auth | RESTORED — cookie-session with STUDIO_PASSWORD | Fully working |
 | AI — posts | OpenAI GPT-4o (`openai` package) | LinkedIn post generation |
 | AI — images | Google Gemini `gemini-2.5-flash-image` (`@google/genai` package) | Nano Banana image generation |
 | Image storage | Cloudflare R2 via `@aws-sdk/client-s3` | Public image hosting for Supergrow |
@@ -162,27 +162,11 @@ completed_at TEXT
 
 ---
 
-## AUTH STATUS — TEMPORARILY DISABLED
+## AUTH STATUS — RESTORED ✅
 
-Auth is currently disabled for testing. Two files to restore it:
-
-**server/middleware/auth.js** — uncomment the real check:
-```js
-// RESTORE: comment out the passthrough, uncomment the real check
-export function requireAuth(req, res, next) {
-  // return next(); // REMOVE THIS LINE
-  if (req.session && req.session.authenticated) return next();
-  res.status(401).json({ error: 'Unauthorised' });
-}
-```
-
-**src/App.jsx** — restore the full auth flow:
-```js
-// RESTORE: bring back Login component and auth check
-// git show HEAD~5:src/App.jsx  (or check git history)
-```
-
-Also fix in Render: check STUDIO_PASSWORD has no trailing space — paste don't type.
+Auth is active. `server/middleware/auth.js` enforces `req.session.authenticated`.
+`src/App.jsx` shows Login screen → Dashboard after successful login.
+Password is `STUDIO_PASSWORD` env var in Render — verify no trailing space if login fails.
 
 ---
 
@@ -422,31 +406,28 @@ Other available tools (not yet used):
 
 ## WHAT NEEDS BUILDING NEXT (priority order)
 
-### 1. Individual post/image regeneration on review grid (HIGH PRIORITY)
-Currently if you dislike a post or image, you must restart the entire campaign.
-Need per-card buttons:
-- **🔄 Regenerate image** — calls Nano Banana for just that post, replaces card image
-- **✏️ Edit text** — inline text editor on the card
-- **🔄 Regenerate post** — sends topic/angle back to GPT-4o, replaces post text
-New endpoints needed:
-- `POST /api/campaigns/:id/regenerate-image/:postIndex`
-- `POST /api/campaigns/:id/regenerate-post/:postIndex`
-- `PATCH /api/campaigns/:id/edit-post/:postIndex`
-All update only the single post in `campaigns.posts_json`.
+### ✅ 1. Individual post/image regeneration — DONE (Session 2)
+Per-card buttons on the review grid:
+- 🔄 New image — calls Nano Banana for just that post, replaces card image
+- ✏️ Edit text — inline textarea directly on the card with Save/Cancel
+- 🔄 Rewrite post — GPT-4o rewrites just that post, SSE streams result back
+SSE event type `post_updated` carries `{ postIndex, post }` — card updates live.
 
-### 2. Persist review grid after deploy
-After sending to Supergrow, completed campaigns should still be viewable.
-Each post card should show a **"View in Supergrow →"** link using the `app_url`
-returned by `create_post` (currently only saved in execution_results.json).
-Store `app_url` per post inside `posts_json` during deploy.
+### ✅ 2. Persist review grid after deploy — DONE (Session 2)
+`deployToDrafts` now parses Supergrow `create_post` response and saves
+`supergrow_post_id` and `supergrow_app_url` per post into `posts_json`.
+Post cards in the done state show a green "View in Supergrow →" link.
 
-### 3. Campaign history clickable
+### ✅ 3. Re-enable auth — DONE (Session 2)
+`server/middleware/auth.js` restored, `src/App.jsx` restored with Login flow.
+
+### 4. Campaign history clickable
 Campaign history rows should reopen the full post grid view.
 Currently only shows status and download files.
-
-### 4. Re-enable auth
-Restore `server/middleware/auth.js` and `src/App.jsx`.
-Fix STUDIO_PASSWORD in Render (re-paste, check no trailing space).
+Implementation: clicking a campaign row in `ClientDetail.jsx` should open
+a modal or inline expansion showing `CampaignProgress` for that campaign ID.
+The campaign will already be in `awaiting_approval` or `done` state so
+the review grid renders immediately — no SSE needed for old campaigns.
 
 ### 5. Scale to 96 posts
 `POSTS_PER_CAMPAIGN` in openai.js = 96
@@ -454,10 +435,8 @@ Will need batching: 8 calls × 12 posts each (GPT-4o 16k token limit).
 Gemini free tier: 500 images/day at 10 RPM — 96 images = ~10 min.
 
 ### 6. Scheduling
-Manus used `queue_post` not `schedule_post` (schedule_post returned "Invalid time slot").
 `queue_post` auto-assigns next available slot from workspace calendar.
 For now, posts go as drafts and are scheduled manually in Supergrow.
-Future: add per-client scheduling config and use queue_post after approval.
 
 ---
 
@@ -534,7 +513,9 @@ Per-client API key should be set manually after auto-creation for real campaigns
 | GET | `/api/campaigns/progress/:id` | Yes | SSE stream for live progress |
 | POST | `/api/campaigns/:id/deploy` | Yes | Deploy posts to Supergrow as drafts |
 | GET | `/api/campaigns/client/:clientId` | Yes | List campaigns for a client |
-| GET | `/api/campaigns/:id` | Yes | Get single campaign |
+| POST | `/api/campaigns/:id/regenerate-image/:postIndex` | Yes | Regenerate image for one post (async, SSE response) |
+| POST | `/api/campaigns/:id/regenerate-post/:postIndex` | Yes | Rewrite post text via GPT-4o (async, SSE response) |
+| PATCH | `/api/campaigns/:id/edit-post/:postIndex` | Yes | Save inline text edit for one post |
 
 ---
 

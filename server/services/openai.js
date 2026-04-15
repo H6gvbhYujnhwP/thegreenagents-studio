@@ -197,6 +197,74 @@ Use exactly this structure:
   return result;
 }
 
+// ─── Regenerate a single post (operator requested rewrite) ───────────────────
+
+/**
+ * Rewrites one post from scratch using the full LinkedIn Master prompt.
+ * Keeps topic/angle/format/pillar but generates entirely new text + image_prompt.
+ * Used when the operator clicks "Regenerate Post" on a card.
+ */
+export async function regenerateSinglePost(post, client, contentDna = null) {
+  const dnaNote = contentDna
+    ? `\nContent DNA (match this writing style exactly):\n${contentDna}\n`
+    : '';
+
+  const prompt = `You are rewriting a single LinkedIn post for a client. The operator was not happy with the original text and has requested a fresh rewrite.
+
+CLIENT:
+Name: ${client.name}
+Brand: ${client.brand}
+${dnaNote}
+CLIENT RAG SUMMARY:
+${(client.rag_content || '').slice(0, 3000)}
+
+POST BRIEF (keep the same strategic intent — rewrite the text):
+Topic: ${post.topic}
+Angle: ${post.angle}
+Buyer segment: ${post.buyer_segment}
+CTA type: ${post.cta_type}
+Content pillar: ${post.content_pillar}
+Format: ${post.format || 'Text Post'}
+Suggested day: ${post.suggested_day || 'Any'}
+Suggested time: ${post.suggested_time || 'Any'}
+
+RULES:
+- Minimum 1,200 characters in the post body
+- First 2 lines = scroll-stopping hook, under 140 chars combined
+- Short paragraphs, generous white space
+- End with a specific open-ended question — never "Thoughts?"
+- No external URLs in the post body
+- No banned words: delve, landscape, testament, crucial, unlock, game-changer
+- Make it feel like a real human expert typed it
+
+Respond ONLY with valid JSON, no preamble, no markdown fences:
+{
+  "linkedin_post_text": "...",
+  "image_prompt": "A professional LinkedIn image for: [describe specific visual]"
+}`;
+
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    max_completion_tokens: 2500,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: LINKEDIN_MASTER_SYSTEM_PROMPT },
+      { role: 'user', content: prompt }
+    ]
+  });
+
+  const text = completion.choices[0].message.content;
+  let result;
+  try {
+    result = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`GPT-4o did not return valid JSON for single post: ${text.slice(0, 200)}`);
+  }
+
+  if (!result.linkedin_post_text) throw new Error('GPT-4o returned no post text');
+  return result;
+}
+
 // ─── Rewrite a post that scored below 70/100 ─────────────────────────────────
 
 /**
