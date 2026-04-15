@@ -2,10 +2,10 @@ import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
-import { generatePosts, fixPost, getLinkedInAlgorithmContext } from '../services/openai.js';
+import { generatePosts, getLinkedInAlgorithmContext } from '../services/openai.js';
 import { generateImage, sleep } from '../services/gemini.js';
 import { uploadImageToR2 } from '../services/r2.js';
-import { createDraft, getContentDna, scorePost } from '../services/supergrow.js';
+import { createDraft, getContentDna } from '../services/supergrow.js';
 
 const router = Router();
 const sseClients = new Map();
@@ -151,54 +151,16 @@ async function runCampaign(campaignId, client) {
       total_posts: posts.length,
       posts_json: JSON.stringify(posts)
     });
-    sendSSE(campaignId, { type: 'progress', stage: 'scoring_posts', posts_generated: posts.length });
+    sendSSE(campaignId, { type: 'progress', stage: 'scoring_posts', progress: 25, posts_generated: posts.length });
 
-    // ── Stage 2: Score & auto-fix (quality gate: 70/100) ─────────────────────
-    sendSSE(campaignId, { type: 'log', message: `Scoring ${posts.length} posts via Supergrow (quality gate: 70/100)...` });
-    const scoredPosts = [];
-    let fixedCount = 0;
-
-    for (let i = 0; i < posts.length; i++) {
-      const post = { ...posts[i] };
-      try {
-        const { score, feedback, suggestions } = await scorePost(
-          client.supergrow_workspace_id,
-          post.linkedin_post_text,
-          client.supergrow_api_key
-        );
-        post.quality_score = score;
-
-        if (score !== null && score < 70) {
-          sendSSE(campaignId, { type: 'log', message: `Post ${i + 1} scored ${score}/100 — auto-fixing...` });
-          const improved = await fixPost(post, feedback, suggestions, contentDna);
-          post.linkedin_post_text = improved;
-          post.quality_score_fixed = true;
-          try {
-            const reScore = await scorePost(client.supergrow_workspace_id, improved, client.supergrow_api_key);
-            post.quality_score = reScore.score;
-            sendSSE(campaignId, { type: 'log', message: `Post ${i + 1} re-scored: ${reScore.score ?? 'n/a'}/100` });
-          } catch (_) {}
-          fixedCount++;
-        } else if (score !== null && (i + 1) % 4 === 0) {
-          sendSSE(campaignId, { type: 'log', message: `Posts 1–${i + 1} scored ✓` });
-        }
-      } catch (err) {
-        console.error(`Score failed for post ${i + 1} (non-fatal):`, err.message);
-        post.quality_score = null;
-      }
-      scoredPosts.push(post);
-      updateCampaign(campaignId, {
-        progress: 25 + Math.round((i + 1) / posts.length * 10),
-        posts_json: JSON.stringify(scoredPosts)
-      });
-      await sleep(300);
-    }
-
-    sendSSE(campaignId, { type: 'log', message: `Quality gate complete. ${fixedCount} post(s) auto-fixed.` });
+    // ── Stage 2: Scoring skipped — score_post MCP consistently times out.
+    // Posts proceed directly to image generation at full quality from GPT-4o.
+    const scoredPosts = posts;
+    sendSSE(campaignId, { type: 'log', message: `✓ ${posts.length} posts ready — skipping Supergrow score (MCP timeout). Proceeding to images.` });
 
     // ── Stage 3: Generate images ───────────────────────────────────────────────
     updateCampaign(campaignId, { stage: 'generating_images', progress: 35 });
-    sendSSE(campaignId, { type: 'progress', stage: 'generating_images', posts_generated: scoredPosts.length });
+    sendSSE(campaignId, { type: 'progress', stage: 'generating_images', progress: 35, posts_generated: scoredPosts.length });
 
     const enrichedPosts = [];
     const RATE_LIMIT_DELAY = 7000;
