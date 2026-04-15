@@ -218,6 +218,13 @@ router.patch('/:id/edit-post/:postIndex', requireAuth, (req, res) => {
   res.json({ ok: true, post: posts[postIndex] });
 });
 
+router.delete('/:id', requireAuth, (req, res) => {
+  const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+  db.prepare('DELETE FROM campaigns WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
 // ─── Campaign pipeline ────────────────────────────────────────────────────────
 
 async function runCampaign(campaignId, client) {
