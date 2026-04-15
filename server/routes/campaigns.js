@@ -169,7 +169,11 @@ async function runCampaign(campaignId, client) {
       const post = scoredPosts[i];
       try {
         sendSSE(campaignId, { type: 'log', message: `Generating image ${i + 1}/${scoredPosts.length}...` });
-        const imageData = await generateImage(post.image_prompt || `Professional LinkedIn image for: ${post.topic}`);
+        const imageData = await generateImage(
+          post.image_prompt || `Professional LinkedIn image for: ${post.topic}`,
+          client,
+          post
+        );
         const imageUrl = await uploadImageToR2(imageData.data, imageData.mimeType, client.id, post.id);
         enrichedPosts.push({ ...post, image_url: imageUrl });
         sendSSE(campaignId, { type: 'log', message: `✓ Image ${i + 1} generated and uploaded.` });
