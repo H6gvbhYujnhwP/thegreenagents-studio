@@ -1,39 +1,157 @@
+/**
+ * supergrow.js — Supergrow MCP service
+ *
+ * AUTH: API key is passed as a URL query param — no username/password session
+ * required. URL: https://mcp.supergrow.ai/mcp?api_key=YOUR_KEY
+ * Each client has their own key stored in clients.supergrow_api_key.
+ *
+ * TRANSPORT: Supergrow's server may use either:
+ *   - StreamableHTTPClientTransport (modern, POST+GET SSE)
+ *   - SSEClientTransport (legacy, GET /sse + POST /messages)
+ * This module tries Streamable HTTP first, falls back to SSE automatically,
+ * and caches the working transport per API key to avoid re-probing on every call.
+ *
+ * SESSION ISOLATION: A fresh Client+Transport is created per call — the SDK
+ * does not support reuse across concurrent async calls reliably.
+ */
+
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 
-// ─── helpers ───────────────────────────────────────────────────────────────
+// ─── Transport type cache ─────────────────────────────────────────────────────
+// Maps apiKey → 'streamable' | 'sse'
+// Avoids re-probing on every call once we know which transport works.
+const transportCache = new Map();
 
-function makeMcpClient(apiKey) {
-  const mcpUrl = `https://mcp.supergrow.ai/mcp?api_key=${apiKey}`;
+// ─── Core connection helpers ──────────────────────────────────────────────────
+
+function buildMcpUrl(apiKey) {
+  return `https://mcp.supergrow.ai/mcp?api_key=${apiKey}`;
+}
+
+/** Reject a promise after ms milliseconds with a clear label. */
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`Supergrow MCP timeout (${ms}ms): ${label}`)),
+      ms
+    );
+    promise.then(
+      v => { clearTimeout(timer); resolve(v); },
+      e => { clearTimeout(timer); reject(e); }
+    );
+  });
+}
+
+/** Create and connect a fresh MCP client using the specified transport type. */
+async function createAndConnect(url, type) {
   const client = new Client(
     { name: 'greenagents-studio', version: '1.0.0' },
     { capabilities: {} }
   );
-  const transport = new StreamableHTTPClientTransport(new URL(mcpUrl));
+  const transport = type === 'streamable'
+    ? new StreamableHTTPClientTransport(new URL(url))
+    : new SSEClientTransport(new URL(url));
+
+  await withTimeout(client.connect(transport), 15000, 'connect');
   return { client, transport };
 }
 
-/** Pull plain text out of an MCP tool result */
-function extractText(result) {
-  if (!result || !Array.isArray(result.content)) return '';
-  const block = result.content.find(b => b.type === 'text');
-  return block ? block.text : '';
+/**
+ * Connect, trying Streamable HTTP first then falling back to legacy SSE.
+ * Caches the successful transport type per API key.
+ */
+async function connectClient(apiKey) {
+  const url = buildMcpUrl(apiKey);
+  const cached = transportCache.get(apiKey);
+
+  if (cached) {
+    return createAndConnect(url, cached);
+  }
+
+  try {
+    const conn = await createAndConnect(url, 'streamable');
+    transportCache.set(apiKey, 'streamable');
+    return conn;
+  } catch (err) {
+    console.warn(`[supergrow] StreamableHTTP failed (${err.message}) — trying SSE fallback`);
+    const conn = await createAndConnect(url, 'sse');
+    transportCache.set(apiKey, 'sse');
+    return conn;
+  }
 }
 
-/** Try to parse JSON from MCP text; fall back to raw string */
+/**
+ * Connect, call one MCP tool, disconnect.
+ * Clears transport cache on any failure so next call re-probes cleanly.
+ */
+async function callSupergrowTool(apiKey, toolName, toolArgs = {}) {
+  let client;
+  try {
+    const conn = await connectClient(apiKey);
+    client = conn.client;
+
+    const result = await withTimeout(
+      client.callTool({ name: toolName, arguments: toolArgs }),
+      20000,
+      toolName
+    );
+    return result;
+
+  } catch (err) {
+    // Clear cache so the next call re-probes — avoids getting stuck after transient failures
+    transportCache.delete(apiKey);
+
+    if (err.message?.includes('401') || err.message?.includes('Unauthorized')) {
+      throw new Error(`Supergrow auth failed — check the API key for this client. (${err.message})`);
+    }
+    throw err;
+
+  } finally {
+    try { await client?.close(); } catch (_) {}
+  }
+}
+
+// ─── Response parsing helpers ─────────────────────────────────────────────────
+
+/** Pull plain text out of an MCP tool result (handles both string and array content) */
+function extractText(result) {
+  if (!result) return '';
+  if (typeof result.content === 'string') return result.content;
+  if (Array.isArray(result.content)) {
+    const block = result.content.find(b => b.type === 'text');
+    return block?.text ?? '';
+  }
+  return '';
+}
+
+/**
+ * Try to parse JSON from MCP response text.
+ * Strips markdown code fences before parsing. Falls back to raw string.
+ */
 function parseMcpJson(text) {
-  const match = text.match(/(\[[\s\S]*\]|\{[\s\S]*\})/);
-  if (match) {
-    try { return JSON.parse(match[1]); } catch (_) {}
+  if (!text) return null;
+  // Strip ```json ... ``` fences that some MCP servers emit
+  const clean = text.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
+  try {
+    return JSON.parse(clean);
+  } catch (_) {
+    const match = clean.match(/(\[[\s\S]*\]|\{[\s\S]*\})/);
+    if (match) {
+      try { return JSON.parse(match[1]); } catch (_2) {}
+    }
   }
   return text;
 }
 
 /** Extract a numeric score (0-10) from score_post response text */
 function extractScore(text) {
+  if (!text) return null;
   const patterns = [
-    /overall\s+score[:\s]+(\d+(?:\.\d+)?)/i,
+    /"overall_score"\s*:\s*(\d+(?:\.\d+)?)/i,
     /"score"\s*:\s*(\d+(?:\.\d+)?)/i,
+    /overall\s+score[:\s]+(\d+(?:\.\d+)?)/i,
     /score[:\s]+(\d+(?:\.\d+)?)/i,
     /(\d+(?:\.\d+)?)\s*\/\s*10/,
   ];
@@ -41,152 +159,122 @@ function extractScore(text) {
     const m = text.match(p);
     if (m) {
       const n = parseFloat(m[1]);
-      if (!isNaN(n)) return n;
-    }
-  }
-  const nums = text.match(/\b(\d+(?:\.\d+)?)\b/g);
-  if (nums) {
-    for (const n of nums) {
-      const v = parseFloat(n);
-      if (v >= 0 && v <= 10) return v;
+      if (!isNaN(n) && n >= 0 && n <= 10) return n;
     }
   }
   return null;
 }
 
-// ─── Improvement 1: list_workspaces ────────────────────────────────────────
+// ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Fetch all workspaces for a given Supergrow API key.
+ * List all workspaces for a given Supergrow API key.
  * Returns an array of { id, name, language, ... } objects.
  */
 export async function listWorkspaces(apiKey) {
-  const { client, transport } = makeMcpClient(apiKey);
-  await client.connect(transport);
-  try {
-    const result = await client.callTool({ name: 'list_workspaces', arguments: {} });
-    const text = extractText(result);
-    const parsed = parseMcpJson(text);
-    if (Array.isArray(parsed)) return parsed;
-    if (parsed && Array.isArray(parsed.workspaces)) return parsed.workspaces;
-    if (parsed && Array.isArray(parsed.data)) return parsed.data;
-    return [];
-  } finally {
-    await client.close();
-  }
+  const result = await callSupergrowTool(apiKey, 'list_workspaces', {});
+  const text = extractText(result);
+  const parsed = parseMcpJson(text);
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed?.workspaces && Array.isArray(parsed.workspaces)) return parsed.workspaces;
+  if (parsed?.data && Array.isArray(parsed.data)) return parsed.data;
+  console.warn('[supergrow] list_workspaces: unexpected response shape', text?.slice(0, 200));
+  return [];
 }
-
-// ─── Improvement 2: get_content_dna ────────────────────────────────────────
 
 /**
  * Fetch the Content DNA for a workspace.
  * Returns the raw text/JSON string — passed verbatim into the Claude prompt.
  */
 export async function getContentDna(workspaceId, apiKey) {
-  const { client, transport } = makeMcpClient(apiKey);
-  await client.connect(transport);
-  try {
-    const result = await client.callTool({
-      name: 'get_content_dna',
-      arguments: { workspace_id: workspaceId }
-    });
-    return extractText(result);
-  } finally {
-    await client.close();
-  }
+  const result = await callSupergrowTool(apiKey, 'get_content_dna', {
+    workspace_id: workspaceId
+  });
+  return extractText(result);
 }
-
-// ─── Improvement 3: get_company_pages ──────────────────────────────────────
 
 /**
  * Fetch connected LinkedIn company pages for a workspace.
  * Returns the first page's linked_in_company_page_id, or null if none found.
  */
 export async function getCompanyPageId(workspaceId, apiKey) {
-  const { client, transport } = makeMcpClient(apiKey);
-  await client.connect(transport);
-  try {
-    const result = await client.callTool({
-      name: 'get_company_pages',
-      arguments: { workspace_id: workspaceId }
-    });
-    const text = extractText(result);
-    const parsed = parseMcpJson(text);
+  const result = await callSupergrowTool(apiKey, 'get_company_pages', {
+    workspace_id: workspaceId
+  });
+  const text = extractText(result);
+  const parsed = parseMcpJson(text);
 
-    let pages = [];
-    if (Array.isArray(parsed)) pages = parsed;
-    else if (parsed && Array.isArray(parsed.pages)) pages = parsed.pages;
-    else if (parsed && Array.isArray(parsed.data)) pages = parsed.data;
-    else if (parsed && Array.isArray(parsed.company_pages)) pages = parsed.company_pages;
+  let pages = [];
+  if (Array.isArray(parsed)) pages = parsed;
+  else if (parsed?.pages && Array.isArray(parsed.pages)) pages = parsed.pages;
+  else if (parsed?.data && Array.isArray(parsed.data)) pages = parsed.data;
+  else if (parsed?.company_pages && Array.isArray(parsed.company_pages)) pages = parsed.company_pages;
 
-    if (pages.length === 0) return null;
-
-    const page = pages[0];
-    return page.linked_in_company_page_id
-      || page.linkedInCompanyPageId
-      || page.company_page_id
-      || page.id
-      || null;
-  } finally {
-    await client.close();
-  }
+  if (!pages.length) return null;
+  const page = pages[0];
+  return (
+    page.linked_in_company_page_id ??
+    page.linkedInCompanyPageId ??
+    page.company_page_id ??
+    page.id ??
+    null
+  );
 }
-
-// ─── Improvement 4: score_post ─────────────────────────────────────────────
 
 /**
  * Score a post via Supergrow's score_post tool.
  * Returns { score: number|null, feedback: string, raw: string }
  */
 export async function scorePost(workspaceId, postText, apiKey) {
-  const { client, transport } = makeMcpClient(apiKey);
-  await client.connect(transport);
-  try {
-    const result = await client.callTool({
-      name: 'score_post',
-      arguments: {
-        workspace_id: workspaceId,
-        text: postText
-      }
-    });
-    const raw = extractText(result);
-    const score = extractScore(raw);
-    return { score, feedback: raw, raw };
-  } finally {
-    await client.close();
-  }
+  const result = await callSupergrowTool(apiKey, 'score_post', {
+    workspace_id: workspaceId,
+    text: postText
+  });
+  const raw = extractText(result);
+  const score = extractScore(raw);
+  return { score, feedback: raw, raw };
 }
 
-// ─── Post-publishing functions (updated with optional companyPageId) ────────
-
+/**
+ * Queue a post for LinkedIn publishing (approval_mode = "auto").
+ * Required: workspaceId, apiKey, postText
+ * Optional: imageUrls[], companyPageId
+ */
 export async function queuePost({ workspaceId, apiKey, postText, imageUrls = [], companyPageId = null }) {
-  const { client, transport } = makeMcpClient(apiKey);
-  await client.connect(transport);
-
   const args = {
     workspace_id: workspaceId,
     content: postText,
     ...(imageUrls.length > 0 && { image_urls: imageUrls }),
     ...(companyPageId && { linked_in_company_page_id: companyPageId })
   };
-
-  const result = await client.callTool({ name: 'queue_post', arguments: args });
-  await client.close();
-  return result;
+  return callSupergrowTool(apiKey, 'queue_post', args);
 }
 
+/**
+ * Create a draft post without publishing (approval_mode = "draft").
+ * Same arguments as queuePost.
+ */
 export async function createDraft({ workspaceId, apiKey, postText, imageUrls = [], companyPageId = null }) {
-  const { client, transport } = makeMcpClient(apiKey);
-  await client.connect(transport);
-
   const args = {
     workspace_id: workspaceId,
     content: postText,
     ...(imageUrls.length > 0 && { image_urls: imageUrls }),
     ...(companyPageId && { linked_in_company_page_id: companyPageId })
   };
+  return callSupergrowTool(apiKey, 'create_post', args);
+}
 
-  const result = await client.callTool({ name: 'create_post', arguments: args });
-  await client.close();
-  return result;
+/**
+ * List all tools exposed by the Supergrow MCP server for this API key.
+ * Call this once in development to see real tool names and argument schemas.
+ * Usage: node -e "import('./server/services/supergrow.js').then(m => m.listTools('YOUR_KEY').then(console.log))"
+ */
+export async function listTools(apiKey) {
+  const { client } = await connectClient(apiKey);
+  try {
+    const result = await withTimeout(client.listTools(), 15000, 'listTools');
+    return result.tools;
+  } finally {
+    try { await client.close(); } catch (_) {}
+  }
 }
