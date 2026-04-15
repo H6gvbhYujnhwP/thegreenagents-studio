@@ -179,26 +179,49 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
 
 function CampaignRow({ campaign, onView }) {
   const STATUS = {
-    completed: { label:'Deployed', bg:'#E1F5EE', color:'#085041' },
-    running:   { label:'Running', bg:'#FAEEDA', color:'#633806' },
-    failed:    { label:'Failed', bg:'#FCEBEB', color:'#501313' },
-    pending:   { label:'Queued', bg:'#E6F1FB', color:'#0C447C' }
+    completed:         { label: 'Deployed',       bg: '#E1F5EE', color: '#085041' },
+    running:           { label: 'Running',         bg: '#FAEEDA', color: '#633806' },
+    awaiting_approval: { label: 'Ready to review', bg: '#FFF3CD', color: '#7a4a00' },
+    failed:            { label: 'Failed',          bg: '#FCEBEB', color: '#501313' },
+    pending:           { label: 'Queued',          bg: '#E6F1FB', color: '#0C447C' }
   };
-  const cfg = STATUS[campaign.status] || STATUS.pending;
-  const date = new Date(campaign.created_at).toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
+  const cfg  = STATUS[campaign.status] || STATUS.pending;
+  const date = new Date(campaign.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+
+  const viewLabel =
+    campaign.status === 'running'           ? 'View progress →'  :
+    campaign.status === 'awaiting_approval' ? 'Review posts →'   :
+    campaign.status === 'completed'         ? 'View results →'   :
+    campaign.status === 'failed'            ? 'View error →'     : null;
+
+  const postCount = campaign.total_posts || campaign.posts_generated || 0;
 
   return (
-    <div style={{ background:'#fff', border:'0.5px solid #e0e0dc', borderRadius:8, padding:'12px 16px', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
-      <div style={{ display:'flex', alignItems:'center', gap:16 }}>
-        <span style={{ fontSize:11, padding:'3px 9px', borderRadius:20, background: cfg.bg, color: cfg.color }}>{cfg.label}</span>
-        <span style={{ fontSize:13, color:'#888' }}>{date}</span>
-        {campaign.posts_deployed > 0 && <span style={{ fontSize:12, color:'#1a1a1a' }}>{campaign.posts_deployed} posts deployed</span>}
-        {campaign.images_generated > 0 && <span style={{ fontSize:12, color:'#888' }}>{campaign.images_generated} images</span>}
+    <div
+      onClick={viewLabel ? onView : undefined}
+      style={{
+        background: '#fff', border: '0.5px solid #e0e0dc', borderRadius: 8,
+        padding: '12px 16px', display: 'flex', alignItems: 'center',
+        justifyContent: 'space-between',
+        cursor: viewLabel ? 'pointer' : 'default',
+        transition: 'background 0.15s'
+      }}
+      onMouseEnter={e => { if (viewLabel) e.currentTarget.style.background = '#fafaf8'; }}
+      onMouseLeave={e => { e.currentTarget.style.background = '#fff'; }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+        <span style={{ fontSize: 11, padding: '3px 9px', borderRadius: 20, background: cfg.bg, color: cfg.color, fontWeight: 500 }}>
+          {cfg.label}
+        </span>
+        <span style={{ fontSize: 13, color: '#888' }}>{date}</span>
+        {postCount > 0 && <span style={{ fontSize: 12, color: '#1a1a1a' }}>{postCount} posts</span>}
+        {campaign.images_generated > 0 && <span style={{ fontSize: 12, color: '#888' }}>{campaign.images_generated} images</span>}
+        {campaign.posts_deployed > 0 && <span style={{ fontSize: 12, color: '#1D9E75' }}>✓ {campaign.posts_deployed} deployed</span>}
       </div>
-      {(campaign.status === 'running' || campaign.status === 'completed' || campaign.status === 'failed') && (
-        <button onClick={onView} style={{ fontSize:12, color:'#1D9E75', background:'none', border:'none', cursor:'pointer', padding:0 }}>
-          {campaign.status === 'running' ? 'View progress →' : 'View results →'}
-        </button>
+      {viewLabel && (
+        <span style={{ fontSize: 12, color: '#1D9E75', fontWeight: 500 }}>
+          {viewLabel}
+        </span>
       )}
     </div>
   );

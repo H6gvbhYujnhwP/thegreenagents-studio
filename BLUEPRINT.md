@@ -422,13 +422,12 @@ Post cards in the done state show a green "View in Supergrow →" link.
 ### ✅ 3. Re-enable auth — DONE (Session 2)
 `server/middleware/auth.js` restored, `src/App.jsx` restored with Login flow.
 
-### 4. Campaign history clickable
-Campaign history rows should reopen the full post grid view.
-Currently only shows status and download files.
-Implementation: clicking a campaign row in `ClientDetail.jsx` should open
-a modal or inline expansion showing `CampaignProgress` for that campaign ID.
-The campaign will already be in `awaiting_approval` or `done` state so
-the review grid renders immediately — no SSE needed for old campaigns.
+### ✅ 4. Campaign history clickable — DONE (Session 2)
+Campaign history rows are now clickable and reopen the full post grid.
+- `awaiting_approval` campaigns show amber "Ready to review" badge + "Review posts →" 
+- `completed` campaigns show green "Deployed" badge + "View results →"
+- Clicking any row opens CampaignProgress which renders the full review grid from DB
+- Posts and images persist indefinitely in `posts_json` until the client record is deleted
 
 ### 5. Scale to 96 posts
 `POSTS_PER_CAMPAIGN` in openai.js = 96
