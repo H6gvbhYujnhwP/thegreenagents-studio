@@ -7,7 +7,10 @@ router.post('/login', (req, res) => {
     req.session.authenticated = true;
     res.json({ ok: true });
   } else {
-    console.warn('[auth] Failed login attempt');
+    // Log length mismatch to help diagnose env var vs typed password issues
+    const expected = (process.env.STUDIO_PASSWORD || '').length;
+    const received = (password || '').length;
+    console.warn(`[auth] Failed login attempt — received ${received} chars, expected ${expected} chars`);
     res.status(401).json({ error: 'Invalid password' });
   }
 });

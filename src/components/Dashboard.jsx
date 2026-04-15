@@ -14,6 +14,7 @@ export default function Dashboard({ onLogout }) {
   async function loadClients() {
     setLoading(true);
     const res = await fetch('/api/clients');
+    if (res.status === 401) { onLogout(); return; }
     if (res.ok) setClients(await res.json());
     setLoading(false);
   }
@@ -22,9 +23,10 @@ export default function Dashboard({ onLogout }) {
     // Silently sync new Supergrow workspaces in the background
     try {
       const res = await fetch('/api/clients/sync', { method: 'POST' });
-      const { added } = await res.json();
-      // If new workspaces were added, reload the client list
-      if (added > 0) await loadClients(); else await loadClients();
+      if (res.status === 401) { onLogout(); return; }
+      const data = await res.json();
+      if (data.error) console.warn('[sync] Supergrow sync warning:', data.error);
+      await loadClients();
     } catch (_) {
       await loadClients();
     }
