@@ -63,18 +63,41 @@ NANO BANNA STYLE RULES — apply all strictly:
 
 7. AUDIENCE: Visually signals immediate relevance to ${audience}.`;
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
-    contents: nanoBananaPrompt,
-    config: {
-      responseModalities: ['TEXT', 'IMAGE'],
+  // Model name fallback chain — Google renames preview models frequently.
+  // The 429 quota error revealed the internal quota name is gemini-2.5-flash-preview-image-generation.
+  const MODEL_CANDIDATES = [
+    'gemini-2.5-flash-preview-image-generation',  // confirmed internal name from quota metrics
+    'gemini-2.5-flash-image',                     // shorthand alias
+    'gemini-2.0-flash-preview-image-generation',  // fallback to 2.0
+  ];
+
+  let response = null;
+  let lastError = null;
+
+  for (const modelName of MODEL_CANDIDATES) {
+    try {
+      console.log(`[gemini] Trying model: ${modelName}`);
+      response = await ai.models.generateContent({
+        model: modelName,
+        contents: nanoBananaPrompt,
+        config: { responseModalities: ['TEXT', 'IMAGE'] }
+      });
+      console.log(`[gemini] Success with model: ${modelName}`);
+      break;
+    } catch (err) {
+      console.warn(`[gemini] Model ${modelName} failed: ${err.message?.slice(0, 150)}`);
+      lastError = err;
+      // Stop immediately on quota exhaustion — no point trying other models
+      if (err.message?.includes('429') || err.message?.includes('RESOURCE_EXHAUSTED')) throw err;
     }
-  });
+  }
+
+  if (!response) throw lastError || new Error('All Gemini image models failed');
 
   const parts = response.candidates?.[0]?.content?.parts || [];
   const imagePart = parts.find(p => p.inlineData?.mimeType?.startsWith('image/'));
 
-  if (!imagePart) throw new Error('No image returned from Gemini Nano Banana (gemini-2.5-flash-image)');
+  if (!imagePart) throw new Error('Gemini responded but returned no image — model may not support image generation');
 
   return {
     data: imagePart.inlineData.data,
