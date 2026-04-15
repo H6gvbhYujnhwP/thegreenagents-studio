@@ -13,23 +13,28 @@ export default function Dashboard({ onLogout }) {
 
   async function loadClients() {
     setLoading(true);
-    const res = await fetch('/api/clients');
-    if (res.status === 401) { onLogout(); return; }
-    if (res.ok) setClients(await res.json());
+    try {
+      const res = await fetch('/api/clients');
+      if (res.ok) setClients(await res.json());
+    } catch (e) {
+      console.error('loadClients error:', e);
+    }
     setLoading(false);
   }
 
   async function syncAndLoad() {
-    // Silently sync new Supergrow workspaces in the background
+    // Sync Supergrow workspaces then reload client list
     try {
       const res = await fetch('/api/clients/sync', { method: 'POST' });
-      if (res.status === 401) { onLogout(); return; }
-      const data = await res.json();
-      if (data.error) console.warn('[sync] Supergrow sync warning:', data.error);
-      await loadClients();
-    } catch (_) {
-      await loadClients();
+      if (res.ok) {
+        const data = await res.json();
+        if (data.added > 0) console.log(`[sync] Added ${data.added} new workspace(s)`);
+        if (data.error) console.warn('[sync] Supergrow sync warning:', data.error);
+      }
+    } catch (e) {
+      console.warn('[sync] sync request failed:', e.message);
     }
+    await loadClients();
   }
 
   useEffect(() => { syncAndLoad(); }, []);

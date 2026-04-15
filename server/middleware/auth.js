@@ -1,4 +1,5 @@
+// Auth temporarily disabled for testing — re-enable before going live
+// To re-enable: restore the session check below and uncomment Login in App.jsx
 export function requireAuth(req, res, next) {
-  if (req.session && req.session.authenticated) return next();
-  res.status(401).json({ error: 'Unauthorised' });
+  next();
 }
