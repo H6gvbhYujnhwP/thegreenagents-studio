@@ -40,5 +40,6 @@ app.listen(PORT, () => {
   console.log(`[env] SUPERGROW_MCP_URL: ${process.env.SUPERGROW_MCP_URL ? 'SET ✓' : 'MISSING ✗'}`);
   console.log(`[env] ANTHROPIC_API_KEY: ${process.env.ANTHROPIC_API_KEY ? 'SET ✓' : 'MISSING ✗'}`);
   console.log(`[env] STUDIO_PASSWORD:   ${process.env.STUDIO_PASSWORD ? 'SET ✓' : 'MISSING ✗'}`);
+  console.log(`[env] OPENAI_API_KEY:     ${process.env.OPENAI_API_KEY ? 'SET ✓' : 'MISSING ✗'}`);
   console.log(`[env] DB_PATH: ${process.env.DB_PATH || '(default)'}`);
 });

@@ -2,18 +2,15 @@ import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
-import { generatePosts, fixPost } from '../services/claude.js';
+import { generatePosts, fixPost, getLinkedInAlgorithmContext } from '../services/openai.js';
 import { generateImage, sleep } from '../services/gemini.js';
 import { uploadImageToR2 } from '../services/r2.js';
-import {
-  queuePost,
-  createDraft,
-  getContentDna,
-  scorePost
-} from '../services/supergrow.js';
+import { createDraft, getContentDna, scorePost } from '../services/supergrow.js';
 
 const router = Router();
 const sseClients = new Map();
+
+// ─── SSE helpers ──────────────────────────────────────────────────────────────
 
 function sendSSE(campaignId, data) {
   const clients = sseClients.get(campaignId) || [];
@@ -27,6 +24,8 @@ function updateCampaign(id, fields) {
   db.prepare(`UPDATE campaigns SET ${sets} WHERE id = ?`).run(...vals);
 }
 
+// ─── SSE progress stream ──────────────────────────────────────────────────────
+
 router.get('/progress/:id', requireAuth, (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -37,6 +36,7 @@ router.get('/progress/:id', requireAuth, (req, res) => {
   if (!sseClients.has(id)) sseClients.set(id, []);
   sseClients.get(id).push(res);
 
+  // Send current DB state immediately on connect
   const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(id);
   if (campaign) res.write(`data: ${JSON.stringify({ type: 'status', campaign })}\n\n`);
 
@@ -45,6 +45,8 @@ router.get('/progress/:id', requireAuth, (req, res) => {
     sseClients.set(id, list.filter(r => r !== res));
   });
 });
+
+// ─── Campaign queries ─────────────────────────────────────────────────────────
 
 router.get('/client/:clientId', requireAuth, (req, res) => {
   const campaigns = db.prepare('SELECT * FROM campaigns WHERE client_id = ? ORDER BY created_at DESC').all(req.params.clientId);
@@ -57,6 +59,8 @@ router.get('/:id', requireAuth, (req, res) => {
   res.json(campaign);
 });
 
+// ─── Start campaign ───────────────────────────────────────────────────────────
+
 router.post('/start/:clientId', requireAuth, async (req, res) => {
   const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(req.params.clientId);
   if (!client) return res.status(404).json({ error: 'Client not found' });
@@ -65,7 +69,7 @@ router.post('/start/:clientId', requireAuth, async (req, res) => {
   const campaignId = uuid();
   db.prepare(`
     INSERT INTO campaigns (id, client_id, status, stage, progress, total_posts)
-    VALUES (?, ?, 'running', 'generating_posts', 0, 96)
+    VALUES (?, ?, 'running', 'generating_posts', 0, 12)
   `).run(campaignId, client.id);
 
   res.json({ campaignId });
@@ -77,45 +81,80 @@ router.post('/start/:clientId', requireAuth, async (req, res) => {
   });
 });
 
+// ─── Deploy to Supergrow (called after operator reviews the preview) ───────────
+// Always sends as DRAFTS via create_post — client approves in Supergrow before publishing.
+
+router.post('/:id/deploy', requireAuth, async (req, res) => {
+  const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+  if (campaign.stage !== 'awaiting_approval') {
+    return res.status(400).json({ error: `Cannot deploy from stage: ${campaign.stage}` });
+  }
+
+  const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(campaign.client_id);
+  if (!client) return res.status(404).json({ error: 'Client not found' });
+
+  const posts = JSON.parse(campaign.posts_json || '[]');
+  if (!posts.length) return res.status(400).json({ error: 'No posts to deploy' });
+
+  res.json({ ok: true, total: posts.length });
+
+  // Run deployment in background, send progress via SSE
+  deployToDrafts(campaign.id, client, posts).catch(err => {
+    console.error('Deploy error:', err);
+    updateCampaign(campaign.id, { status: 'failed', stage: 'error', error_log: err.message });
+    sendSSE(campaign.id, { type: 'error', message: err.message });
+  });
+});
+
+// ─── Campaign pipeline ────────────────────────────────────────────────────────
+
 async function runCampaign(campaignId, client) {
   try {
-    // ── Improvement 2: fetch Content DNA before generating posts ──────────────
+    // ── Fetch Content DNA ──────────────────────────────────────────────────────
     let contentDna = null;
     try {
       sendSSE(campaignId, { type: 'log', message: 'Fetching Content DNA from Supergrow...' });
       contentDna = await getContentDna(client.supergrow_workspace_id, client.supergrow_api_key);
-      if (contentDna) {
-        sendSSE(campaignId, { type: 'log', message: 'Content DNA loaded — posts will match your writing style.' });
-      } else {
-        sendSSE(campaignId, { type: 'log', message: 'No Content DNA found — proceeding without style data.' });
-      }
-    } catch (dnaErr) {
-      console.error('Content DNA fetch failed (non-fatal):', dnaErr.message);
-      sendSSE(campaignId, { type: 'log', message: `Content DNA unavailable (${dnaErr.message}) — proceeding.` });
+      sendSSE(campaignId, { type: 'log', message: contentDna
+        ? 'Content DNA loaded — posts will match writing style.'
+        : 'No Content DNA found — proceeding without style data.' });
+    } catch (err) {
+      sendSSE(campaignId, { type: 'log', message: `Content DNA unavailable (${err.message}) — proceeding.` });
     }
 
-    // ── Stage 1: Generate posts via Claude ───────────────────────────────────
-    sendSSE(campaignId, { type: 'log', message: 'Starting post generation with Claude...' });
+    // ── Fetch fresh LinkedIn algorithm context ─────────────────────────────────
+    let algorithmContext = null;
+    try {
+      algorithmContext = await getLinkedInAlgorithmContext(msg => sendSSE(campaignId, { type: 'log', message: msg }));
+    } catch (err) {
+      sendSSE(campaignId, { type: 'log', message: `Algorithm context unavailable — proceeding with built-in guidelines.` });
+    }
+
+    // ── Stage 1: Generate posts via GPT-4o ────────────────────────────────────
+    sendSSE(campaignId, { type: 'log', message: 'Starting post generation with GPT-4o...' });
     updateCampaign(campaignId, { stage: 'generating_posts', progress: 5 });
 
-    const generated = await generatePosts(client, msg => {
-      sendSSE(campaignId, { type: 'log', message: msg });
-    }, contentDna);
+    const generated = await generatePosts(
+      client,
+      msg => sendSSE(campaignId, { type: 'log', message: msg }),
+      contentDna,
+      algorithmContext
+    );
 
-    // Smoke test: 3 posts. Change to generated.posts when going to production.
-    const posts = generated.posts.slice(0, 3);
+    const posts = generated.posts;
 
     updateCampaign(campaignId, {
       stage: 'scoring_posts',
       progress: 25,
       posts_generated: posts.length,
-      total_posts: 3,
+      total_posts: posts.length,
       posts_json: JSON.stringify(posts)
     });
     sendSSE(campaignId, { type: 'progress', stage: 'scoring_posts', posts_generated: posts.length });
 
-    // ── Improvement 4: score_post quality gate ───────────────────────────────
-    sendSSE(campaignId, { type: 'log', message: `Scoring ${posts.length} posts (quality gate: 70/100)...` });
+    // ── Stage 2: Score & auto-fix (quality gate: 70/100) ─────────────────────
+    sendSSE(campaignId, { type: 'log', message: `Scoring ${posts.length} posts via Supergrow (quality gate: 70/100)...` });
     const scoredPosts = [];
     let fixedCount = 0;
 
@@ -127,59 +166,37 @@ async function runCampaign(campaignId, client) {
           post.linkedin_post_text,
           client.supergrow_api_key
         );
-
         post.quality_score = score;
 
         if (score !== null && score < 70) {
-          sendSSE(campaignId, {
-            type: 'log',
-            message: `Post ${i + 1} scored ${score}/100 — auto-fixing...`
-          });
+          sendSSE(campaignId, { type: 'log', message: `Post ${i + 1} scored ${score}/100 — auto-fixing...` });
           const improved = await fixPost(post, feedback, suggestions, contentDna);
           post.linkedin_post_text = improved;
           post.quality_score_fixed = true;
-
-          // Re-score once after fix
           try {
-            const reScore = await scorePost(
-              client.supergrow_workspace_id,
-              improved,
-              client.supergrow_api_key
-            );
+            const reScore = await scorePost(client.supergrow_workspace_id, improved, client.supergrow_api_key);
             post.quality_score = reScore.score;
-            sendSSE(campaignId, {
-              type: 'log',
-              message: `Post ${i + 1} re-scored: ${reScore.score ?? 'n/a'}/100`
-            });
+            sendSSE(campaignId, { type: 'log', message: `Post ${i + 1} re-scored: ${reScore.score ?? 'n/a'}/100` });
           } catch (_) {}
-
           fixedCount++;
-        } else if (score !== null) {
-          // Good score — log every 10th to avoid flooding
-          if ((i + 1) % 10 === 0) {
-            sendSSE(campaignId, { type: 'log', message: `Posts 1–${i + 1} scored (avg quality ✓)` });
-          }
+        } else if (score !== null && (i + 1) % 4 === 0) {
+          sendSSE(campaignId, { type: 'log', message: `Posts 1–${i + 1} scored ✓` });
         }
-      } catch (scoreErr) {
-        console.error(`Score failed for post ${i + 1} (non-fatal):`, scoreErr.message);
+      } catch (err) {
+        console.error(`Score failed for post ${i + 1} (non-fatal):`, err.message);
         post.quality_score = null;
       }
-
       scoredPosts.push(post);
-
-      const progress = 25 + Math.round((i + 1) / posts.length * 10);
-      updateCampaign(campaignId, { progress, posts_json: JSON.stringify(scoredPosts) });
-
-      // Small pause between MCP score calls to avoid rate limits
+      updateCampaign(campaignId, {
+        progress: 25 + Math.round((i + 1) / posts.length * 10),
+        posts_json: JSON.stringify(scoredPosts)
+      });
       await sleep(300);
     }
 
-    sendSSE(campaignId, {
-      type: 'log',
-      message: `Quality gate complete. ${fixedCount} post(s) auto-fixed. All posts ready.`
-    });
+    sendSSE(campaignId, { type: 'log', message: `Quality gate complete. ${fixedCount} post(s) auto-fixed.` });
 
-    // ── Stage 2: Image generation ─────────────────────────────────────────────
+    // ── Stage 3: Generate images ───────────────────────────────────────────────
     updateCampaign(campaignId, { stage: 'generating_images', progress: 35 });
     sendSSE(campaignId, { type: 'progress', stage: 'generating_images', posts_generated: scoredPosts.length });
 
@@ -193,76 +210,40 @@ async function runCampaign(campaignId, client) {
         const imageData = await generateImage(post.image_prompt || `Professional LinkedIn image for: ${post.topic}`);
         const imageUrl = await uploadImageToR2(imageData.data, imageData.mimeType, client.id, post.id);
         enrichedPosts.push({ ...post, image_url: imageUrl });
-      } catch (imgErr) {
-        console.error(`Image gen failed for post ${i + 1}:`, imgErr.message);
-        enrichedPosts.push({ ...post, image_url: null, image_error: imgErr.message });
+        sendSSE(campaignId, { type: 'log', message: `✓ Image ${i + 1} generated and uploaded.` });
+      } catch (err) {
+        console.error(`Image gen failed for post ${i + 1}:`, err.message);
+        enrichedPosts.push({ ...post, image_url: null, image_error: err.message });
+        sendSSE(campaignId, { type: 'log', message: `Image ${i + 1} failed (${err.message}) — post kept without image.` });
       }
 
-      const progress = 35 + Math.round((i + 1) / scoredPosts.length * 30);
-      updateCampaign(campaignId, { progress, images_generated: i + 1, posts_json: JSON.stringify(enrichedPosts) });
+      const progress = 35 + Math.round((i + 1) / scoredPosts.length * 55);
+      updateCampaign(campaignId, {
+        progress,
+        images_generated: i + 1,
+        posts_json: JSON.stringify(enrichedPosts)
+      });
       sendSSE(campaignId, { type: 'progress', stage: 'generating_images', images_generated: i + 1, total: scoredPosts.length });
 
       if (i < scoredPosts.length - 1) await sleep(RATE_LIMIT_DELAY);
     }
 
-    // ── Stage 3: Deployment ───────────────────────────────────────────────────
-    updateCampaign(campaignId, { stage: 'deploying', progress: 65 });
-    sendSSE(campaignId, { type: 'progress', stage: 'deploying' });
-
-    const deployFn = client.approval_mode === 'draft' ? createDraft : queuePost;
-    const results = [];
-    let deployed = 0;
-
-    for (let i = 0; i < enrichedPosts.length; i++) {
-      const post = enrichedPosts[i];
-      try {
-        sendSSE(campaignId, { type: 'log', message: `Deploying post ${i + 1}/${enrichedPosts.length} to Supergrow...` });
-        const result = await deployFn({
-          workspaceId: client.supergrow_workspace_id,
-          apiKey: client.supergrow_api_key,
-          postText: post.linkedin_post_text,
-          imageUrls: post.image_url ? [post.image_url] : []
-        });
-        results.push({ postId: post.id, status: 'success', result });
-        deployed++;
-      } catch (depErr) {
-        console.error(`Deploy failed for post ${i + 1}:`, depErr.message);
-        // Retry once
-        try {
-          await sleep(2000);
-          const retry = await deployFn({
-            workspaceId: client.supergrow_workspace_id,
-            apiKey: client.supergrow_api_key,
-            postText: post.linkedin_post_text,
-            imageUrls: post.image_url ? [post.image_url] : []
-          });
-          results.push({ postId: post.id, status: 'success_retry', result: retry });
-          deployed++;
-        } catch (retryErr) {
-          results.push({ postId: post.id, status: 'failed', error: retryErr.message });
-        }
-      }
-
-      const progress = 65 + Math.round((i + 1) / enrichedPosts.length * 30);
-      updateCampaign(campaignId, { progress, posts_deployed: deployed });
-      sendSSE(campaignId, { type: 'progress', stage: 'deploying', posts_deployed: i + 1, total: enrichedPosts.length });
-
-      await sleep(500);
-    }
-
-    const files = buildOutputFiles(client, generated, enrichedPosts, results);
-
+    // ── Stage 4: Await operator approval ─────────────────────────────────────
+    // Pipeline stops here. Operator reviews all posts + images in the app,
+    // then clicks "Send to Supergrow as Drafts" to trigger deployment.
     updateCampaign(campaignId, {
-      status: 'completed',
-      stage: 'done',
-      progress: 100,
-      posts_deployed: deployed,
-      posts_json: JSON.stringify(enrichedPosts),
-      files_json: JSON.stringify(files),
-      completed_at: new Date().toISOString()
+      stage: 'awaiting_approval',
+      status: 'awaiting_approval',
+      progress: 95,
+      posts_json: JSON.stringify(enrichedPosts)
     });
 
-    sendSSE(campaignId, { type: 'complete', deployed, total: enrichedPosts.length, files });
+    sendSSE(campaignId, {
+      type: 'awaiting_approval',
+      total: enrichedPosts.length,
+      images: enrichedPosts.filter(p => p.image_url).length,
+      message: `${enrichedPosts.length} posts and ${enrichedPosts.filter(p => p.image_url).length} images are ready. Review below, then send to Supergrow as drafts.`
+    });
 
   } catch (err) {
     updateCampaign(campaignId, { status: 'failed', stage: 'error', error_log: err.message });
@@ -271,33 +252,97 @@ async function runCampaign(campaignId, client) {
   }
 }
 
-function buildOutputFiles(client, generated, posts, results) {
-  const clientProfile = `# Client Profile: ${client.name}
+// ─── Deployment pipeline (runs after operator approves) ───────────────────────
+// All posts are ALWAYS sent as drafts via create_post.
+// Clients approve inside Supergrow before anything goes to LinkedIn.
 
-**Brand:** ${client.brand}
-**Website:** ${client.website}
-**Timezone:** ${client.timezone}
-**Posting Cadence:** ${client.cadence}
+async function deployToDrafts(campaignId, client, posts) {
+  updateCampaign(campaignId, { stage: 'deploying', status: 'running', progress: 95 });
+  sendSSE(campaignId, { type: 'progress', stage: 'deploying' });
 
-## Operating Profile
-${JSON.stringify(generated.client_profile, null, 2)}
-`;
+  const results = [];
+  let deployed = 0;
 
-  const researchNotes = `# Research Notes: ${client.name}
+  for (let i = 0; i < posts.length; i++) {
+    const post = posts[i];
+    try {
+      sendSSE(campaignId, { type: 'log', message: `Sending post ${i + 1}/${posts.length} to Supergrow as draft...` });
 
-${generated.research_notes || 'No research notes generated.'}
-`;
+      // ALWAYS create_post (draft) — never queue_post
+      // Client approves in Supergrow before anything publishes to LinkedIn
+      const result = await createDraft({
+        workspaceId: client.supergrow_workspace_id,
+        apiKey: client.supergrow_api_key,
+        postText: post.linkedin_post_text,
+        imageUrls: post.image_url ? [post.image_url] : []
+      });
 
-  const topicScheduleRows = (generated.topic_schedule || []).map(w =>
-    `${w.week},${w.theme},"${(w.topics || []).join('; ')}"`
-  ).join('\n');
-  const topicSchedule = `week,theme,topics\n${topicScheduleRows}`;
+      results.push({ postId: post.id, status: 'success', result });
+      deployed++;
+      sendSSE(campaignId, { type: 'log', message: `✓ Post ${i + 1} saved as draft in Supergrow.` });
+
+    } catch (err) {
+      console.error(`Deploy failed for post ${i + 1}:`, err.message);
+      // Retry once
+      try {
+        await sleep(2000);
+        const retry = await createDraft({
+          workspaceId: client.supergrow_workspace_id,
+          apiKey: client.supergrow_api_key,
+          postText: post.linkedin_post_text,
+          imageUrls: post.image_url ? [post.image_url] : []
+        });
+        results.push({ postId: post.id, status: 'success_retry', result: retry });
+        deployed++;
+        sendSSE(campaignId, { type: 'log', message: `✓ Post ${i + 1} sent (retry succeeded).` });
+      } catch (retryErr) {
+        results.push({ postId: post.id, status: 'failed', error: retryErr.message });
+        sendSSE(campaignId, { type: 'log', message: `✗ Post ${i + 1} failed: ${retryErr.message}` });
+      }
+    }
+
+    const progress = 95 + Math.round((i + 1) / posts.length * 4);
+    updateCampaign(campaignId, { progress, posts_deployed: deployed });
+    sendSSE(campaignId, { type: 'progress', stage: 'deploying', posts_deployed: i + 1, total: posts.length });
+    await sleep(500);
+  }
+
+  const files = buildOutputFiles(client, posts, results);
+
+  updateCampaign(campaignId, {
+    status: 'completed',
+    stage: 'done',
+    progress: 100,
+    posts_deployed: deployed,
+    files_json: JSON.stringify(files),
+    completed_at: new Date().toISOString()
+  });
+
+  sendSSE(campaignId, { type: 'complete', deployed, total: posts.length, files });
+}
+
+// ─── Output file builder ──────────────────────────────────────────────────────
+
+function buildOutputFiles(client, posts, results) {
+  const successCount = results.filter(r => r.status === 'success' || r.status === 'success_retry').length;
+  const failedResults = results.filter(r => r.status === 'failed');
 
   const postsMarkdown = posts.map((p, i) => {
     const scoreNote = p.quality_score != null
       ? ` | Score: ${p.quality_score}/100${p.quality_score_fixed ? ' (auto-fixed)' : ''}`
       : '';
-    return `## Post ${i + 1}: ${p.topic || ''}${scoreNote}\n\n**Angle:** ${p.angle || ''}\n**Segment:** ${p.buyer_segment || ''}\n**CTA:** ${p.cta_type || ''}\n\n${p.linkedin_post_text}\n\n---\n`;
+    const scheduleNote = p.suggested_day ? ` | ${p.suggested_day} ${p.suggested_time}` : '';
+    return `## Post ${i + 1}: ${p.topic || ''}${scoreNote}${scheduleNote}
+
+**Pillar:** ${p.content_pillar || ''} | **Format:** ${p.format || 'Text Post'}
+**Angle:** ${p.angle || ''}
+**Segment:** ${p.buyer_segment || ''}
+**CTA:** ${p.cta_type || ''}
+
+${p.linkedin_post_text}
+
+---
+`;
   }).join('\n');
 
   const postsJson = JSON.stringify(posts.map(p => ({
@@ -307,27 +352,27 @@ ${generated.research_notes || 'No research notes generated.'}
     image_urls: p.image_url ? [p.image_url] : [],
     workspace_id: client.supergrow_workspace_id,
     quality_score: p.quality_score ?? null,
-    quality_score_fixed: p.quality_score_fixed ?? false
+    quality_score_fixed: p.quality_score_fixed ?? false,
+    suggested_day: p.suggested_day ?? null,
+    suggested_time: p.suggested_time ?? null,
+    content_pillar: p.content_pillar ?? null,
+    format: p.format ?? null
   })), null, 2);
 
   const csvRows = posts.map(p =>
-    `"${p.id}","${(p.linkedin_post_text || '').replace(/"/g, '""')}","${p.image_url || ''}","${client.supergrow_workspace_id}"`
+    `"${p.id}","${(p.linkedin_post_text || '').replace(/"/g, '""')}","${p.image_url || ''}","${client.supergrow_workspace_id}","${p.suggested_day || ''}","${p.suggested_time || ''}"`
   ).join('\n');
-  const postsForScheduling = `id,linkedin_post_text,image_url,workspace_id\n${csvRows}`;
-
-  const successCount = results.filter(r => r.status === 'success' || r.status === 'success_retry').length;
-  const failedResults = results.filter(r => r.status === 'failed');
 
   const scheduleTracker = `# Schedule Tracker: ${client.name}
 
 Campaign Run: ${new Date().toISOString()}
 Total Posts: ${posts.length}
-Successfully Deployed: ${successCount}
+Successfully Deployed as Drafts: ${successCount}
 Failed: ${failedResults.length}
 
-## Quality Gate Summary
-Posts scored below 70/100 and auto-fixed: ${posts.filter(p => p.quality_score_fixed).length}
-Posts with score ≥ 70/100: ${posts.filter(p => p.quality_score != null && p.quality_score >= 70).length}
+## Quality Gate Summary (70/100 threshold)
+Posts auto-fixed: ${posts.filter(p => p.quality_score_fixed).length}
+Posts with score ≥ 70: ${posts.filter(p => p.quality_score != null && p.quality_score >= 70).length}
 Posts without score data: ${posts.filter(p => p.quality_score == null).length}
 
 ## Failed Posts
@@ -339,37 +384,21 @@ ${failedResults.map(r => `- Post ${r.postId}: ${r.error}`).join('\n') || 'None'}
 Run completed: ${new Date().toISOString()}
 Client: ${client.name} (${client.brand})
 Workspace: ${client.supergrow_workspace_name} (${client.supergrow_workspace_id})
-Mode: ${client.approval_mode === 'draft' ? 'Draft only' : 'Queue post'}
+Mode: Draft only (operator approval in Supergrow before publishing)
 Posts generated: ${posts.length}
 Images generated: ${posts.filter(p => p.image_url).length}
-Posts deployed: ${successCount}
+Posts deployed as drafts: ${successCount}
 Auto-fixed (quality gate): ${posts.filter(p => p.quality_score_fixed).length}
+Generated by: GPT-4o with LinkedIn Master prompt + live algorithm context
 `;
 
-  const executionResults = JSON.stringify({
-    campaign_run: new Date().toISOString(),
-    client: client.name,
-    workspace_id: client.supergrow_workspace_id,
-    mode: client.approval_mode,
-    quality_gate: {
-      total: posts.length,
-      scored: posts.filter(p => p.quality_score != null).length,
-      passed: posts.filter(p => p.quality_score != null && p.quality_score >= 70).length,
-      auto_fixed: posts.filter(p => p.quality_score_fixed).length
-    },
-    results
-  }, null, 2);
-
   return {
-    'client_profile.md': clientProfile,
-    'research_notes.md': researchNotes,
-    'topic_schedule.csv': topicSchedule,
     'generated_posts.md': postsMarkdown,
     'generated_posts.json': postsJson,
-    'generated_posts_for_scheduling.csv': postsForScheduling,
+    'generated_posts_for_scheduling.csv': `id,linkedin_post_text,image_url,workspace_id,suggested_day,suggested_time\n${csvRows}`,
     'schedule_tracker.md': scheduleTracker,
     'workflow_log.md': workflowLog,
-    'execution_results.json': executionResults
+    'execution_results.json': JSON.stringify({ campaign_run: new Date().toISOString(), client: client.name, results }, null, 2)
   };
 }
 
