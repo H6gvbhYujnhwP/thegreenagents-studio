@@ -1,27 +1,36 @@
+/**
+ * auth.js — Login / check routes
+ *
+ * POST /api/auth/login   { password } → { ok: true, token } or 401
+ * GET  /api/auth/check   Authorization: Bearer <token> → { authenticated: bool }
+ * POST /api/auth/logout  (no-op — client just deletes localStorage token)
+ */
 import { Router } from 'express';
 const router = Router();
 
 router.post('/login', (req, res) => {
   const { password } = req.body;
-  if (password === process.env.STUDIO_PASSWORD) {
-    req.session.authenticated = true;
-    res.json({ ok: true });
-  } else {
-    // Log length mismatch to help diagnose env var vs typed password issues
-    const expected = (process.env.STUDIO_PASSWORD || '').length;
-    const received = (password || '').length;
-    console.warn(`[auth] Failed login attempt — received ${received} chars, expected ${expected} chars`);
-    res.status(401).json({ error: 'Invalid password' });
+  const expected = process.env.STUDIO_PASSWORD || '';
+
+  if (password && password === expected) {
+    return res.json({ ok: true, token: password });
   }
+
+  const got = (password || '').length;
+  const exp = expected.length;
+  console.warn(`[auth] Failed login — got ${got} chars, expected ${exp} chars`);
+  res.status(401).json({ error: 'Incorrect password' });
 });
 
 router.post('/logout', (req, res) => {
-  req.session = null;
+  // Stateless — client clears its own localStorage token
   res.json({ ok: true });
 });
 
 router.get('/check', (req, res) => {
-  res.json({ authenticated: !!(req.session && req.session.authenticated) });
+  const header = req.headers['authorization'] || '';
+  const token  = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  res.json({ authenticated: !!(token && token === process.env.STUDIO_PASSWORD) });
 });
 
 export default router;
