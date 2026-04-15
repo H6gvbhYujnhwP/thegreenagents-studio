@@ -4,6 +4,7 @@ import { v4 as uuid } from 'uuid';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { listWorkspaces } from '../services/supergrow.js';
+import { extractTextFromBuffer } from '../utils/extractText.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -111,7 +112,7 @@ router.get('/:id', requireAuth, (req, res) => {
   res.json({ ...client, campaigns });
 });
 
-router.post('/', requireAuth, upload.single('rag'), (req, res) => {
+router.post('/', requireAuth, upload.single('rag'), async (req, res) => {
   const id = uuid();
   const { name, brand, website, supergrow_workspace_name, supergrow_workspace_id,
     supergrow_api_key, timezone, cadence, posting_identity, approval_mode } = req.body;
@@ -121,7 +122,11 @@ router.post('/', requireAuth, upload.single('rag'), (req, res) => {
 
   if (req.file) {
     rag_filename = req.file.originalname;
-    rag_content = req.file.buffer.toString('utf-8');
+    try {
+      rag_content = await extractTextFromBuffer(req.file.buffer, req.file.originalname);
+    } catch (extractErr) {
+      return res.status(400).json({ error: extractErr.message });
+    }
   }
 
   db.prepare(`
@@ -134,7 +139,7 @@ router.post('/', requireAuth, upload.single('rag'), (req, res) => {
   res.json({ id });
 });
 
-router.put('/:id', requireAuth, upload.single('rag'), (req, res) => {
+router.put('/:id', requireAuth, upload.single('rag'), async (req, res) => {
   const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(req.params.id);
   if (!client) return res.status(404).json({ error: 'Not found' });
 
@@ -146,7 +151,11 @@ router.put('/:id', requireAuth, upload.single('rag'), (req, res) => {
 
   if (req.file) {
     rag_filename = req.file.originalname;
-    rag_content = req.file.buffer.toString('utf-8');
+    try {
+      rag_content = await extractTextFromBuffer(req.file.buffer, req.file.originalname);
+    } catch (extractErr) {
+      return res.status(400).json({ error: extractErr.message });
+    }
   }
 
   db.prepare(`

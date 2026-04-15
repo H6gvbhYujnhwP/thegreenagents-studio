@@ -13,7 +13,10 @@
 
 import OpenAI from 'openai';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Accept both OPENAI_API_KEY (standard) and OPENAI_AI_KEY (legacy Render var name)
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY || process.env.OPENAI_AI_KEY
+});
 
 // ─── How many posts to generate per campaign ─────────────────────────────────
 // Set to 12 for testing. Change to 96 for production.
