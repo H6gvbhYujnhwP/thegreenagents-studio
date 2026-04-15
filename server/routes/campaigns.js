@@ -115,14 +115,14 @@ async function runCampaign(campaignId, client) {
     sendSSE(campaignId, { type: 'progress', stage: 'scoring_posts', posts_generated: posts.length });
 
     // ── Improvement 4: score_post quality gate ───────────────────────────────
-    sendSSE(campaignId, { type: 'log', message: `Scoring ${posts.length} posts (quality gate: 7/10)...` });
+    sendSSE(campaignId, { type: 'log', message: `Scoring ${posts.length} posts (quality gate: 70/100)...` });
     const scoredPosts = [];
     let fixedCount = 0;
 
     for (let i = 0; i < posts.length; i++) {
       const post = { ...posts[i] };
       try {
-        const { score, feedback } = await scorePost(
+        const { score, feedback, suggestions } = await scorePost(
           client.supergrow_workspace_id,
           post.linkedin_post_text,
           client.supergrow_api_key
@@ -130,12 +130,12 @@ async function runCampaign(campaignId, client) {
 
         post.quality_score = score;
 
-        if (score !== null && score < 7) {
+        if (score !== null && score < 70) {
           sendSSE(campaignId, {
             type: 'log',
-            message: `Post ${i + 1} scored ${score}/10 — auto-fixing...`
+            message: `Post ${i + 1} scored ${score}/100 — auto-fixing...`
           });
-          const improved = await fixPost(post, feedback, contentDna);
+          const improved = await fixPost(post, feedback, suggestions, contentDna);
           post.linkedin_post_text = improved;
           post.quality_score_fixed = true;
 
@@ -149,7 +149,7 @@ async function runCampaign(campaignId, client) {
             post.quality_score = reScore.score;
             sendSSE(campaignId, {
               type: 'log',
-              message: `Post ${i + 1} re-scored: ${reScore.score ?? 'n/a'}/10`
+              message: `Post ${i + 1} re-scored: ${reScore.score ?? 'n/a'}/100`
             });
           } catch (_) {}
 
@@ -295,7 +295,7 @@ ${generated.research_notes || 'No research notes generated.'}
 
   const postsMarkdown = posts.map((p, i) => {
     const scoreNote = p.quality_score != null
-      ? ` | Score: ${p.quality_score}/10${p.quality_score_fixed ? ' (auto-fixed)' : ''}`
+      ? ` | Score: ${p.quality_score}/100${p.quality_score_fixed ? ' (auto-fixed)' : ''}`
       : '';
     return `## Post ${i + 1}: ${p.topic || ''}${scoreNote}\n\n**Angle:** ${p.angle || ''}\n**Segment:** ${p.buyer_segment || ''}\n**CTA:** ${p.cta_type || ''}\n\n${p.linkedin_post_text}\n\n---\n`;
   }).join('\n');
@@ -326,8 +326,8 @@ Successfully Deployed: ${successCount}
 Failed: ${failedResults.length}
 
 ## Quality Gate Summary
-Posts scored below 7 and auto-fixed: ${posts.filter(p => p.quality_score_fixed).length}
-Posts with score ≥ 7: ${posts.filter(p => p.quality_score != null && p.quality_score >= 7).length}
+Posts scored below 70/100 and auto-fixed: ${posts.filter(p => p.quality_score_fixed).length}
+Posts with score ≥ 70/100: ${posts.filter(p => p.quality_score != null && p.quality_score >= 70).length}
 Posts without score data: ${posts.filter(p => p.quality_score == null).length}
 
 ## Failed Posts
@@ -354,7 +354,7 @@ Auto-fixed (quality gate): ${posts.filter(p => p.quality_score_fixed).length}
     quality_gate: {
       total: posts.length,
       scored: posts.filter(p => p.quality_score != null).length,
-      passed: posts.filter(p => p.quality_score != null && p.quality_score >= 7).length,
+      passed: posts.filter(p => p.quality_score != null && p.quality_score >= 70).length,
       auto_fixed: posts.filter(p => p.quality_score_fixed).length
     },
     results

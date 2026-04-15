@@ -89,26 +89,30 @@ Generate all 3 posts. Each post needs a unique image_prompt that visually repres
  * Asks Claude to rewrite a single post using the score feedback.
  * Returns the new post text.
  */
-export async function fixPost(post, scoreFeedback, contentDna = null) {
+export async function fixPost(post, scoreFeedback, suggestions = [], contentDna = null) {
   const dnaNote = contentDna
     ? `\nContent DNA (match this writing style):\n${contentDna}\n`
     : '';
 
-  const prompt = `You are improving a LinkedIn post that scored below 7/10.
+  const suggestionsNote = suggestions.length > 0
+    ? `\nSpecific suggestions to action:\n${suggestions.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n`
+    : '';
+
+  const prompt = `You are improving a LinkedIn post that scored below 70/100.
 
 Original post:
 ${post.linkedin_post_text}
 
 Score feedback:
 ${scoreFeedback}
-${dnaNote}
+${suggestionsNote}${dnaNote}
 Post context:
 - Topic: ${post.topic}
 - Angle: ${post.angle}
 - Target buyer: ${post.buyer_segment}
 - CTA type: ${post.cta_type}
 
-Rewrite the post to score 7 or above. Fix all issues raised in the feedback.
+Rewrite the post to score 70 or above out of 100. Fix all issues raised in the feedback and action every suggestion.
 Keep the same topic, angle, and CTA intent. Stay 100-250 words. Use line breaks for readability.
 Return ONLY the improved post text — no preamble, no explanation, no JSON.`;
 

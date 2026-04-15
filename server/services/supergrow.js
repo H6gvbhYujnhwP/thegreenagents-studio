@@ -145,21 +145,29 @@ function parseMcpJson(text) {
   return text;
 }
 
-/** Extract a numeric score (0-10) from score_post response text */
+/** Extract a numeric score (0-100) from score_post response.
+ *  Supergrow scores out of 100 — e.g. { "score": 72, "feedback": "...", "suggestions": [...] }
+ */
 function extractScore(text) {
   if (!text) return null;
+  // Try JSON parse first — the real response is a JSON object
+  try {
+    const obj = JSON.parse(text);
+    if (typeof obj.score === 'number') return obj.score;
+  } catch (_) {}
+  // Fallback: regex patterns for score out of 100
   const patterns = [
     /"overall_score"\s*:\s*(\d+(?:\.\d+)?)/i,
     /"score"\s*:\s*(\d+(?:\.\d+)?)/i,
     /overall\s+score[:\s]+(\d+(?:\.\d+)?)/i,
     /score[:\s]+(\d+(?:\.\d+)?)/i,
-    /(\d+(?:\.\d+)?)\s*\/\s*10/,
+    /(\d+(?:\.\d+)?)\s*\/\s*100/,
   ];
   for (const p of patterns) {
     const m = text.match(p);
     if (m) {
       const n = parseFloat(m[1]);
-      if (!isNaN(n) && n >= 0 && n <= 10) return n;
+      if (!isNaN(n) && n >= 0 && n <= 100) return n;
     }
   }
   return null;
@@ -223,7 +231,8 @@ export async function getCompanyPageId(workspaceId, apiKey) {
 
 /**
  * Score a post via Supergrow's score_post tool.
- * Returns { score: number|null, feedback: string, raw: string }
+ * Scores are 0-100. Quality gate threshold is 70.
+ * Returns { score: number|null, feedback: string, suggestions: string[], raw: string }
  */
 export async function scorePost(workspaceId, postText, apiKey) {
   const result = await callSupergrowTool(apiKey, 'score_post', {
@@ -231,8 +240,11 @@ export async function scorePost(workspaceId, postText, apiKey) {
     text: postText
   });
   const raw = extractText(result);
-  const score = extractScore(raw);
-  return { score, feedback: raw, raw };
+  const parsed = parseMcpJson(raw);
+  const score = (parsed && typeof parsed.score === 'number') ? parsed.score : extractScore(raw);
+  const feedback = (parsed && parsed.feedback) ? parsed.feedback : raw;
+  const suggestions = (parsed && Array.isArray(parsed.suggestions)) ? parsed.suggestions : [];
+  return { score, feedback, suggestions, raw };
 }
 
 /**
@@ -243,7 +255,7 @@ export async function scorePost(workspaceId, postText, apiKey) {
 export async function queuePost({ workspaceId, apiKey, postText, imageUrls = [], companyPageId = null }) {
   const args = {
     workspace_id: workspaceId,
-    content: postText,
+    text: postText,                    // Supergrow schema: 'text' not 'content'
     ...(imageUrls.length > 0 && { image_urls: imageUrls }),
     ...(companyPageId && { linked_in_company_page_id: companyPageId })
   };
@@ -257,7 +269,7 @@ export async function queuePost({ workspaceId, apiKey, postText, imageUrls = [],
 export async function createDraft({ workspaceId, apiKey, postText, imageUrls = [], companyPageId = null }) {
   const args = {
     workspace_id: workspaceId,
-    content: postText,
+    text: postText,                    // Supergrow schema: 'text' not 'content'
     ...(imageUrls.length > 0 && { image_urls: imageUrls }),
     ...(companyPageId && { linked_in_company_page_id: companyPageId })
   };
