@@ -15,12 +15,23 @@ export async function uploadImageToR2(base64Data, mimeType, clientId, postId) {
   const key = `images/${clientId}/${postId}-${uuid()}.${ext}`;
   const buffer = Buffer.from(base64Data, 'base64');
 
-  await s3.send(new PutObjectCommand({
-    Bucket: process.env.R2_BUCKET_NAME,
-    Key: key,
-    Body: buffer,
-    ContentType: mimeType
-  }));
+  try {
+    await s3.send(new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET_NAME,
+      Key: key,
+      Body: buffer,
+      ContentType: mimeType
+    }));
+  } catch (err) {
+    console.error('[r2] Upload failed:', {
+      code: err.Code || err.code || err.$metadata?.httpStatusCode,
+      message: err.message,
+      bucket: process.env.R2_BUCKET_NAME,
+      endpoint: process.env.R2_ENDPOINT,
+      keyId: (process.env.R2_ACCESS_KEY_ID || '').slice(0, 8) + '...'
+    });
+    throw new Error(`R2 upload failed (${err.Code || err.$metadata?.httpStatusCode || 'unknown'}): ${err.message}`);
+  }
 
   return `${process.env.R2_PUBLIC_URL}/${key}`;
 }
