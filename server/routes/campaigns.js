@@ -187,7 +187,9 @@ async function runCampaign(campaignId, client) {
       });
       sendSSE(campaignId, { type: 'progress', stage: 'generating_images', images_generated: i + 1, total: scoredPosts.length });
 
-      if (i < scoredPosts.length - 1) await sleep(RATE_LIMIT_DELAY);
+      // Only apply rate-limit delay after a successful image generation
+      const lastPost = enrichedPosts[enrichedPosts.length - 1];
+      if (i < scoredPosts.length - 1 && lastPost?.image_url) await sleep(RATE_LIMIT_DELAY);
     }
 
     // ── Stage 4: Await operator approval ─────────────────────────────────────

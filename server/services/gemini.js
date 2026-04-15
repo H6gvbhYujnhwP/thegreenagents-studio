@@ -3,7 +3,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 export async function generateImage(prompt) {
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
+  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-preview-image-generation' });
 
   const enhancedPrompt = `${prompt}. Professional LinkedIn business image, clean composition, no text or words in the image, photorealistic, high quality, suitable for B2B social media.`;
 

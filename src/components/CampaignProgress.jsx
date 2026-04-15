@@ -46,8 +46,14 @@ export default function CampaignProgress({ campaignId, onComplete }) {
         setLogs(l => [...l.slice(-199), data.message]);
       }
       if (data.type === 'awaiting_approval') {
-        setCampaign(prev => prev ? { ...prev, stage: 'awaiting_approval', status: 'awaiting_approval', progress: 95 } : prev);
         setLogs(l => [...l, `✓ ${data.message}`]);
+        // Re-fetch full campaign from DB to get posts_json (not included in SSE payload)
+        fetch(`/api/campaigns/${campaignId}`)
+          .then(r => r.json())
+          .then(d => {
+            setCampaign(d);
+            parsePosts(d);
+          });
       }
       if (data.type === 'complete') {
         setFiles(data.files);
