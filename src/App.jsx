@@ -1,7 +1,8 @@
 import React from 'react';
 import Dashboard from './components/Dashboard.jsx';
 
-// Auth temporarily disabled for testing — restore Login flow before going live
+// AUTH TEMPORARILY DISABLED FOR TESTING
+// To re-enable: restore App-with-auth.jsx (see git history)
 export default function App() {
   return <Dashboard onLogout={() => {}} />;
 }
