@@ -1,36 +1,50 @@
 /**
  * auth.js — Login / check routes
  *
- * POST /api/auth/login   { password } → { ok: true, token } or 401
- * GET  /api/auth/check   Authorization: Bearer <token> → { authenticated: bool }
- * POST /api/auth/logout  (no-op — client just deletes localStorage token)
+ * Credentials:
+ *   username → STUDIO_USERNAME env var (default: "greenagents")
+ *   password → STUDIO_PASSWORD env var
+ *
+ * POST /api/auth/login   { username, password } → { ok, token } or 401
+ * GET  /api/auth/check   Authorization: Bearer <token> → { authenticated }
+ * POST /api/auth/logout  (client clears localStorage)
  */
 import { Router } from 'express';
 const router = Router();
 
-router.post('/login', (req, res) => {
-  const { password } = req.body;
-  const expected = process.env.STUDIO_PASSWORD || '';
+function expectedUsername() {
+  return process.env.STUDIO_USERNAME || 'greenagents';
+}
 
-  if (password && password === expected) {
+function expectedPassword() {
+  return process.env.STUDIO_PASSWORD || '';
+}
+
+router.post('/login', (req, res) => {
+  const { username = '', password = '' } = req.body;
+
+  const userOk = username.trim() === expectedUsername();
+  const passOk = password        === expectedPassword();
+
+  if (userOk && passOk) {
     return res.json({ ok: true, token: password });
   }
 
-  const got = (password || '').length;
-  const exp = expected.length;
-  console.warn(`[auth] Failed login — got ${got} chars, expected ${exp} chars`);
-  res.status(401).json({ error: 'Incorrect password' });
+  console.warn(
+    `[auth] Failed login — user: "${username}" (${userOk ? '✓' : '✗'}), ` +
+    `pass: ${password.length} chars (${passOk ? '✓' : '✗'})`
+  );
+  res.status(401).json({ error: 'Incorrect username or password' });
 });
 
-router.post('/logout', (req, res) => {
-  // Stateless — client clears its own localStorage token
+router.post('/logout', (_req, res) => {
   res.json({ ok: true });
 });
 
 router.get('/check', (req, res) => {
   const header = req.headers['authorization'] || '';
   const token  = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
-  res.json({ authenticated: !!(token && token === process.env.STUDIO_PASSWORD) });
+  res.json({ authenticated: !!(token && token === expectedPassword()) });
 });
 
 export default router;

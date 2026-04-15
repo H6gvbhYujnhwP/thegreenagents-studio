@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 
 export default function Login({ onLogin }) {
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error,    setError]    = useState('');
   const [loading,  setLoading]  = useState(false);
@@ -14,14 +15,14 @@ export default function Login({ onLogin }) {
       const res = await fetch('/api/auth/login', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ password })
+        body:    JSON.stringify({ username, password })
       });
 
       if (res.ok) {
         const { token } = await res.json();
         onLogin(token);
       } else {
-        setError('Incorrect password');
+        setError('Incorrect username or password');
       }
     } catch {
       setError('Could not reach server — try again');
@@ -29,6 +30,13 @@ export default function Login({ onLogin }) {
 
     setLoading(false);
   }
+
+  const inputStyle = (hasError) => ({
+    width: '100%', padding: '10px 12px', boxSizing: 'border-box',
+    border: `1px solid ${hasError ? '#e74c3c' : '#d0d0cc'}`,
+    borderRadius: 8, outline: 'none', fontSize: 14, background: '#fff',
+    transition: 'border-color 0.15s'
+  });
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f5f5f3' }}>
@@ -43,26 +51,40 @@ export default function Login({ onLogin }) {
           </div>
         </div>
 
-        <form onSubmit={handleSubmit}>
+        <form onSubmit={handleSubmit} autoComplete="on">
+          {/* Username */}
+          <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: '#555', marginBottom: 6 }}>
+            Username
+          </label>
+          <input
+            type="text"
+            name="username"
+            autoComplete="username"
+            value={username}
+            onChange={e => setUsername(e.target.value)}
+            placeholder="Username"
+            required
+            autoFocus
+            style={{ ...inputStyle(!!error), marginBottom: 14 }}
+            onFocus={e => { if (!error) e.target.style.borderColor = '#1D9E75'; }}
+            onBlur={e  => { e.target.style.borderColor = error ? '#e74c3c' : '#d0d0cc'; }}
+          />
+
+          {/* Password */}
           <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: '#555', marginBottom: 6 }}>
             Password
           </label>
           <input
             type="password"
+            name="password"
+            autoComplete="current-password"
             value={password}
             onChange={e => setPassword(e.target.value)}
-            placeholder="Enter studio password"
+            placeholder="Password"
             required
-            autoFocus
-            style={{
-              width: '100%', padding: '10px 12px',
-              border: `1px solid ${error ? '#e74c3c' : '#d0d0cc'}`,
-              borderRadius: 8, outline: 'none', marginBottom: 12,
-              fontSize: 14, background: '#fff', boxSizing: 'border-box',
-              transition: 'border-color 0.15s'
-            }}
+            style={{ ...inputStyle(!!error), marginBottom: 14 }}
             onFocus={e => { if (!error) e.target.style.borderColor = '#1D9E75'; }}
-            onBlur={e => { e.target.style.borderColor = error ? '#e74c3c' : '#d0d0cc'; }}
+            onBlur={e  => { e.target.style.borderColor = error ? '#e74c3c' : '#d0d0cc'; }}
           />
 
           {error && (
@@ -71,12 +93,12 @@ export default function Login({ onLogin }) {
 
           <button
             type="submit"
-            disabled={loading || !password}
+            disabled={loading || !username || !password}
             style={{
               width: '100%', background: loading ? '#9FE1CB' : '#1D9E75',
               color: '#fff', border: 'none', padding: '11px',
               borderRadius: 8, fontWeight: 600, fontSize: 14,
-              cursor: loading || !password ? 'not-allowed' : 'pointer',
+              cursor: loading || !username || !password ? 'not-allowed' : 'pointer',
               transition: 'background 0.15s'
             }}
           >

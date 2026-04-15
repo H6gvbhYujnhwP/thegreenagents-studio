@@ -34,7 +34,13 @@ export default function CampaignProgress({ campaignId, onComplete }) {
   }, []);
 
   useEffect(() => {
-    const es = new EventSource(`/api/campaigns/progress/${campaignId}`);
+    // EventSource cannot send custom headers — pass token as query param
+    const token = localStorage.getItem('studioToken') || '';
+    const es = new EventSource(`/api/campaigns/progress/${campaignId}?token=${encodeURIComponent(token)}`);
+    es.onerror = () => {
+      setLogs(l => l.some(m => m.includes('Live updates')) ? l : [...l, 'ERROR: Live updates disconnected — page will keep polling for changes…']);
+      fetch(`/api/campaigns/${campaignId}`).then(r => r.json()).then(d => { setCampaign(d); parsePosts(d); });
+    };
     es.onmessage = e => {
       const data = JSON.parse(e.data);
       if (data.type === 'status') {
@@ -93,7 +99,25 @@ export default function CampaignProgress({ campaignId, onComplete }) {
         if (d.files_json) { try { setFiles(JSON.parse(d.files_json)); } catch (_) {} }
       });
 
-    return () => es.close();
+    // Polling fallback — syncs campaign state every 8s even if SSE drops
+    const pollInterval = setInterval(() => {
+      fetch(`/api/campaigns/${campaignId}`)
+        .then(r => r.json())
+        .then(d => {
+          setCampaign(prev => {
+            if (!prev || prev.stage !== d.stage || prev.progress !== d.progress ||
+                prev.posts_generated !== d.posts_generated || prev.images_generated !== d.images_generated) {
+              parsePosts(d);
+              if (d.files_json) { try { setFiles(JSON.parse(d.files_json)); } catch (_) {} }
+              return d;
+            }
+            return prev;
+          });
+        })
+        .catch(() => {});
+    }, 8000);
+
+    return () => { es.close(); clearInterval(pollInterval); };
   }, [campaignId]);
 
   useEffect(() => {

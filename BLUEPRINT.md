@@ -155,7 +155,8 @@ completed_at TEXT
 | `R2_BUCKET_NAME` | `supergrowfortga` | R2 bucket name |
 | `R2_ENDPOINT` | `https://9c5edb3cc8262aa7b43de4b42b970b99.r2.cloudflarestorage.com` | |
 | `R2_PUBLIC_URL` | `https://pub-142245a59cdd4552a84f0f2d3e8ac94e.r2.dev` | Public image base URL |
-| `STUDIO_PASSWORD` | `86sdg88gdsd6&DF!` | Auth disabled currently — for when re-enabled |
+| `STUDIO_USERNAME` | `greenagents` | Login username (default if not set: "greenagents") |
+| `STUDIO_PASSWORD` | `86sdg88gdsd6&DF!` | Login password |
 | `SESSION_SECRET` | `greenagents_studio_2026_secret_key` | |
 | `NODE_ENV` | `production` | |
 | `DB_PATH` | `/var/data/studio.db` | Persistent disk |

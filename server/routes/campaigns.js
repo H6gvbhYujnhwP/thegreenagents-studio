@@ -291,7 +291,15 @@ async function runCampaign(campaignId, client) {
       } catch (err) {
         console.error(`Image gen failed for post ${i + 1}:`, err.message);
         enrichedPosts.push({ ...post, image_url: null, image_error: err.message });
-        sendSSE(campaignId, { type: 'log', message: `Image ${i + 1} failed (${err.message}) — post kept without image.` });
+
+        // Give a clear, actionable message for quota exhaustion
+        let logMsg;
+        if (err.message?.includes('429') || err.message?.includes('RESOURCE_EXHAUSTED') || err.message?.includes('quota')) {
+          logMsg = `⚠️ Image ${i + 1}: Gemini free tier quota exhausted — resets midnight Pacific. Posts will continue without images.`;
+        } else {
+          logMsg = `Image ${i + 1} failed (${err.message}) — post kept without image.`;
+        }
+        sendSSE(campaignId, { type: 'log', message: logMsg });
       }
 
       const progress = 35 + Math.round((i + 1) / scoredPosts.length * 55);
