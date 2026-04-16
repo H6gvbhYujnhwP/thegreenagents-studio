@@ -19,6 +19,7 @@ export default function CampaignProgress({ campaignId, onComplete }) {
   const [files, setFiles]           = useState(null);
   const [posts, setPosts]           = useState([]);
   const [deploying, setDeploying]   = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [expandedPost, setExpanded] = useState(null);
   const [cardState, setCardState]   = useState({});
   const logsEndRef = useRef(null);
@@ -139,6 +140,17 @@ export default function CampaignProgress({ campaignId, onComplete }) {
     }
   }
 
+  async function handleCancel() {
+    if (!window.confirm('Cancel this campaign? Posts generated so far will be lost.')) return;
+    setCancelling(true);
+    try {
+      await fetch(`/api/campaigns/${campaignId}/cancel`, { method: 'POST' });
+    } catch (err) {
+      setLogs(l => [...l, `Cancel failed: ${err.message}`]);
+    }
+    setCancelling(false);
+  }
+
   async function handleRegenImage(postIndex) {
     setCard(postIndex, { regenImage: true });
     setLogs(l => [...l, `Regenerating image for post ${postIndex + 1}…`]);
@@ -226,9 +238,22 @@ export default function CampaignProgress({ campaignId, onComplete }) {
                          '⟳ Campaign in progress'}
         </h2>
         {isRunning && (
-          <p style={{ fontSize: 13, color: '#888', margin: '4px 0 0' }}>
-            Do not close this page — this takes 20–35 minutes.
-          </p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 6 }}>
+            <p style={{ fontSize: 13, color: '#888', margin: 0 }}>
+              Do not close this page — this takes 20–35 minutes.
+            </p>
+            <button
+              onClick={handleCancel}
+              disabled={cancelling}
+              style={{
+                fontSize: 12, padding: '5px 12px', border: '0.5px solid #F7C1C1',
+                borderRadius: 7, background: '#fff', color: '#E24B4A',
+                cursor: cancelling ? 'not-allowed' : 'pointer', flexShrink: 0
+              }}
+            >
+              {cancelling ? 'Cancelling…' : '✕ Cancel campaign'}
+            </button>
+          </div>
         )}
       </div>
 

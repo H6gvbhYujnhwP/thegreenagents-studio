@@ -9,6 +9,7 @@ import { createDraft, getContentDna } from '../services/supergrow.js';
 
 const router = Router();
 const sseClients = new Map();
+const cancelledCampaigns = new Set(); // track in-flight cancellations
 
 // ─── SSE helpers ──────────────────────────────────────────────────────────────
 
@@ -227,6 +228,20 @@ router.delete('/:id', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// ─── Cancel a running campaign ───────────────────────────────────────────────
+
+router.post('/:id/cancel', requireAuth, (req, res) => {
+  const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+  if (!['running', 'awaiting_approval'].includes(campaign.status)) {
+    return res.status(400).json({ error: `Campaign is ${campaign.status} — cannot cancel` });
+  }
+  cancelledCampaigns.add(req.params.id);
+  updateCampaign(req.params.id, { status: 'failed', stage: 'error', error_log: 'Cancelled by operator' });
+  sendSSE(req.params.id, { type: 'error', message: 'Campaign cancelled by operator.' });
+  res.json({ ok: true });
+});
+
 // ─── Campaign pipeline ────────────────────────────────────────────────────────
 
 async function runCampaign(campaignId, client, includeImages = true) {
@@ -303,6 +318,13 @@ async function runCampaign(campaignId, client, includeImages = true) {
 
     for (let i = 0; i < scoredPosts.length; i++) {
       const post = scoredPosts[i];
+
+      // Check if operator cancelled while we were generating
+      if (cancelledCampaigns.has(campaignId)) {
+        cancelledCampaigns.delete(campaignId);
+        return;
+      }
+
       try {
         sendSSE(campaignId, { type: 'log', message: `Generating image ${i + 1}/${scoredPosts.length}...` });
         const imageData = await generateImage(

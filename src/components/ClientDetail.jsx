@@ -187,8 +187,8 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
       </div>
 
       {showCampaignModal && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}>
-          <div style={{ background: '#fff', borderRadius: 12, padding: 28, width: 360, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
+          <div style={{ background: '#fff', borderRadius: 12, padding: 28, width: 360 }}>
             <div style={{ fontSize: 15, fontWeight: 500, color: '#1a1a1a', marginBottom: 8 }}>Run new campaign</div>
             <div style={{ fontSize: 13, color: '#666', marginBottom: 24, lineHeight: 1.6 }}>
               Should this campaign include AI-generated images for each post?
