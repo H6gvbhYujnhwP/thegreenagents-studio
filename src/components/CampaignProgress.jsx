@@ -299,7 +299,7 @@ export default function CampaignProgress({ campaignId, onComplete }) {
                   cursor: deploying ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap', flexShrink: 0
                 }}
               >
-                {deploying ? 'Sending…' : `Send ${posts.length} Drafts to Supergrow →`}
+                {deploying ? 'Sending…' : `Send ${posts.length} drafts to Supergrow for client approval`}
               </button>
             </div>
           )}
