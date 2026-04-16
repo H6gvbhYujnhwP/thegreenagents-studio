@@ -14,6 +14,7 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
   const [uploadingRag, setUploadingRag]         = useState(false);
   const [deleting, setDeleting]                 = useState(false);
   const [activeTab, setActiveTab]               = useState('campaigns');
+  const [showCampaignModal, setShowCampaignModal] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -39,9 +40,14 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
     load();
   }
 
-  async function startCampaign() {
+  async function startCampaign(includeImages) {
+    setShowCampaignModal(false);
     setStarting(true);
-    const res = await fetch(`/api/campaigns/start/${clientId}`, { method: 'POST' });
+    const res = await fetch(`/api/campaigns/start/${clientId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ includeImages })
+    });
     const data = await res.json();
     setStarting(false);
     if (res.ok) setActiveCampaignId(data.campaignId);
@@ -90,7 +96,7 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
           <button onClick={deleteClient} disabled={deleting} style={{ padding: '7px 12px', border: '0.5px solid #F7C1C1', borderRadius: 8, background: '#fff', color: '#E24B4A', fontSize: 12, cursor: 'pointer' }}>
             {deleting ? 'Deleting...' : 'Delete'}
           </button>
-          <button onClick={startCampaign} disabled={starting || !client.rag_content}
+          <button onClick={() => setShowCampaignModal(true)} disabled={starting || !client.rag_content}
             style={{ padding: '7px 16px', background: client.rag_content ? GREEN : '#ccc', color: '#fff', border: 'none', borderRadius: 8, fontWeight: 500, fontSize: 12, cursor: client.rag_content ? 'pointer' : 'not-allowed' }}>
             {starting ? 'Starting...' : '▶ Run new campaign'}
           </button>
@@ -179,6 +185,28 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
           )
         )}
       </div>
+
+      {showCampaignModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}>
+          <div style={{ background: '#fff', borderRadius: 12, padding: 28, width: 360, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
+            <div style={{ fontSize: 15, fontWeight: 500, color: '#1a1a1a', marginBottom: 8 }}>Run new campaign</div>
+            <div style={{ fontSize: 13, color: '#666', marginBottom: 24, lineHeight: 1.6 }}>
+              Should this campaign include AI-generated images for each post?
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
+              <button onClick={() => startCampaign(true)} style={{ padding: '11px 16px', background: '#1D9E75', color: '#fff', border: 'none', borderRadius: 8, fontWeight: 500, fontSize: 13, cursor: 'pointer', textAlign: 'left' }}>
+                ✓ Yes — generate images for each post
+                <div style={{ fontSize: 11, fontWeight: 400, marginTop: 2, opacity: 0.85 }}>Uses Gemini Nano Banana (~£0.03 per image)</div>
+              </button>
+              <button onClick={() => startCampaign(false)} style={{ padding: '11px 16px', background: '#f5f5f3', color: '#1a1a1a', border: '0.5px solid #d0d0cc', borderRadius: 8, fontWeight: 500, fontSize: 13, cursor: 'pointer', textAlign: 'left' }}>
+                ✕ No — text posts only
+                <div style={{ fontSize: 11, fontWeight: 400, marginTop: 2, color: '#888' }}>Faster, no image costs</div>
+              </button>
+            </div>
+            <button onClick={() => setShowCampaignModal(false)} style={{ fontSize: 12, color: '#888', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>Cancel</button>
+          </div>
+        </div>
+      )}
 
       {showEdit && (
         <NewClientModal existing={client} onClose={() => setShowEdit(false)} onCreated={() => { setShowEdit(false); load(); onRefresh(); }} />

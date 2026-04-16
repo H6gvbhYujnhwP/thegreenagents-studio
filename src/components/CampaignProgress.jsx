@@ -332,7 +332,7 @@ export default function CampaignProgress({ campaignId, onComplete }) {
                   {/* Image */}
                   <div style={{ position: 'relative' }}>
                     {post.image_url
-                      ? <img src={post.image_url} alt={`Post ${i + 1}`} style={{ width: '100%', height: 180, objectFit: 'cover', display: 'block' }} onError={e => { e.target.style.display = 'none'; }} />
+                      ? <img src={post.image_url} alt={`Post ${i + 1}`} style={{ width: '100%', height: 'auto', maxHeight: 300, objectFit: 'contain', background: '#f5f5f3', display: 'block' }} onError={e => { e.target.style.display = 'none'; }} />
                       : <div style={{ height: 80, background: '#f5f5f3', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><span style={{ fontSize: 11, color: '#bbb' }}>No image generated</span></div>
                     }
                     {isRegenImg && (

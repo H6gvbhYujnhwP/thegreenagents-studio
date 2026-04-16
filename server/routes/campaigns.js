@@ -72,9 +72,11 @@ router.post('/start/:clientId', requireAuth, async (req, res) => {
     VALUES (?, ?, 'running', 'generating_posts', 0, 12)
   `).run(campaignId, client.id);
 
+  const includeImages = req.body?.includeImages !== false; // default true
+
   res.json({ campaignId });
 
-  runCampaign(campaignId, client).catch(err => {
+  runCampaign(campaignId, client, includeImages).catch(err => {
     console.error('Campaign error:', err);
     updateCampaign(campaignId, { status: 'failed', stage: 'error', error_log: err.message });
     sendSSE(campaignId, { type: 'error', message: err.message });
@@ -227,7 +229,7 @@ router.delete('/:id', requireAuth, (req, res) => {
 
 // ─── Campaign pipeline ────────────────────────────────────────────────────────
 
-async function runCampaign(campaignId, client) {
+async function runCampaign(campaignId, client, includeImages = true) {
   try {
     // ── Fetch Content DNA ──────────────────────────────────────────────────────
     let contentDna = null;
@@ -276,7 +278,23 @@ async function runCampaign(campaignId, client) {
     const scoredPosts = posts;
     sendSSE(campaignId, { type: 'log', message: `✓ ${posts.length} posts ready — skipping Supergrow score (MCP timeout). Proceeding to images.` });
 
-    // ── Stage 3: Generate images ───────────────────────────────────────────────
+    // ── Stage 3: Generate images (skipped if includeImages=false) ───────────────
+    if (!includeImages) {
+      sendSSE(campaignId, { type: 'log', message: 'Skipping image generation (text-only campaign).' });
+      const postsNoImages = scoredPosts.map(p => ({ ...p, image_url: null }));
+      updateCampaign(campaignId, {
+        stage: 'awaiting_approval', status: 'awaiting_approval', progress: 95,
+        posts_json: JSON.stringify(postsNoImages)
+      });
+      sendSSE(campaignId, {
+        type: 'awaiting_approval',
+        total: postsNoImages.length,
+        images: 0,
+        message: `${postsNoImages.length} posts ready (text only). Review below, then send to Supergrow as drafts.`
+      });
+      return;
+    }
+
     updateCampaign(campaignId, { stage: 'generating_images', progress: 35 });
     sendSSE(campaignId, { type: 'progress', stage: 'generating_images', progress: 35, posts_generated: scoredPosts.length });
 
