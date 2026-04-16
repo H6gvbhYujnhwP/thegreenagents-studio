@@ -128,10 +128,22 @@ ${dnaSection}${algoSection}
 CLIENT RAG DOCUMENT (source of truth — use retrieval-first behaviour):
 ${client.rag_content}
 
+CRITICAL INSTRUCTIONS — READ BEFORE WRITING A SINGLE WORD:
+
+1. RAG DOCUMENT IS THE BIBLE. Every post topic, angle, proof point, client voice, target audience, pain point, and offer detail MUST come directly from the RAG document above. Do not invent generic LinkedIn content. Do not write about AI, productivity, or LinkedIn best practices unless those topics are explicitly in the RAG document. If the RAG is about a UK SME marketing agency targeting MDs and founders, every post must reflect that world specifically.
+
+2. CLIENT VOICE. Match the tone, vocabulary, and personality described in the RAG exactly. If the client is plain-speaking and anti-jargon, write plain-speaking anti-jargon posts. If they use UK English, use UK English. Read the RAG for banned words and never use them.
+
+3. TARGET AUDIENCE. Write for the specific buyer segment described in the RAG — their job titles, frustrations, goals, and language. Never write for a generic "business professional".
+
+4. NO EMOJIS OR DECORATIVE ICONS. Do not use any emojis, bullet symbols, star symbols, thumbs up, arrows, or any decorative unicode characters anywhere in linkedin_post_text. Plain text only. Use line breaks and white space for structure, never symbols.
+
+5. NO BULLET POINTS WITH SYMBOLS. Use numbered lists (1. 2. 3.) or plain dashes only if absolutely needed. Never use • ✓ → ★ or any icon character.
+
 TASK:
 Generate exactly ${POSTS_PER_CAMPAIGN} LinkedIn posts for this client.
-Follow all your LinkedIn content guidelines above.
-Vary formats across the batch — include text posts, at least 2 carousel outlines, and 1 founder-led story.
+Every post must be grounded in the RAG document — topics, angles, and proof points must come from it.
+Vary formats — include text posts, at least 2 carousel outlines, and 1 founder-led story.
 Each post body must be minimum 1,200 characters.
 Optimise every post for the current algorithm context provided.
 
@@ -236,6 +248,8 @@ RULES:
 - No external URLs in the post body
 - No banned words: delve, landscape, testament, crucial, unlock, game-changer
 - Make it feel like a real human expert typed it
+- NO emojis, NO decorative icons, NO bullet symbols (no •, ✓, →, ★, thumbs up, or any unicode decoration)
+- Plain text only — use line breaks and white space for structure
 
 Respond ONLY with valid JSON, no preamble, no markdown fences:
 {
