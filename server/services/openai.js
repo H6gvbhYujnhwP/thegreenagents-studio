@@ -160,7 +160,15 @@ Before finalising, silently check every post:
 - no unsupported claims
 - ending question is specific and invites qualified replies
 - soft sell, not hard sell
-- could this post only have come from this specific client? If no, rewrite it.`;
+- could this post only have come from this specific client? If no, rewrite it.
+
+CRITICAL OUTPUT RULE
+
+Your entire response must be valid JSON and nothing else.
+Do not output a research summary. Do not output any text before or after the JSON.
+Do not explain your thinking. Do not introduce the posts.
+Start your response with the { character and end with the } character.
+Any text outside the JSON object will cause the entire pipeline to fail.`;
 
 // ─── Generate posts using Claude with web search + prompt caching ─────────────
 export async function generatePosts(client, onProgress, contentDna = null) {
@@ -205,8 +213,11 @@ Text post bodies must be minimum 1,200 characters.
 For carousel posts: linkedin_post_text is the caption hook only (200-400 chars, NOT "Swipe to learn more"). Slides go in carousel_slides.
 Founder story posts: first person, specific, human — not polished.
 
-RESPONSE FORMAT:
-Respond with ONLY valid JSON. No preamble, no explanation, no markdown fences.
+RESPONSE FORMAT — CRITICAL:
+Your ENTIRE response must be valid JSON and nothing else.
+Start your response with { and end with }.
+No research summary. No preamble. No explanation. No markdown fences.
+If you output anything before the opening { the entire response will fail.
 
 {
   "posts": [
