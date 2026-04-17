@@ -1,19 +1,30 @@
 /**
- * openai.js — Post generation using GPT-4o
+ * openai.js — Post generation using Claude Sonnet
  *
- * Uses the Master LinkedIn Content Strategist system prompt.
- * Retrieval-first, client-agnostic — every post grounded in client RAG.
+ * Switched from GPT-4o to Claude claude-sonnet-4-5 for better instruction-following,
+ * voice matching, and RAG grounding.
+ *
+ * Features:
+ * - Prompt caching on system prompt + RAG (faster, ~90% cheaper on cached tokens)
+ * - Web search tool enabled (Claude researches LinkedIn algorithm live before writing)
+ * - Stage 3 LinkedIn Content Agent system prompt
+ * - Same JSON output format as before — rest of app unchanged
+ *
+ * NOTE: File is named openai.js for import compatibility but uses Anthropic SDK.
  */
 
-import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || process.env.OPENAI_AI_KEY
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY
 });
 
 const POSTS_PER_CAMPAIGN = 12;
 
-const LINKEDIN_MASTER_SYSTEM_PROMPT = `You are a LinkedIn Content Agent.
+// ─── Stage 3 LinkedIn Content Agent System Prompt ────────────────────────────
+// This is cached by Anthropic's prompt caching — sent once, reused across
+// all posts in a campaign at ~90% token cost reduction.
+const STAGE3_SYSTEM_PROMPT = `You are a LinkedIn Content Agent.
 
 You are Stage 3 only.
 
@@ -38,51 +49,49 @@ MANDATORY EXECUTION ORDER
 
 For every content request:
 1. Read the client RAG file and relevant uploaded source materials first.
-2. Run a fresh live research check before writing any posts, unless the user explicitly says not to browse.
-3. Output a short section titled "Research Summary".
-4. Create the requested posts.
-5. Silently run a quality check before finalising.
+2. Use your web search tool to run a fresh live research check before writing any posts.
+3. Create the requested posts informed by both the RAG and the research.
+4. Silently run a quality check before finalising.
 
 Do not skip research.
 Do not create posts first and research later.
+
+MANDATORY PRE-WRITING RESEARCH
+
+Use your web search tool to research the following before writing a single post:
+
+A. Search for current LinkedIn algorithm best practices and content performance data for the current year. Find: which formats perform best right now, what signals LinkedIn rewards (dwell time, comments, saves), what to avoid (link posts, engagement bait, obvious AI patterns), and any recent observations from the last 60 days.
+
+B. Search for current news and trends relevant to the client's specific industry. Find: one timely development, one buyer pain point currently being discussed, one strong content angle for this week.
+
+Use search results directly to inform your post topics, hooks, and format choices. Do not skip this step.
 
 RETRIEVAL-FIRST RULE
 
 The client RAG file is the main source of truth.
 
-Use the RAG file and uploaded materials to determine:
-- offers
-- audience
-- USP
-- proof
-- objections
-- brand voice
-- safe claims
-- risky claims
-- terminology
-- content goals
-- content boundaries
+Use the RAG file to determine: offers, audience, USP, proof, objections, brand voice, safe claims, risky claims, terminology, content goals, content boundaries.
 
-If the RAG file and source materials answer a question, follow them.
-Do not replace client truth with generic best practice.
+If the RAG file answers a question, follow it. Do not replace client truth with generic best practice.
 
 VOICE RULE
 
 Write in the client's voice, not your own.
 
-Match:
-- tone
-- vocabulary
-- level of polish
-- humour level
-- directness
-- founder/operator/expert style
-- phrases they naturally use
-- phrases they avoid
+Match: tone, vocabulary, level of polish, humour level, directness, founder/operator/expert style, phrases they naturally use, phrases they avoid.
 
 Do not sound like a generic LinkedIn ghostwriter.
 Do not sound corporate.
 Do not sound like polished AI.
+Sound like a real human who has been in this industry for years and has opinions.
+
+HUMAN-SOUNDING WRITING RULES
+
+Posts must feel like a real person typed them, not an AI. To achieve this:
+
+Use contractions naturally. Use sentence fragments where a real person would. Let thoughts run slightly rough at the edges. Use specific details, not vague generalities. Reference real situations, not hypothetical ones. Have opinions. Be willing to say something is wrong or bad. Use the client's actual vocabulary from the RAG.
+
+Avoid: symmetrical list structures that scream AI, identical sentence lengths, corporate rhythm, hedging language, vague encouragement, anything that sounds like it was optimised for politeness.
 
 CONTENT RULES
 
@@ -96,20 +105,17 @@ Every post should do at least one of these:
 - explain a decision
 - create a qualified conversation
 
-Write for the client's buyers, not their peers, unless the brief says otherwise.
+Write for the client's buyers, not their peers.
 
 Default rules:
 - use short paragraphs
 - avoid walls of text
-- keep the first 2 lines strong
-- hook must earn attention
-- no filler
-- no motivational fluff
-- no generic thought leadership
+- keep the first 2 lines strong — hook must earn attention
+- no filler, no motivational fluff, no generic thought leadership
 - no hard sell
 - no external links unless explicitly requested
-- never default to "link in first comment"
-- end with a specific open-ended question
+- never "link in first comment"
+- end with a specific open-ended question that invites qualified replies
 
 FORMATTING RULES — ABSOLUTE AND NON-NEGOTIABLE
 
@@ -119,32 +125,21 @@ NO DECORATIVE SYMBOLS. No bullet symbols, checkmarks, right arrows, star symbols
 
 PARAGRAPH SPACING IS MANDATORY. Every paragraph must be separated by a blank line. Short paragraphs of 1 to 3 sentences only. Never write a wall of text.
 
-CAROUSEL POST RULE. For carousel format posts, linkedin_post_text is the post caption only — the short hook that appears above the document on LinkedIn (200 to 400 characters). Do NOT put slide content inside linkedin_post_text. Slide content goes exclusively in the carousel_slides field.
+CAROUSEL POST RULE. For carousel format posts, linkedin_post_text is the post caption only — a compelling hook of 200 to 400 characters that makes someone want to swipe. Do NOT write "Swipe to learn more" or any generic CTA. Write a specific, curiosity-driven hook grounded in the post topic. Do NOT put slide content inside linkedin_post_text. Slide content goes exclusively in the carousel_slides field.
 
 FORMAT MIX RULE
 
-For a batch of 5 posts, default to:
-- 2 Carousel / Document posts
-- 2 Text posts
-- 1 Text post or Native Video Script depending on fit
+For a batch of 12 posts, include:
+- 4 to 5 Text Posts
+- 3 to 4 Carousel / Document posts
+- 2 to 3 Founder Story posts (personal voice, first person)
+- 1 Video Script
 
-Rotate content types:
-- contrarian take
-- buyer pain
-- myth-busting
-- story / war story
-- case study
-- proof-led insight
-- framework / checklist
-- behind the scenes
-- trend interpretation
-- objection handling
+Rotate content types: contrarian take, buyer pain, myth-busting, story/war story, case study, proof-led insight, framework/checklist, behind the scenes, trend interpretation, objection handling.
 
 SAFE WRITING RULES
 
-Do not invent stats, case studies, results, testimonials, customer names, timelines, guarantees, or category claims.
-Do not overclaim.
-Respect compliance limits, naming restrictions, and client-specific banned phrases.
+Do not invent stats, case studies, results, testimonials, customer names, timelines, guarantees, or category claims. Do not overclaim. Respect compliance limits and client-specific banned phrases.
 
 BANNED WORDS
 
@@ -154,102 +149,61 @@ Also avoid any client-specific banned phrases found in their RAG document.
 
 QUALITY CHECK BEFORE FINALISING
 
-Before sending, silently check:
+Before finalising, silently check every post:
 - grounded in RAG and source materials
-- sounds like this client
+- informed by fresh research
+- sounds like this specific client, not a generic ghostwriter
 - hook is sharp in the first 2 lines (under 140 characters combined)
-- no emojis, no decorative symbols
+- no emojis, no decorative symbols anywhere
 - every paragraph separated by a blank line
 - format choice fits the idea
 - no unsupported claims
 - ending question is specific and invites qualified replies
 - soft sell, not hard sell
-- varied enough across the batch
 - could this post only have come from this specific client? If no, rewrite it.`;
 
-export async function getLinkedInAlgorithmContext(onProgress) {
-  onProgress('Fetching latest LinkedIn algorithm context...');
+// ─── Generate posts using Claude with web search + prompt caching ─────────────
+export async function generatePosts(client, onProgress, contentDna = null) {
+  onProgress('Starting Claude — researching LinkedIn algorithm and industry trends...');
 
-  try {
-    const response = await openai.responses.create({
-      model: 'gpt-4o-mini',
-      tools: [{ type: 'web_search_preview' }],
-      input: `Search for the most current LinkedIn algorithm best practices and content performance data for ${new Date().getFullYear()}.
-Provide a concise factual summary covering:
-1. Which content formats perform best right now and why (text posts, carousels/documents, video, polls)
-2. What signals LinkedIn rewards most (dwell time, comments, shares, saves, early engagement)
-3. What to avoid (link posts in body, engagement bait, obvious AI-pattern content)
-4. Any recent observations from practitioners in the last 60 days
-5. Optimal post structure and length
-Maximum 400 words. Note where evidence is strong vs directional.`
-    });
-
-    const text = (response.output || [])
-      .filter(block => block.type === 'message')
-      .flatMap(block => block.content || [])
-      .filter(c => c.type === 'output_text')
-      .map(c => c.text)
-      .join('\n');
-
-    if (text.trim()) {
-      onProgress('✓ LinkedIn algorithm context loaded (live data).');
-      return text;
-    }
-  } catch (err) {
-    console.warn('[openai] Algorithm context web search failed (non-fatal):', err.message);
-  }
-
-  onProgress('Algorithm web search unavailable — using built-in LinkedIn best practices.');
-  return `Current LinkedIn Platform Signals (${new Date().getFullYear()}):
-- Native document posts (carousels) consistently lead engagement benchmarks
-- Dwell time is the primary feed ranking signal — posts that make people pause and read perform best
-- Text posts: 1,200-2,000 characters maximises see-more clicks and dwell time
-- Comments are weighted more heavily than likes — end every post with a specific question
-- External links in post body significantly reduce reach — use Featured section reference instead
-- First 90 minutes after posting are critical for early engagement signals
-- Personal story-led content and specific data points outperform generic advice
-- AI-pattern writing (symmetrical lists, corporate cadence) is flagged as low quality
-- Avoid engagement bait — LinkedIn reduces reach on posts asking people to like/tag/share without substance
-- Posting 3-5x per week is more effective than daily posting for sustained reach`;
-}
-
-export async function generatePosts(client, onProgress, contentDna = null, algorithmContext = null) {
   const dnaSection = contentDna
     ? `\nCLIENT CONTENT DNA (writing style from Supergrow — match this voice exactly):\n${contentDna}\n`
     : '';
 
-  const algoSection = algorithmContext
-    ? `\nCURRENT LINKEDIN PLATFORM SIGNALS (use to maximise reach):\n${algorithmContext}\n`
-    : '';
-
-  const userPrompt = `CLIENT BRIEF:
+  // Build the user message — RAG is included here with cache_control
+  // so it gets cached alongside the system prompt on repeated calls
+  const userContent = [
+    {
+      type: 'text',
+      text: `CLIENT BRIEF:
 Name: ${client.name}
 Brand: ${client.brand}
 Website: ${client.website || 'Not provided'}
 Timezone: ${client.timezone}
 Posting Cadence: ${client.cadence}
-${dnaSection}${algoSection}
-CLIENT RAG DOCUMENT — THE ONLY SOURCE OF TRUTH FOR THIS CAMPAIGN:
-${client.rag_content}
-
-EXECUTION INSTRUCTIONS:
-
-Before writing anything, complete the 5-step internal workflow:
-1. Extract what this business sells, who it sells to, their proof, their voice, their audience language
-2. Distil the positioning into a single internal summary
-3. Build the message hierarchy for the batch
-4. Apply the risk filter — reject anything generic
-5. Final check: could each post ONLY come from this client?
+${dnaSection}
+CLIENT RAG DOCUMENT — THE ONLY SOURCE OF TRUTH FOR THIS CAMPAIGN:`,
+    },
+    {
+      type: 'text',
+      text: client.rag_content || 'No RAG document uploaded for this client.',
+      // Cache the RAG content — it's large and reused across calls
+      cache_control: { type: 'ephemeral' }
+    },
+    {
+      type: 'text',
+      text: `
 
 TASK:
-Generate exactly ${POSTS_PER_CAMPAIGN} LinkedIn posts for this client.
+1. Use your web_search tool now to research: (a) current LinkedIn algorithm best practices and format performance for ${new Date().getFullYear()}, and (b) current trends and buyer pain points in this client's industry.
+2. Then generate exactly ${POSTS_PER_CAMPAIGN} LinkedIn posts for this client.
 
 Every topic, angle, proof point, and voice detail MUST come from the RAG document above.
-Do not write about topics not present in the RAG.
-Vary formats — include text posts, at least 2 carousels, and 1 founder-led story.
+Vary formats across the batch as instructed.
 Separate every paragraph with a blank line. No emojis. No decorative symbols.
 Text post bodies must be minimum 1,200 characters.
-For carousel posts: linkedin_post_text is the caption hook only (200-400 characters). Slide content goes in carousel_slides.
+For carousel posts: linkedin_post_text is the caption hook only (200-400 chars, NOT "Swipe to learn more"). Slides go in carousel_slides.
+Founder story posts: first person, specific, human — not polished.
 
 RESPONSE FORMAT:
 Respond with ONLY valid JSON. No preamble, no explanation, no markdown fences.
@@ -266,7 +220,7 @@ Respond with ONLY valid JSON. No preamble, no explanation, no markdown fences.
       "format": "Text Post / Carousel / Video Script",
       "suggested_day": "Tuesday",
       "suggested_time": "08:00",
-      "linkedin_post_text": "Post body with blank line between every paragraph. No emojis. No symbols. 1200+ chars for text posts. Caption only for carousels.",
+      "linkedin_post_text": "Post body — blank line between every paragraph, no emojis, no symbols, 1200+ chars for text posts, specific caption only for carousels",
       "carousel_slides": null,
       "image_prompt": "Specific visual description — photorealistic, relevant to this client world, no text overlays"
     }
@@ -275,47 +229,180 @@ Respond with ONLY valid JSON. No preamble, no explanation, no markdown fences.
 
 For carousel posts, carousel_slides must be an array:
 [{"slide": 1, "title": "...", "body": "..."}, {"slide": 2, "title": "...", "body": "..."}]
-For text posts and video scripts, carousel_slides must be null.`;
+For text posts and video scripts, carousel_slides must be null.`
+    }
+  ];
 
-  onProgress(`Sending to GPT-4o — generating ${POSTS_PER_CAMPAIGN} posts...`);
+  onProgress('Claude is researching LinkedIn trends and reading the RAG document...');
 
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    max_completion_tokens: 16000,
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: LINKEDIN_MASTER_SYSTEM_PROMPT },
-      { role: 'user', content: userPrompt }
-    ]
-  });
+  let response;
+  try {
+    response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 16000,
+      system: [
+        {
+          type: 'text',
+          text: STAGE3_SYSTEM_PROMPT,
+          // Cache the system prompt — reused across all calls in this campaign
+          cache_control: { type: 'ephemeral' }
+        }
+      ],
+      tools: [
+        {
+          type: 'web_search_20250305',
+          name: 'web_search'
+        }
+      ],
+      messages: [
+        { role: 'user', content: userContent }
+      ]
+    });
+  } catch (err) {
+    // If web search fails (e.g. not available on this key), retry without it
+    console.warn('[claude] Web search failed, retrying without search tool:', err.message);
+    onProgress('Web search unavailable — generating from RAG only...');
+    response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 16000,
+      system: [
+        {
+          type: 'text',
+          text: STAGE3_SYSTEM_PROMPT,
+          cache_control: { type: 'ephemeral' }
+        }
+      ],
+      messages: [
+        { role: 'user', content: userContent }
+      ]
+    });
+  }
 
-  const text = completion.choices[0].message.content;
+  // Handle tool use — Claude may do web searches before responding
+  // We need to handle the full agentic loop
+  let fullResponse = response;
+  let messages = [{ role: 'user', content: userContent }];
+
+  while (fullResponse.stop_reason === 'tool_use') {
+    onProgress('Claude is searching the web for LinkedIn algorithm data...');
+
+    const toolUseBlock = fullResponse.content.find(b => b.type === 'tool_use');
+    if (!toolUseBlock) break;
+
+    // Add assistant message with tool use
+    messages.push({ role: 'assistant', content: fullResponse.content });
+
+    // Add tool result (web search results come back automatically in extended thinking)
+    // For web_search_20250305, we need to provide a tool_result
+    messages.push({
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_use_id: toolUseBlock.id,
+        content: 'Search completed. Use the results to inform your post generation.'
+      }]
+    });
+
+    fullResponse = await anthropic.messages.create({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 16000,
+      system: [
+        {
+          type: 'text',
+          text: STAGE3_SYSTEM_PROMPT,
+          cache_control: { type: 'ephemeral' }
+        }
+      ],
+      tools: [
+        {
+          type: 'web_search_20250305',
+          name: 'web_search'
+        }
+      ],
+      messages
+    });
+  }
+
+  // Extract the final text response
+  const textBlock = fullResponse.content.find(b => b.type === 'text');
+  if (!textBlock) throw new Error('Claude returned no text content');
+
+  onProgress('✓ Claude finished writing — parsing posts...');
+
+  // Strip any markdown fences if present
+  const raw = textBlock.text.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
+
   let result;
   try {
-    result = JSON.parse(text);
+    result = JSON.parse(raw);
   } catch (err) {
-    throw new Error(`GPT-4o did not return valid JSON: ${text.slice(0, 200)}`);
+    // Try to extract JSON object from the response
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        result = JSON.parse(match[0]);
+      } catch (_) {}
+    }
+    if (!result) throw new Error(`Claude did not return valid JSON: ${raw.slice(0, 300)}`);
   }
 
   if (!result.posts || result.posts.length === 0) {
-    throw new Error('GPT-4o returned no posts');
+    throw new Error('Claude returned no posts');
   }
 
-  onProgress(`✓ GPT-4o generated ${result.posts.length} posts.`);
+  // Log cache usage if available
+  const usage = fullResponse.usage;
+  if (usage?.cache_read_input_tokens > 0) {
+    console.log(`[claude] Cache hit — ${usage.cache_read_input_tokens} tokens from cache, ${usage.cache_creation_input_tokens || 0} new`);
+  }
+
+  onProgress(`✓ Claude generated ${result.posts.length} posts.`);
   return result;
 }
 
+// ─── Get LinkedIn algorithm context (kept for compatibility, now handled by Claude inline) ──
+export async function getLinkedInAlgorithmContext(onProgress) {
+  // Claude now handles research inline during generatePosts.
+  // This function is kept so campaigns.js doesn't need changing.
+  onProgress('LinkedIn research will be handled by Claude during post generation.');
+  return null;
+}
+
+// ─── Regenerate a single post using Claude ────────────────────────────────────
 export async function regenerateSinglePost(post, client, contentDna = null) {
   const dnaNote = contentDna
     ? `\nContent DNA (match this writing style exactly):\n${contentDna}\n`
     : '';
 
-  const prompt = `Rewrite this LinkedIn post. The operator requested a fresh version.
+  const response = await anthropic.messages.create({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 3000,
+    system: [
+      {
+        type: 'text',
+        text: STAGE3_SYSTEM_PROMPT,
+        cache_control: { type: 'ephemeral' }
+      }
+    ],
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: `Rewrite this LinkedIn post. The operator was not satisfied and requested a fresh version.
 
-CLIENT RAG — ground the rewrite entirely in this material:
-${(client.rag_content || '').slice(0, 4000)}
-${dnaNote}
-POST BRIEF (keep the same strategic intent, rewrite the text):
+CLIENT RAG — ground the rewrite entirely in this material:`,
+          },
+          {
+            type: 'text',
+            text: (client.rag_content || '').slice(0, 4000),
+            cache_control: { type: 'ephemeral' }
+          },
+          {
+            type: 'text',
+            text: `${dnaNote}
+POST BRIEF (keep the same strategic intent, rewrite the text completely):
 Topic: ${post.topic}
 Angle: ${post.angle}
 Buyer: ${post.buyer_segment}
@@ -330,7 +417,8 @@ RULES:
 - End with a specific open-ended question that invites qualified replies
 - No external URLs in the post body
 - No banned words: delve, landscape, testament, crucial, unlock, game-changer
-- NO emojis, NO decorative symbols, NO bullet icons — plain text only
+- NO emojis, NO decorative symbols, plain text only
+- Sound like a real human, not polished AI
 - Final check: could this only come from this specific client?
 
 Respond ONLY with valid JSON, no preamble, no markdown fences:
@@ -338,37 +426,43 @@ Respond ONLY with valid JSON, no preamble, no markdown fences:
   "linkedin_post_text": "...",
   "carousel_slides": null,
   "image_prompt": "..."
-}`;
-
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    max_completion_tokens: 2500,
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: LINKEDIN_MASTER_SYSTEM_PROMPT },
-      { role: 'user', content: prompt }
+}`
+          }
+        ]
+      }
     ]
   });
 
-  const text = completion.choices[0].message.content;
+  const textBlock = response.content.find(b => b.type === 'text');
+  if (!textBlock) throw new Error('Claude returned no text for single post rewrite');
+
+  const raw = textBlock.text.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
   let result;
   try {
-    result = JSON.parse(text);
+    result = JSON.parse(raw);
   } catch (err) {
-    throw new Error(`GPT-4o did not return valid JSON for single post: ${text.slice(0, 200)}`);
+    throw new Error(`Claude did not return valid JSON for single post: ${raw.slice(0, 200)}`);
   }
 
-  if (!result.linkedin_post_text) throw new Error('GPT-4o returned no post text');
+  if (!result.linkedin_post_text) throw new Error('Claude returned no post text');
   return result;
 }
 
+// ─── Fix a post that scored below quality threshold ───────────────────────────
 export async function fixPost(post, scoreFeedback, suggestions = [], contentDna = null) {
   const dnaNote = contentDna ? `\nContent DNA:\n${contentDna}\n` : '';
   const suggestionsNote = suggestions.length > 0
     ? `\nSpecific suggestions to action:\n${suggestions.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n`
     : '';
 
-  const prompt = `Improve this LinkedIn post that scored below 70/100 on the quality scorer.
+  const response = await anthropic.messages.create({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 2000,
+    system: STAGE3_SYSTEM_PROMPT,
+    messages: [
+      {
+        role: 'user',
+        content: `Improve this LinkedIn post that scored below 70/100 on the quality scorer.
 
 Original post:
 ${post.linkedin_post_text}
@@ -381,16 +475,12 @@ Post context — Topic: ${post.topic} | Audience: ${post.buyer_segment} | Format
 Rewrite the post to score 70 or above. Fix all issues raised in the feedback.
 Keep the same topic, angle, and CTA intent.
 Minimum 1,200 characters. Blank lines between paragraphs. No emojis or symbols.
-Return ONLY the improved post text — no preamble, no explanation, no JSON.`;
-
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    max_completion_tokens: 2000,
-    messages: [
-      { role: 'system', content: LINKEDIN_MASTER_SYSTEM_PROMPT },
-      { role: 'user', content: prompt }
+Return ONLY the improved post text — no preamble, no explanation, no JSON.`
+      }
     ]
   });
 
-  return completion.choices[0].message.content.trim();
+  const textBlock = response.content.find(b => b.type === 'text');
+  if (!textBlock) throw new Error('Claude returned no text for post fix');
+  return textBlock.text.trim();
 }

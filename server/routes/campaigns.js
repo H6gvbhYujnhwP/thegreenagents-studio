@@ -258,23 +258,18 @@ async function runCampaign(campaignId, client, includeImages = true) {
       sendSSE(campaignId, { type: 'log', message: `Content DNA unavailable (${err.message}) — proceeding.` });
     }
 
-    // ── Fetch fresh LinkedIn algorithm context ─────────────────────────────────
-    let algorithmContext = null;
-    try {
-      algorithmContext = await getLinkedInAlgorithmContext(msg => sendSSE(campaignId, { type: 'log', message: msg }));
-    } catch (err) {
-      sendSSE(campaignId, { type: 'log', message: `Algorithm context unavailable — proceeding with built-in guidelines.` });
-    }
-
-    // ── Stage 1: Generate posts via GPT-4o ────────────────────────────────────
-    sendSSE(campaignId, { type: 'log', message: 'Starting post generation with GPT-4o...' });
+    // ── Stage 1: Generate posts via Claude Sonnet ───────────────────────────────
+    // Claude handles LinkedIn research inline using web search — no pre-fetch needed.
+    sendSSE(campaignId, { type: 'log', message: 'Starting post generation with Claude Sonnet...' });
     updateCampaign(campaignId, { stage: 'generating_posts', progress: 5 });
+
+    // getLinkedInAlgorithmContext is now a no-op (Claude does research inline)
+    await getLinkedInAlgorithmContext(msg => sendSSE(campaignId, { type: 'log', message: msg }));
 
     const generated = await generatePosts(
       client,
       msg => sendSSE(campaignId, { type: 'log', message: msg }),
-      contentDna,
-      algorithmContext
+      contentDna
     );
 
     const posts = generated.posts;
@@ -291,7 +286,7 @@ async function runCampaign(campaignId, client, includeImages = true) {
     // ── Stage 2: Scoring skipped — score_post MCP consistently times out.
     // Posts proceed directly to image generation at full quality from GPT-4o.
     const scoredPosts = posts;
-    sendSSE(campaignId, { type: 'log', message: `✓ ${posts.length} posts ready — skipping Supergrow score (MCP timeout). Proceeding to images.` });
+    sendSSE(campaignId, { type: 'log', message: `✓ ${posts.length} posts ready — Proceeding to image generation.` });
 
     // ── Stage 3: Generate images (skipped if includeImages=false) ───────────────
     if (!includeImages) {
