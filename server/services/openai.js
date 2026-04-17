@@ -129,11 +129,12 @@ CAROUSEL POST RULE. For carousel format posts, linkedin_post_text is the post ca
 
 FORMAT MIX RULE
 
-For a batch of 12 posts, include:
-- 4 to 5 Text Posts
-- 3 to 4 Carousel / Document posts
-- 2 to 3 Founder Story posts (personal voice, first person)
+For a batch of 12 posts, use ONLY these formats:
+- 8 to 9 Text Posts
+- 2 to 3 Founder Story posts (personal voice, first person, written as if John typed it)
 - 1 Video Script
+
+DO NOT generate any Carousel or Document posts. No carousels. No documents. Text only.
 
 Rotate content types: contrarian take, buyer pain, myth-busting, story/war story, case study, proof-led insight, framework/checklist, behind the scenes, trend interpretation, objection handling.
 
@@ -210,7 +211,7 @@ Every topic, angle, proof point, and voice detail MUST come from the RAG documen
 Vary formats across the batch as instructed.
 Separate every paragraph with a blank line. No emojis. No decorative symbols.
 Text post bodies must be minimum 1,200 characters.
-For carousel posts: linkedin_post_text is the caption hook only (200-400 chars, NOT "Swipe to learn more"). Slides go in carousel_slides.
+carousel_slides must always be null — no carousel format is used.
 Founder story posts: first person, specific, human — not polished.
 
 RESPONSE FORMAT — CRITICAL:
