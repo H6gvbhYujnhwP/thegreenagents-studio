@@ -480,7 +480,17 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
   const [loading,setLoading]=useState(true);
   const [modal,setModal]=useState(null);
   const [modalData,setModalData]=useState({});
-  const [testEmail,setTestEmail]=useState('');
+  const [testEmail,setTestEmail]=useState(emailClient.test_email||'');
+
+  // Save test email to server whenever it changes (debounced)
+  const saveTimer=useRef(null);
+  function handleTestEmailChange(val){
+    setTestEmail(val);
+    clearTimeout(saveTimer.current);
+    saveTimer.current=setTimeout(()=>{
+      fetch(`/api/email/clients/${emailClient.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({test_email:val})});
+    },800);
+  }
   const [testStatus,setTestStatus]=useState({});
   const [sendStatus,setSendStatus]=useState({});
 
@@ -535,7 +545,7 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
   return(<div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0}}>
     <div style={{padding:'10px 16px',borderBottom:`0.5px solid ${BORDER}`,background:CARD,display:'flex',alignItems:'center',gap:8}}>
       <div style={{display:'flex',gap:6,alignItems:'center',marginRight:8}}>
-        <input value={testEmail} onChange={e=>setTestEmail(e.target.value)} placeholder="test@youremail.com" style={{fontSize:12,padding:'5px 10px',border:`0.5px solid ${BORDER}`,borderRadius:6,color:TEXT,background:BG,outline:'none',width:180}}/>
+        <input value={testEmail} onChange={e=>handleTestEmailChange(e.target.value)} placeholder="test@youremail.com" style={{fontSize:12,padding:'5px 10px',border:`0.5px solid ${BORDER}`,borderRadius:6,color:TEXT,background:BG,outline:'none',width:200}}/>
         <span style={{fontSize:11,color:MUTED}}>← test send address</span>
       </div>
       <div style={{marginLeft:'auto',display:'flex',gap:8}}>

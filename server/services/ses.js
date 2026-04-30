@@ -54,20 +54,16 @@ export async function getVerifiedDomains() {
 }
 
 // ── Send a campaign to a list of subscribers ──────────────────────────────────
-// Batches at SES rate limit (14/sec for eu-north-1), injects unsubscribe link
 export async function sendCampaign({ campaign, subscribers, baseUrl, onProgress }) {
   const results = { sent: 0, failed: 0, errors: [] };
   const BATCH_SIZE = 10;
-  const DELAY_MS   = 800; // ~12/sec, safely under 14/sec limit
+  const DELAY_MS   = 800;
 
   for (let i = 0; i < subscribers.length; i += BATCH_SIZE) {
     const batch = subscribers.slice(i, i + BATCH_SIZE);
 
     await Promise.all(batch.map(async (sub) => {
       try {
-        const html = injectUnsubscribeLink(campaign.html_body, sub, campaign.id, baseUrl);
-        const plain = injectUnsubscribeLinkPlain(campaign.plain_body || htmlToPlain(campaign.html_body), sub, campaign.id, baseUrl);
-
         await sendEmail({
           to:        sub.email,
           toName:    sub.name,
@@ -75,8 +71,8 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, onProgress 
           fromEmail: campaign.from_email,
           replyTo:   campaign.reply_to,
           subject:   campaign.subject,
-          htmlBody:  html,
-          plainBody: plain,
+          htmlBody:  campaign.html_body,
+          plainBody: campaign.plain_body || htmlToPlain(campaign.html_body),
         });
         results.sent++;
       } catch (err) {
@@ -93,19 +89,6 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, onProgress 
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function injectUnsubscribeLink(html, sub, campaignId, baseUrl) {
-  const link = `${baseUrl}/api/email/unsubscribe?sid=${sub.id}&cid=${campaignId}`;
-  const tag  = `<p style="margin-top:32px;font-size:11px;color:#999;text-align:center;">
-    You received this email because you're subscribed to our list.
-    <a href="${link}" style="color:#999;">Unsubscribe</a>
-  </p>`;
-  return html.includes('</body>') ? html.replace('</body>', `${tag}</body>`) : html + tag;
-}
-
-function injectUnsubscribeLinkPlain(plain, sub, campaignId, baseUrl) {
-  const link = `${baseUrl}/api/email/unsubscribe?sid=${sub.id}&cid=${campaignId}`;
-  return `${plain}\n\n---\nTo unsubscribe: ${link}`;
-}
 
 function htmlToPlain(html) {
   return html

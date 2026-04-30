@@ -266,4 +266,13 @@ db.exec(`
   }
 }
 
+// 9. Add test_email to email_clients for per-client test send persistence
+{
+  const cols = db.prepare('PRAGMA table_info(email_clients)').all().map(r => r.name);
+  if (!cols.includes('test_email')) {
+    db.exec(`ALTER TABLE email_clients ADD COLUMN test_email TEXT`);
+    console.log('[db] migration: added test_email to email_clients');
+  }
+}
+
 export default db;

@@ -55,11 +55,11 @@ router.post('/clients', (req, res) => {
 });
 
 router.put('/clients/:id', (req, res) => {
-  const { name, color } = req.body;
+  const { name, color, test_email } = req.body;
   const c = db.prepare('SELECT * FROM email_clients WHERE id=?').get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Not found' });
-  db.prepare('UPDATE email_clients SET name=?,color=? WHERE id=?')
-    .run(name ?? c.name, color ?? c.color, req.params.id);
+  db.prepare('UPDATE email_clients SET name=?,color=?,test_email=? WHERE id=?')
+    .run(name ?? c.name, color ?? c.color, test_email ?? c.test_email, req.params.id);
   res.json(db.prepare('SELECT * FROM email_clients WHERE id=?').get(req.params.id));
 });
 
@@ -427,7 +427,7 @@ router.post('/campaigns/:id/test', async (req, res) => {
   try {
     // For test sends, inject a clean footer without a real unsubscribe link
     const testFooter = `<p style="margin-top:32px;font-size:11px;color:#999;text-align:center;border-top:1px solid #eee;padding-top:16px;">
-      <strong>TEST SEND</strong> — This is a preview. Unsubscribe link disabled for test sends.
+      <strong>TEST SEND</strong> — This is a preview only.
     </p>`;
     const html = campaign.html_body.includes('</body>')
       ? campaign.html_body.replace('</body>', `${testFooter}</body>`)
