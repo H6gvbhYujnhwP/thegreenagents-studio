@@ -1,16 +1,5 @@
-import { SESv2Client, SendEmailCommand }           from '@aws-sdk/client-sesv2';
-import { SESClient, GetSendQuotaCommand, ListIdentitiesCommand, GetIdentityVerificationAttributesCommand } from '@aws-sdk/client-ses';
+import { SESClient, SendEmailCommand, GetSendQuotaCommand, ListIdentitiesCommand, GetIdentityVerificationAttributesCommand } from '@aws-sdk/client-ses';
 
-// SES v2 client — used for sending (supports native tracking suppression)
-const sesv2 = new SESv2Client({
-  region: process.env.AWS_SES_REGION || 'eu-north-1',
-  credentials: {
-    accessKeyId:     process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  },
-});
-
-// SES v1 client — used for account info (quota, verified domains)
 const ses = new SESClient({
   region: process.env.AWS_SES_REGION || 'eu-north-1',
   credentials: {
@@ -22,27 +11,32 @@ const ses = new SESClient({
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ── Send a single email ───────────────────────────────────────────────────────
+// Uses ConfigurationSetName 'no-tracking' if it exists in your AWS account,
+// which disables the AWS tracking pixel. Create it in AWS SES console:
+// SES → Configuration Sets → Create → name it 'no-tracking' → disable open/click tracking.
 export async function sendEmail({ to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody }) {
-  const cmd = new SendEmailCommand({
-    FromEmailAddress: `${fromName} <${fromEmail}>`,
+  const plain = plainBody || htmlToPlain(htmlBody);
+
+  const params = {
+    Source: `${fromName} <${fromEmail}>`,
     Destination: { ToAddresses: [toName ? `${toName} <${to}>` : to] },
-    ReplyToAddresses: [replyTo || fromEmail],
-    Content: {
-      Simple: {
-        Subject: { Data: subject, Charset: 'UTF-8' },
-        Body: {
-          Html: { Data: htmlBody,                          Charset: 'UTF-8' },
-          Text: { Data: plainBody || htmlToPlain(htmlBody), Charset: 'UTF-8' },
-        },
+    Message: {
+      Subject: { Data: subject, Charset: 'UTF-8' },
+      Body: {
+        Html: { Data: htmlBody, Charset: 'UTF-8' },
+        Text: { Data: plain,    Charset: 'UTF-8' },
       },
     },
-    // Disable AWS tracking pixel and click wrapping entirely
-    EmailTags: [
-      { Name: 'ses:no-open-tracking',  Value: 'true' },
-      { Name: 'ses:no-click-tracking', Value: 'true' },
-    ],
-  });
-  return sesv2.send(cmd);
+    ReplyToAddresses: [replyTo || fromEmail],
+  };
+
+  // If NO_TRACKING_CONFIG_SET env var is set, use it to suppress AWS pixel
+  // Set this to the name of a Configuration Set in SES with tracking disabled
+  if (process.env.SES_CONFIGURATION_SET) {
+    params.ConfigurationSetName = process.env.SES_CONFIGURATION_SET;
+  }
+
+  return ses.send(new SendEmailCommand(params));
 }
 
 // ── Send a campaign to a list of subscribers ──────────────────────────────────
