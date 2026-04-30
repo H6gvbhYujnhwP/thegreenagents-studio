@@ -440,12 +440,23 @@ function BrandPanel({ brand, lists, verifiedDomains, clients, onRefresh, onEditB
     onRefresh();
   }
 
-  async function checkDomain(domain) {
-    setDomains(prev=>prev.filter(d=>d.domain!==domain));
-    const r = await fetch(`/api/email/domain-health/${domain}`);
-    const d = await r.json();
-    setDomains(prev=>[...prev.filter(x=>x.domain!==domain),d]);
-  }
+  const [domainsLoading, setDomainsLoading] = useState(false);
+
+  // Auto-check all verified domains when the Domains tab is opened
+  useEffect(()=>{
+    if (tab !== 'domains') return;
+    if (verifiedDomains.length === 0) return;
+    setDomainsLoading(true);
+    setDomains([]);
+    Promise.all(
+      verifiedDomains.map(d =>
+        fetch(`/api/email/domain-health/${d}`).then(r=>r.json())
+      )
+    ).then(results => {
+      setDomains(results);
+      setDomainsLoading(false);
+    });
+  },[tab, brand.id]);
 
   const tabs = ['campaigns','lists','domains','settings'];
 
@@ -563,15 +574,11 @@ function BrandPanel({ brand, lists, verifiedDomains, clients, onRefresh, onEditB
         {/* Domains */}
         {tab==='domains' && (
           <div>
-            <p style={{ fontSize:13, color:MUTED, marginBottom:14 }}>Check SPF, DKIM, DMARC and MX records before sending campaigns.</p>
-            <div style={{ display:'flex', flexWrap:'wrap', gap:8, marginBottom:20 }}>
-              {brand.from_email && (
-                <Btn small onClick={()=>checkDomain(brand.from_email.split('@')[1])}>
-                  Check {brand.from_email.split('@')[1]}
-                </Btn>
-              )}
-            </div>
-            {domains.length>0 && (
+            {domainsLoading ? (
+              <div style={{ color:MUTED, textAlign:'center', padding:40, fontSize:13 }}>Checking all domains…</div>
+            ) : domains.length===0 ? (
+              <div style={{ color:MUTED, textAlign:'center', padding:40, fontSize:13 }}>No verified domains found.</div>
+            ) : (
               <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
                 {domains.map(d=><DomainCard key={d.domain} data={d} />)}
               </div>
