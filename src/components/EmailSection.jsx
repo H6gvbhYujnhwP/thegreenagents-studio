@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import RichTextEditor from './RichTextEditor.jsx';
 
 const GREEN='#1D9E75',DARK='#0F6E56',BG='#f5f5f3',CARD='#fff',BORDER='#e0e0dc',TEXT='#1a1a1a',MUTED='#888',DANGER='#c0392b',AMBER='#854F0B',BLUE='#185FA5';
 const BRAND_COLORS=['#1D9E75','#0F6E56','#534AB7','#185FA5','#993C1D','#854F0B','#3B6D11','#D4537E','#5F5E5A'];
@@ -152,7 +153,10 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
       <Input label="From email *" value={form.from_email} onChange={v=>set('from_email',v)} placeholder={`hello@${emailClient.name}`} required/>
       <Input label="Reply-to (leave blank to match from email)" value={form.reply_to} onChange={v=>set('reply_to',v)}/>
     </div>
-    <Input label="Email body (HTML) *" value={form.html_body} onChange={v=>set('html_body',v)} placeholder="Paste HTML or plain text. Unsubscribe link auto-appended." rows={10} required/>
+    <div style={{ marginBottom: 14 }}>
+      <label style={{ display: 'block', fontSize: 12, color: MUTED, marginBottom: 4 }}>Email body *</label>
+      <RichTextEditor value={form.html_body} onChange={v => set('html_body', v)} />
+    </div>
     {err&&<div style={{color:DANGER,fontSize:13,marginBottom:10}}>{err}</div>}
     <div style={{display:'flex',justifyContent:'flex-end',gap:8}}><Btn onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={save} disabled={saving}>{saving?'Saving…':editing?'Save changes':'Create campaign'}</Btn></div>
   </Modal>);

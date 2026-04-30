@@ -425,12 +425,24 @@ router.post('/campaigns/:id/test', async (req, res) => {
   if (!campaign) return res.status(404).json({ error: 'Not found' });
 
   try {
-    const { sendCampaign } = await import('../services/ses.js');
-    await sendCampaign({
-      campaign,
-      subscribers: [{ id: 'test', email: test_email, name: 'Test' }],
-      baseUrl: `${req.protocol}://${req.get('host')}`,
-      isTest: true,
+    // For test sends, inject a clean footer without a real unsubscribe link
+    const testFooter = `<p style="margin-top:32px;font-size:11px;color:#999;text-align:center;border-top:1px solid #eee;padding-top:16px;">
+      <strong>TEST SEND</strong> — This is a preview. Unsubscribe link disabled for test sends.
+    </p>`;
+    const html = campaign.html_body.includes('</body>')
+      ? campaign.html_body.replace('</body>', `${testFooter}</body>`)
+      : campaign.html_body + testFooter;
+
+    const { sendEmail } = await import('../services/ses.js');
+    await sendEmail({
+      to:        test_email,
+      toName:    'Test Recipient',
+      fromName:  campaign.from_name,
+      fromEmail: campaign.from_email,
+      replyTo:   campaign.reply_to || campaign.from_email,
+      subject:   `[TEST] ${campaign.subject}`,
+      htmlBody:  html,
+      plainBody: `TEST SEND\n\n${campaign.plain_body || campaign.html_body.replace(/<[^>]+>/g,'')}\n\n---\nThis is a test send. Unsubscribe link disabled.`,
     });
     res.json({ ok: true });
   } catch (err) {
