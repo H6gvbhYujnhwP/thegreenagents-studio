@@ -12,17 +12,16 @@ const DANGER = '#c0392b';
 const BRAND_COLORS = ['#1D9E75','#0F6E56','#534AB7','#185FA5','#993C1D','#854F0B','#3B6D11','#D4537E','#5F5E5A'];
 
 function initials(name) {
-  return name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0,2);
+  return name.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
 }
 
-// ── Shared UI ─────────────────────────────────────────────────────────────────
+// ── Shared UI ──────────────────────────────────────────────────────────────────
 
 function Btn({ children, onClick, variant='default', small, disabled, style={} }) {
   const v = {
     default: { background:'#f0f0ed', color:TEXT },
     primary: { background:GREEN, color:'#fff' },
     danger:  { background:'#fdecea', color:DANGER },
-    ghost:   { background:'transparent', color:MUTED, border:`0.5px solid ${BORDER}` },
   };
   return (
     <button onClick={onClick} disabled={disabled} style={{
@@ -75,8 +74,6 @@ function statusBadge(status) {
   return <Badge label={s.l} color={s.c} bg={s.b} />;
 }
 
-// ── Modal wrapper ─────────────────────────────────────────────────────────────
-
 function Modal({ title, children, onClose, wide }) {
   return (
     <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.35)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 }}>
@@ -91,39 +88,76 @@ function Modal({ title, children, onClose, wide }) {
   );
 }
 
-// ── Brand modal ───────────────────────────────────────────────────────────────
+// ── Email Client modal ─────────────────────────────────────────────────────────
 
-function BrandModal({ clients, initial, verifiedDomains, onClose, onSaved }) {
+function ClientModal({ initial, onClose, onSaved }) {
   const editing = !!initial?.id;
-  const [form, setForm] = useState({
-    client_id:  initial?.client_id  || '',
-    name:       initial?.name       || '',
-    from_name:  initial?.from_name  || '',
-    from_email: initial?.from_email || '',
-    reply_to:   initial?.reply_to   || '',
-    color:      initial?.color      || '#1D9E75',
-  });
+  const [name, setName] = useState(initial?.name || '');
+  const [color, setColor] = useState(initial?.color || '#1D9E75');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
-  const set = (k,v) => setForm(f=>({...f,[k]:v}));
 
   async function save() {
-    if (!form.client_id||!form.name||!form.from_name||!form.from_email) { setErr('Fill all required fields'); return; }
+    if (!name.trim()) { setErr('Name required'); return; }
     setSaving(true); setErr('');
-    const url    = editing ? `/api/email/brands/${initial.id}` : '/api/email/brands';
+    const url    = editing ? `/api/email/clients/${initial.id}` : '/api/email/clients';
     const method = editing ? 'PUT' : 'POST';
-    const r = await fetch(url,{ method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(form) });
+    const r = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body:JSON.stringify({ name, color }) });
     const d = await r.json();
     if (d.error) { setErr(d.error); setSaving(false); return; }
     onSaved(); onClose();
   }
 
   return (
-    <Modal title={editing?'Edit brand':'New brand'} onClose={onClose}>
-      <SelInput label="Client *" value={form.client_id} onChange={v=>set('client_id',v)}
-        options={clients.map(c=>({value:c.id,label:c.name}))} required />
-      <Input label="Brand name *" value={form.name} onChange={v=>set('name',v)} placeholder="Tower Leasing" required />
-      <Input label="From name *" value={form.from_name} onChange={v=>set('from_name',v)} placeholder="Tower Leasing" required />
+    <Modal title={editing ? 'Edit client' : 'New client'} onClose={onClose}>
+      <Input label="Client name *" value={name} onChange={setName} placeholder="Tower Leasing" required />
+      <div style={{ marginBottom:14 }}>
+        <label style={{ display:'block', fontSize:12, color:MUTED, marginBottom:6 }}>Colour</label>
+        <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+          {BRAND_COLORS.map(c=>(
+            <div key={c} onClick={()=>setColor(c)} style={{ width:24, height:24, borderRadius:6, background:c, cursor:'pointer', border:color===c?`2px solid ${TEXT}`:'2px solid transparent' }} />
+          ))}
+        </div>
+      </div>
+      {err && <div style={{ color:DANGER, fontSize:13, marginBottom:10 }}>{err}</div>}
+      <div style={{ display:'flex', justifyContent:'flex-end', gap:8 }}>
+        <Btn onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" onClick={save} disabled={saving}>{saving?'Saving...':editing?'Save changes':'Create client'}</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+// ── Brand modal ────────────────────────────────────────────────────────────────
+
+function BrandModal({ emailClient, initial, verifiedDomains, onClose, onSaved }) {
+  const editing = !!initial?.id;
+  const [form, setForm] = useState({
+    name:       initial?.name       || emailClient.name,
+    from_name:  initial?.from_name  || '',
+    from_email: initial?.from_email || '',
+    reply_to:   initial?.reply_to   || '',
+    color:      initial?.color      || emailClient.color || '#1D9E75',
+  });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+
+  async function save() {
+    if (!form.name||!form.from_name||!form.from_email) { setErr('Fill all required fields'); return; }
+    setSaving(true); setErr('');
+    const url    = editing ? `/api/email/brands/${initial.id}` : '/api/email/brands';
+    const method = editing ? 'PUT' : 'POST';
+    const r = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body:JSON.stringify({ ...form, email_client_id: emailClient.id }) });
+    const d = await r.json();
+    if (d.error) { setErr(d.error); setSaving(false); return; }
+    onSaved(); onClose();
+  }
+
+  return (
+    <Modal title={editing ? 'Edit brand' : 'New sending identity'} onClose={onClose}>
+      <Input label="Brand / identity name *" value={form.name} onChange={v=>set('name',v)} placeholder="Tower Leasing" required />
+      <Input label="From name *" value={form.from_name} onChange={v=>set('from_name',v)} placeholder="Wez at Tower Leasing" required />
       <div style={{ marginBottom:14 }}>
         <label style={{ display:'block', fontSize:12, color:MUTED, marginBottom:4 }}>From email *</label>
         <select value={form.from_email} onChange={e=>set('from_email',e.target.value)}
@@ -136,9 +170,9 @@ function BrandModal({ clients, initial, verifiedDomains, onClose, onSaved }) {
           ])}
         </select>
       </div>
-      <Input label="Reply-to (leave blank to use from email)" value={form.reply_to} onChange={v=>set('reply_to',v)} />
+      <Input label="Reply-to (leave blank to match from email)" value={form.reply_to} onChange={v=>set('reply_to',v)} />
       <div style={{ marginBottom:14 }}>
-        <label style={{ display:'block', fontSize:12, color:MUTED, marginBottom:6 }}>Brand colour</label>
+        <label style={{ display:'block', fontSize:12, color:MUTED, marginBottom:6 }}>Colour</label>
         <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
           {BRAND_COLORS.map(c=>(
             <div key={c} onClick={()=>set('color',c)} style={{ width:24, height:24, borderRadius:6, background:c, cursor:'pointer', border:form.color===c?`2px solid ${TEXT}`:'2px solid transparent' }} />
@@ -154,19 +188,17 @@ function BrandModal({ clients, initial, verifiedDomains, onClose, onSaved }) {
   );
 }
 
-// ── Campaign modal ────────────────────────────────────────────────────────────
+// ── Campaign modal ─────────────────────────────────────────────────────────────
 
-function CampaignModal({ brand, lists, verifiedDomains, initial, onClose, onSaved }) {
+function CampaignModal({ emailClient, lists, verifiedDomains, initial, onClose, onSaved }) {
   const editing = !!initial?.id;
-  const brandLists = lists.filter(l=>l.client_id===brand.client_id);
   const [form, setForm] = useState({
-    client_id:    brand.client_id,
     list_id:      initial?.list_id      || '',
     title:        initial?.title        || '',
     subject:      initial?.subject      || '',
-    from_name:    initial?.from_name    || brand.from_name,
-    from_email:   initial?.from_email   || brand.from_email,
-    reply_to:     initial?.reply_to     || brand.reply_to,
+    from_name:    initial?.from_name    || '',
+    from_email:   initial?.from_email   || '',
+    reply_to:     initial?.reply_to     || '',
     html_body:    initial?.html_body    || '',
     scheduled_at: initial?.scheduled_at || '',
   });
@@ -179,17 +211,17 @@ function CampaignModal({ brand, lists, verifiedDomains, initial, onClose, onSave
     setSaving(true); setErr('');
     const url    = editing ? `/api/email/campaigns/${initial.id}` : '/api/email/campaigns';
     const method = editing ? 'PUT' : 'POST';
-    const r = await fetch(url,{ method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(form) });
+    const r = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body:JSON.stringify({ ...form, email_client_id: emailClient.id }) });
     const d = await r.json();
     if (d.error) { setErr(d.error); setSaving(false); return; }
     onSaved(); onClose();
   }
 
   return (
-    <Modal title={editing?'Edit campaign':'New campaign'} onClose={onClose} wide>
+    <Modal title={editing ? 'Edit campaign' : 'New campaign'} onClose={onClose} wide>
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 20px' }}>
         <SelInput label="Mailing list *" value={form.list_id} onChange={v=>set('list_id',v)}
-          options={brandLists.map(l=>({value:l.id,label:l.name}))} required />
+          options={lists.map(l=>({value:l.id,label:l.name}))} required />
         <Input label="Campaign title *" value={form.title} onChange={v=>set('title',v)} placeholder="May outreach wave 1" required />
         <Input label="Email subject *" value={form.subject} onChange={v=>set('subject',v)} placeholder="Is waiting costing your business?" required />
         <Input label="From name" value={form.from_name} onChange={v=>set('from_name',v)} />
@@ -198,12 +230,10 @@ function CampaignModal({ brand, lists, verifiedDomains, initial, onClose, onSave
           <select value={form.from_email} onChange={e=>set('from_email',e.target.value)}
             style={{ width:'100%', padding:'8px 12px', border:`0.5px solid ${BORDER}`, borderRadius:7, fontSize:13, color:TEXT, background:CARD }}>
             <option value="">— select —</option>
-            {/* Always show brand's saved email first */}
-            {brand.from_email && <option value={brand.from_email}>{brand.from_email} (brand default)</option>}
             {verifiedDomains.map(d=>[
-              brand.from_email!==`hello@${d}`    && <option key={`hello@${d}`}    value={`hello@${d}`}>hello@{d}</option>,
-              brand.from_email!==`noreply@${d}`  && <option key={`noreply@${d}`}  value={`noreply@${d}`}>noreply@{d}</option>,
-              brand.from_email!==`contact@${d}`  && <option key={`contact@${d}`}  value={`contact@${d}`}>contact@{d}</option>,
+              <option key={`hello@${d}`} value={`hello@${d}`}>hello@{d}</option>,
+              <option key={`noreply@${d}`} value={`noreply@${d}`}>noreply@{d}</option>,
+              <option key={`contact@${d}`} value={`contact@${d}`}>contact@{d}</option>,
             ])}
           </select>
         </div>
@@ -221,36 +251,47 @@ function CampaignModal({ brand, lists, verifiedDomains, initial, onClose, onSave
   );
 }
 
-// ── List modal ────────────────────────────────────────────────────────────────
+// ── List modal ─────────────────────────────────────────────────────────────────
 
-function ListModal({ brand, onClose, onSaved }) {
-  const [name, setName] = useState('');
+function ListModal({ emailClient, verifiedDomains, onClose, onSaved }) {
+  const [form, setForm] = useState({ name:'', from_name:'', from_email:'', reply_to:'' });
   const [saving, setSaving] = useState(false);
+  const set = (k,v) => setForm(f=>({...f,[k]:v}));
 
   async function save() {
-    if (!name.trim()) return;
+    if (!form.name||!form.from_name||!form.from_email) return;
     setSaving(true);
-    await fetch('/api/email/lists',{ method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({ client_id:brand.client_id, name, from_name:brand.from_name, from_email:brand.from_email, reply_to:brand.reply_to }) });
+    await fetch('/api/email/lists', { method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ ...form, reply_to: form.reply_to || form.from_email, email_client_id: emailClient.id }) });
     onSaved(); onClose();
   }
 
   return (
     <Modal title="New mailing list" onClose={onClose}>
-      <Input label="List name *" value={name} onChange={setName} placeholder="May prospects — SME finance" required />
-      <div style={{ fontSize:12, color:MUTED, marginBottom:16 }}>
-        From email: <b>{brand.from_email}</b> · Reply-to: <b>{brand.reply_to}</b><br/>
-        Inherited from brand settings. Change in brand settings if needed.
+      <Input label="List name *" value={form.name} onChange={v=>set('name',v)} placeholder="May prospects — SME finance" required />
+      <Input label="From name *" value={form.from_name} onChange={v=>set('from_name',v)} placeholder="Wez at Tower Leasing" required />
+      <div style={{ marginBottom:14 }}>
+        <label style={{ display:'block', fontSize:12, color:MUTED, marginBottom:4 }}>From email *</label>
+        <select value={form.from_email} onChange={e=>set('from_email',e.target.value)}
+          style={{ width:'100%', padding:'8px 12px', border:`0.5px solid ${BORDER}`, borderRadius:7, fontSize:13, color:TEXT, background:CARD }}>
+          <option value="">— select verified domain —</option>
+          {verifiedDomains.map(d=>[
+            <option key={`hello@${d}`} value={`hello@${d}`}>hello@{d}</option>,
+            <option key={`noreply@${d}`} value={`noreply@${d}`}>noreply@{d}</option>,
+            <option key={`contact@${d}`} value={`contact@${d}`}>contact@{d}</option>,
+          ])}
+        </select>
       </div>
+      <Input label="Reply-to (leave blank to match from email)" value={form.reply_to} onChange={v=>set('reply_to',v)} />
       <div style={{ display:'flex', justifyContent:'flex-end', gap:8 }}>
         <Btn onClick={onClose}>Cancel</Btn>
-        <Btn variant="primary" onClick={save} disabled={saving||!name.trim()}>{saving?'Creating...':'Create list'}</Btn>
+        <Btn variant="primary" onClick={save} disabled={saving||!form.name||!form.from_name||!form.from_email}>{saving?'Creating...':'Create list'}</Btn>
       </div>
     </Modal>
   );
 }
 
-// ── Import modal ──────────────────────────────────────────────────────────────
+// ── Import modal ───────────────────────────────────────────────────────────────
 
 function ImportModal({ list, onClose, onSaved }) {
   const [csv, setCsv]     = useState('');
@@ -265,7 +306,7 @@ function ImportModal({ list, onClose, onSaved }) {
 
   async function importNow() {
     setSaving(true);
-    const r = await fetch(`/api/email/lists/${list.id}/import`,{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({csv}) });
+    const r = await fetch(`/api/email/lists/${list.id}/import`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({csv}) });
     const d = await r.json();
     setResult(d); setSaving(false);
     if (d.ok) onSaved();
@@ -289,7 +330,7 @@ function ImportModal({ list, onClose, onSaved }) {
   );
 }
 
-// ── Subscribers modal ─────────────────────────────────────────────────────────
+// ── Subscribers modal ──────────────────────────────────────────────────────────
 
 function SubsModal({ list, onClose, onSaved }) {
   const [subs, setSubs]   = useState([]);
@@ -307,12 +348,12 @@ function SubsModal({ list, onClose, onSaved }) {
 
   async function add() {
     if (!email) return;
-    await fetch(`/api/email/lists/${list.id}/subscribers`,{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email,name}) });
+    await fetch(`/api/email/lists/${list.id}/subscribers`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email,name}) });
     setEmail(''); setName(''); load(); onSaved();
   }
 
   async function unsub(id) {
-    await fetch(`/api/email/lists/${list.id}/subscribers/${id}`,{ method:'DELETE' });
+    await fetch(`/api/email/lists/${list.id}/subscribers/${id}`, { method:'DELETE' });
     load(); onSaved();
   }
 
@@ -352,7 +393,7 @@ function SubsModal({ list, onClose, onSaved }) {
   );
 }
 
-// ── Domain health card ────────────────────────────────────────────────────────
+// ── Domain health card ─────────────────────────────────────────────────────────
 
 function DomainCard({ data }) {
   const checks = [
@@ -379,23 +420,22 @@ function DomainCard({ data }) {
   );
 }
 
-// ── Brand detail panel ────────────────────────────────────────────────────────
+// ── Client detail panel ────────────────────────────────────────────────────────
 
-function BrandPanel({ brand, lists, verifiedDomains, clients, onRefresh, onEditBrand }) {
-  const [tab, setTab]   = useState('campaigns');
+function ClientPanel({ emailClient, verifiedDomains, onRefresh, onEditClient }) {
+  const [tab, setTab]       = useState('campaigns');
   const [campaigns, setCampaigns] = useState([]);
-  const [domains, setDomains]     = useState([]);
-  const [loading, setLoading]     = useState(false);
-  const [modal, setModal]         = useState(null);
+  const [lists, setLists]   = useState([]);
+  const [domains, setDomains] = useState([]);
+  const [domainsLoading, setDomainsLoading] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [modal, setModal]   = useState(null);
   const [modalData, setModalData] = useState({});
+  const [sendStatus, setSendStatus] = useState(null);
 
-  const brandLists = lists.filter(l=>l.client_id===brand.client_id);
+  useEffect(()=>{ loadAll(); },[emailClient.id]);
 
-  useEffect(()=>{
-    loadCampaigns();
-  },[brand.id]);
-
-  // Poll every 5s while any campaign is in 'sending' state
+  // Poll while any campaign is sending
   useEffect(()=>{
     const hasSending = campaigns.some(c=>c.status==='sending');
     if (!hasSending) return;
@@ -403,78 +443,72 @@ function BrandPanel({ brand, lists, verifiedDomains, clients, onRefresh, onEditB
     return ()=>clearInterval(timer);
   },[campaigns]);
 
-  async function loadCampaigns() {
-    setLoading(true);
-    const r = await fetch(`/api/email/campaigns?client_id=${brand.client_id}`);
-    const d = await r.json();
-    setCampaigns(Array.isArray(d)?d:[]);
-    setLoading(false);
-  }
-
-  async function deleteCampaign(id) {
-    if (!confirm('Delete this campaign?')) return;
-    await fetch(`/api/email/campaigns/${id}`,{ method:'DELETE' });
-    const r = await fetch(`/api/email/campaigns?client_id=${brand.client_id}`);
-    const d = await r.json(); setCampaigns(Array.isArray(d)?d:[]);
-    onRefresh();
-  }
-
-  const [sendStatus, setSendStatus] = useState(null); // { id, msg, ok }
-
-  async function sendNow(id) {
-    if (!confirm('Send this campaign now to all active subscribers?')) return;
-    setSendStatus({ id, msg: 'Starting send…', ok: null });
-    const r = await fetch(`/api/email/campaigns/${id}/send`,{ method:'POST' });
-    const d = await r.json();
-    if (d.ok) {
-      setSendStatus({ id, msg: `Sending to ${d.subscribers} subscribers — status updates automatically…`, ok: true });
-    } else {
-      setSendStatus({ id, msg: d.error||'Send failed', ok: false });
-    }
-    loadCampaigns();
-  }
-
-  async function deleteList(id) {
-    if (!confirm('Delete this list and all subscribers?')) return;
-    await fetch(`/api/email/lists/${id}`,{ method:'DELETE' });
-    onRefresh();
-  }
-
-  const [domainsLoading, setDomainsLoading] = useState(false);
-
-  // Auto-check all verified domains when the Domains tab is opened
+  // Auto-check all domains when Domains tab opens
   useEffect(()=>{
     if (tab !== 'domains') return;
     if (verifiedDomains.length === 0) return;
     setDomainsLoading(true);
     setDomains([]);
-    Promise.all(
-      verifiedDomains.map(d =>
-        fetch(`/api/email/domain-health/${d}`).then(r=>r.json())
-      )
-    ).then(results => {
-      setDomains(results);
-      setDomainsLoading(false);
-    });
-  },[tab, brand.id]);
+    Promise.all(verifiedDomains.map(d=>fetch(`/api/email/domain-health/${d}`).then(r=>r.json())))
+      .then(results => { setDomains(results); setDomainsLoading(false); });
+  },[tab, emailClient.id]);
 
-  const tabs = ['campaigns','lists','domains','settings'];
+  async function loadAll() {
+    setLoading(true);
+    const [c, l] = await Promise.all([
+      fetch(`/api/email/campaigns?email_client_id=${emailClient.id}`).then(r=>r.json()),
+      fetch(`/api/email/lists?email_client_id=${emailClient.id}`).then(r=>r.json()),
+    ]);
+    setCampaigns(Array.isArray(c)?c:[]);
+    setLists(Array.isArray(l)?l:[]);
+    setLoading(false);
+  }
+
+  async function loadCampaigns() {
+    const r = await fetch(`/api/email/campaigns?email_client_id=${emailClient.id}`);
+    const d = await r.json();
+    setCampaigns(Array.isArray(d)?d:[]);
+  }
+
+  async function deleteCampaign(id) {
+    if (!confirm('Delete this campaign?')) return;
+    await fetch(`/api/email/campaigns/${id}`, { method:'DELETE' });
+    loadCampaigns(); onRefresh();
+  }
+
+  async function sendNow(id) {
+    if (!confirm('Send this campaign now to all active subscribers?')) return;
+    setSendStatus({ id, msg:'Starting send…', ok:null });
+    const r = await fetch(`/api/email/campaigns/${id}/send`, { method:'POST' });
+    const d = await r.json();
+    if (d.ok) setSendStatus({ id, msg:`Sending to ${d.subscribers} subscribers — status updates automatically…`, ok:true });
+    else setSendStatus({ id, msg:d.error||'Send failed', ok:false });
+    loadCampaigns();
+  }
+
+  async function deleteList(id) {
+    if (!confirm('Delete this list and all subscribers?')) return;
+    await fetch(`/api/email/lists/${id}`, { method:'DELETE' });
+    loadAll(); onRefresh();
+  }
+
+  const tabs = ['campaigns','lists','domains'];
 
   return (
     <div style={{ flex:1, display:'flex', flexDirection:'column', minWidth:0 }}>
-      {/* Brand header */}
+      {/* Client header */}
       <div style={{ padding:'14px 20px', borderBottom:`0.5px solid ${BORDER}`, background:CARD, display:'flex', alignItems:'center', gap:12 }}>
-        <div style={{ width:32, height:32, borderRadius:8, background:brand.color||GREEN, display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:12, fontWeight:600, flexShrink:0 }}>
-          {initials(brand.name)}
+        <div style={{ width:32, height:32, borderRadius:8, background:emailClient.color||GREEN, display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:12, fontWeight:600, flexShrink:0 }}>
+          {initials(emailClient.name)}
         </div>
         <div style={{ flex:1 }}>
-          <div style={{ fontSize:15, fontWeight:500, color:TEXT }}>{brand.name}</div>
-          <div style={{ fontSize:12, color:MUTED }}>{brand.from_email}</div>
+          <div style={{ fontSize:15, fontWeight:500, color:TEXT }}>{emailClient.name}</div>
+          <div style={{ fontSize:12, color:MUTED }}>{emailClient.list_count||0} lists · {emailClient.subscriber_count||0} subscribers</div>
         </div>
         <div style={{ display:'flex', gap:8 }}>
           {tab==='campaigns' && <Btn small variant="primary" onClick={()=>setModal('new-campaign')}>+ New campaign</Btn>}
           {tab==='lists'     && <Btn small variant="primary" onClick={()=>setModal('new-list')}>+ New list</Btn>}
-          <Btn small onClick={()=>onEditBrand(brand)}>Edit brand</Btn>
+          <Btn small onClick={()=>onEditClient(emailClient)}>Edit</Btn>
         </div>
       </div>
 
@@ -546,14 +580,14 @@ function BrandPanel({ brand, lists, verifiedDomains, clients, onRefresh, onEditB
 
         {/* Lists */}
         {tab==='lists' && (
-          brandLists.length===0 ? (
+          lists.length===0 ? (
             <div style={{ background:CARD, border:`0.5px dashed ${BORDER}`, borderRadius:12, padding:48, textAlign:'center', color:MUTED }}>
               No lists yet.<br/><br/>
               <Btn variant="primary" onClick={()=>setModal('new-list')}>Create first list</Btn>
             </div>
           ) : (
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
-              {brandLists.map(l=>(
+              {lists.map(l=>(
                 <div key={l.id} style={{ background:CARD, border:`0.5px solid ${BORDER}`, borderRadius:10, padding:'14px 16px' }}>
                   <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:6 }}>
                     <div style={{ fontSize:14, fontWeight:500, color:TEXT }}>{l.name}</div>
@@ -573,62 +607,36 @@ function BrandPanel({ brand, lists, verifiedDomains, clients, onRefresh, onEditB
 
         {/* Domains */}
         {tab==='domains' && (
-          <div>
-            {domainsLoading ? (
-              <div style={{ color:MUTED, textAlign:'center', padding:40, fontSize:13 }}>Checking all domains…</div>
-            ) : domains.length===0 ? (
-              <div style={{ color:MUTED, textAlign:'center', padding:40, fontSize:13 }}>No verified domains found.</div>
-            ) : (
-              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
-                {domains.map(d=><DomainCard key={d.domain} data={d} />)}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Settings */}
-        {tab==='settings' && (
-          <div style={{ maxWidth:480 }}>
-            <div style={{ background:CARD, border:`0.5px solid ${BORDER}`, borderRadius:10, padding:'16px 18px' }}>
-              <div style={{ fontSize:13, fontWeight:500, color:TEXT, marginBottom:14 }}>Brand settings</div>
-              {[
-                { label:'Brand name',  value:brand.name },
-                { label:'From name',   value:brand.from_name },
-                { label:'From email',  value:brand.from_email },
-                { label:'Reply-to',    value:brand.reply_to },
-              ].map(({label,value})=>(
-                <div key={label} style={{ display:'flex', justifyContent:'space-between', padding:'8px 0', borderBottom:`0.5px solid ${BORDER}`, fontSize:13 }}>
-                  <span style={{ color:MUTED }}>{label}</span>
-                  <span style={{ color:TEXT }}>{value}</span>
-                </div>
-              ))}
-              <div style={{ marginTop:14 }}>
-                <Btn variant="primary" onClick={()=>onEditBrand(brand)}>Edit brand settings</Btn>
-              </div>
+          domainsLoading ? (
+            <div style={{ color:MUTED, textAlign:'center', padding:40, fontSize:13 }}>Checking all domains…</div>
+          ) : domains.length===0 ? (
+            <div style={{ color:MUTED, textAlign:'center', padding:40, fontSize:13 }}>No verified domains found.</div>
+          ) : (
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+              {domains.map(d=><DomainCard key={d.domain} data={d} />)}
             </div>
-          </div>
+          )
         )}
       </div>
 
       {/* Modals */}
-      {modal==='new-campaign'  && <CampaignModal brand={brand} lists={lists} verifiedDomains={verifiedDomains} onClose={()=>setModal(null)} onSaved={()=>{ const go=async()=>{ const r=await fetch(`/api/email/campaigns?client_id=${brand.client_id}`); const d=await r.json(); setCampaigns(Array.isArray(d)?d:[]); onRefresh(); }; go(); }} />}
-      {modal==='edit-campaign' && <CampaignModal brand={brand} lists={lists} verifiedDomains={verifiedDomains} initial={modalData} onClose={()=>setModal(null)} onSaved={()=>{ const go=async()=>{ const r=await fetch(`/api/email/campaigns?client_id=${brand.client_id}`); const d=await r.json(); setCampaigns(Array.isArray(d)?d:[]); onRefresh(); }; go(); }} />}
-      {modal==='new-list'      && <ListModal brand={brand} onClose={()=>setModal(null)} onSaved={onRefresh} />}
-      {modal==='import'        && <ImportModal list={modalData} onClose={()=>setModal(null)} onSaved={onRefresh} />}
-      {modal==='view-subs'     && <SubsModal list={modalData} onClose={()=>setModal(null)} onSaved={onRefresh} />}
+      {modal==='new-campaign'  && <CampaignModal emailClient={emailClient} lists={lists} verifiedDomains={verifiedDomains} onClose={()=>setModal(null)} onSaved={()=>{ loadCampaigns(); onRefresh(); }} />}
+      {modal==='edit-campaign' && <CampaignModal emailClient={emailClient} lists={lists} verifiedDomains={verifiedDomains} initial={modalData} onClose={()=>setModal(null)} onSaved={()=>{ loadCampaigns(); onRefresh(); }} />}
+      {modal==='new-list'      && <ListModal emailClient={emailClient} verifiedDomains={verifiedDomains} onClose={()=>setModal(null)} onSaved={()=>{ loadAll(); onRefresh(); }} />}
+      {modal==='import'        && <ImportModal list={modalData} onClose={()=>setModal(null)} onSaved={loadAll} />}
+      {modal==='view-subs'     && <SubsModal list={modalData} onClose={()=>setModal(null)} onSaved={loadAll} />}
     </div>
   );
 }
 
-// ── Main EmailSection ─────────────────────────────────────────────────────────
+// ── Main EmailSection ──────────────────────────────────────────────────────────
 
-export default function EmailSection({ clients }) {
-  const [brands, setBrands]   = useState([]);
-  const [lists, setLists]     = useState([]);
+export default function EmailSection() {
+  const [clients, setClients]   = useState([]);
   const [selected, setSelected] = useState(null);
-  const [search, setSearch]   = useState('');
-  const [loading, setLoading] = useState(true);
-  const [modal, setModal]     = useState(null);
+  const [search, setSearch]     = useState('');
+  const [loading, setLoading]   = useState(true);
+  const [modal, setModal]       = useState(null);
   const [modalData, setModalData] = useState({});
   const [verifiedDomains, setVerifiedDomains] = useState([]);
 
@@ -636,94 +644,82 @@ export default function EmailSection({ clients }) {
 
   async function loadAll() {
     setLoading(true);
-    const [b,l,vd] = await Promise.all([
-      fetch('/api/email/brands').then(r=>r.json()),
-      fetch('/api/email/lists').then(r=>r.json()),
+    const [c, vd] = await Promise.all([
+      fetch('/api/email/clients').then(r=>r.json()),
       fetch('/api/email/verified-domains').then(r=>r.json()),
     ]);
-    setBrands(Array.isArray(b)?b:[]);
-    setLists(Array.isArray(l)?l:[]);
+    setClients(Array.isArray(c)?c:[]);
     setVerifiedDomains(Array.isArray(vd)?vd:[]);
     setLoading(false);
   }
 
-  const filtered = brands.filter(b=>b.name.toLowerCase().includes(search.toLowerCase())||b.from_email.toLowerCase().includes(search.toLowerCase()));
-
-  const selectedBrand = brands.find(b=>b.id===selected);
+  const filtered = clients.filter(c=>c.name.toLowerCase().includes(search.toLowerCase()));
+  const selectedClient = clients.find(c=>c.id===selected);
 
   return (
     <div style={{ flex:1, display:'flex', height:'100vh', overflow:'hidden' }}>
 
-      {/* ── Left panel — brand list ── */}
+      {/* ── Left panel — client list ── */}
       <div style={{ width:240, background:CARD, borderRight:`0.5px solid ${BORDER}`, display:'flex', flexDirection:'column', flexShrink:0 }}>
 
-        {/* Search */}
         <div style={{ padding:'14px 12px', borderBottom:`0.5px solid ${BORDER}` }}>
-          <input
-            value={search} onChange={e=>setSearch(e.target.value)}
-            placeholder="Search brands..."
-            style={{ width:'100%', padding:'7px 10px', border:`0.5px solid ${BORDER}`, borderRadius:7, fontSize:13, color:TEXT, background:BG, outline:'none', boxSizing:'border-box' }}
-          />
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search clients..."
+            style={{ width:'100%', padding:'7px 10px', border:`0.5px solid ${BORDER}`, borderRadius:7, fontSize:13, color:TEXT, background:BG, outline:'none', boxSizing:'border-box' }} />
         </div>
 
-        {/* Brand list */}
         <div style={{ flex:1, overflowY:'auto' }}>
           {loading ? (
             <div style={{ color:MUTED, textAlign:'center', padding:32, fontSize:13 }}>Loading...</div>
           ) : filtered.length===0 ? (
             <div style={{ color:MUTED, textAlign:'center', padding:32, fontSize:13 }}>
-              {search ? 'No brands match' : 'No brands yet'}
+              {search ? 'No clients match' : 'No clients yet'}
             </div>
-          ) : filtered.map(b=>(
-            <div key={b.id} onClick={()=>setSelected(b.id)} style={{
+          ) : filtered.map(c=>(
+            <div key={c.id} onClick={()=>setSelected(c.id)} style={{
               display:'flex', alignItems:'center', gap:10, padding:'10px 12px',
               cursor:'pointer', borderBottom:`0.5px solid ${BORDER}`,
-              background:selected===b.id?`${GREEN}12`:CARD,
-              borderLeft:selected===b.id?`3px solid ${GREEN}`:'3px solid transparent',
+              background:selected===c.id?`${GREEN}12`:CARD,
+              borderLeft:selected===c.id?`3px solid ${GREEN}`:'3px solid transparent',
             }}>
-              <div style={{ width:30, height:30, borderRadius:7, background:b.color||GREEN, display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:600, flexShrink:0 }}>
-                {initials(b.name)}
+              <div style={{ width:30, height:30, borderRadius:7, background:c.color||GREEN, display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:11, fontWeight:600, flexShrink:0 }}>
+                {initials(c.name)}
               </div>
               <div style={{ flex:1, minWidth:0 }}>
-                <div style={{ fontSize:13, fontWeight:selected===b.id?500:400, color:TEXT, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{b.name}</div>
-                <div style={{ fontSize:11, color:MUTED }}>{b.list_count||0} lists · {b.subscriber_count||0} subs</div>
+                <div style={{ fontSize:13, fontWeight:selected===c.id?500:400, color:TEXT, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{c.name}</div>
+                <div style={{ fontSize:11, color:MUTED }}>{c.list_count||0} lists · {c.subscriber_count||0} subs</div>
               </div>
-              {b.last_campaign_status==='scheduled' && <Badge label="live" color="#c27a00" bg="#fff3cd" />}
             </div>
           ))}
         </div>
 
-        {/* Add brand button */}
         <div style={{ padding:'12px', borderTop:`0.5px solid ${BORDER}` }}>
-          <Btn variant="primary" style={{ width:'100%', justifyContent:'center' }} onClick={()=>setModal('new-brand')}>
-            + New brand
+          <Btn variant="primary" style={{ width:'100%', justifyContent:'center' }} onClick={()=>setModal('new-client')}>
+            + New client
           </Btn>
         </div>
       </div>
 
       {/* ── Right panel ── */}
-      {selectedBrand ? (
-        <BrandPanel
-          key={selectedBrand.id}
-          brand={selectedBrand}
-          lists={lists}
+      {selectedClient ? (
+        <ClientPanel
+          key={selectedClient.id}
+          emailClient={selectedClient}
           verifiedDomains={verifiedDomains}
-          clients={clients}
           onRefresh={loadAll}
-          onEditBrand={b=>{ setModalData(b); setModal('edit-brand'); }}
+          onEditClient={c=>{ setModalData(c); setModal('edit-client'); }}
         />
       ) : (
         <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center', background:BG, flexDirection:'column', gap:12 }}>
-          <div style={{ fontSize:14, color:MUTED }}>Select a brand to get started</div>
-          {brands.length===0 && !loading && (
-            <Btn variant="primary" onClick={()=>setModal('new-brand')}>Create your first brand</Btn>
+          <div style={{ fontSize:14, color:MUTED }}>Select a client to get started</div>
+          {clients.length===0 && !loading && (
+            <Btn variant="primary" onClick={()=>setModal('new-client')}>Add your first email client</Btn>
           )}
         </div>
       )}
 
       {/* Modals */}
-      {modal==='new-brand'  && <BrandModal clients={clients} verifiedDomains={verifiedDomains} onClose={()=>setModal(null)} onSaved={loadAll} />}
-      {modal==='edit-brand' && <BrandModal clients={clients} verifiedDomains={verifiedDomains} initial={modalData} onClose={()=>setModal(null)} onSaved={loadAll} />}
+      {modal==='new-client'  && <ClientModal onClose={()=>setModal(null)} onSaved={loadAll} />}
+      {modal==='edit-client' && <ClientModal initial={modalData} onClose={()=>setModal(null)} onSaved={loadAll} />}
     </div>
   );
 }

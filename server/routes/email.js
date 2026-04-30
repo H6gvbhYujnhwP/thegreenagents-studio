@@ -10,13 +10,12 @@ const router  = express.Router();
 const resolve = promisify(dns.resolveTxt);
 const resolveMx = promisify(dns.resolveMx);
 
-// All routes except unsubscribe require auth
 router.use((req, res, next) => {
   if (req.path.startsWith('/unsubscribe')) return next();
   requireAuth(req, res, next);
 });
 
-// ── STATS ────────────────────────────────────────────────────────────────────
+// ── STATS ─────────────────────────────────────────────────────────────────────
 
 router.get('/stats', async (req, res) => {
   try {
@@ -25,38 +24,77 @@ router.get('/stats', async (req, res) => {
     const campaigns   = db.prepare('SELECT COUNT(*) as c FROM email_campaigns').get().c;
     const sent        = db.prepare("SELECT COALESCE(SUM(sent_count),0) as c FROM email_campaigns WHERE status='sent'").get().c;
     let quota = null;
-    try { quota = await getQuota(); } catch(e) { /* SES unreachable in dev */ }
+    try { quota = await getQuota(); } catch(e) {}
     res.json({ lists, subscribers, campaigns, sent, quota });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── BRANDS ───────────────────────────────────────────────────────────────────
+// ── EMAIL CLIENTS (completely separate from LinkedIn clients) ──────────────────
 
-router.get('/brands', (req, res) => {
+router.get('/clients', (req, res) => {
   const rows = db.prepare(`
-    SELECT eb.*,
-      c.name as client_name,
-      (SELECT COUNT(*) FROM email_lists WHERE client_id=eb.client_id) as list_count,
-      (SELECT COALESCE(SUM(subscriber_count),0) FROM email_lists WHERE client_id=eb.client_id) as subscriber_count,
-      (SELECT COUNT(*) FROM email_campaigns WHERE client_id=eb.client_id) as campaign_count,
-      (SELECT status FROM email_campaigns WHERE client_id=eb.client_id ORDER BY created_at DESC LIMIT 1) as last_campaign_status
-    FROM email_brands eb
-    JOIN clients c ON eb.client_id=c.id
-    ORDER BY eb.name ASC
+    SELECT ec.*,
+      (SELECT COUNT(*) FROM email_lists WHERE email_client_id=ec.id) as list_count,
+      (SELECT COALESCE(SUM(subscriber_count),0) FROM email_lists WHERE email_client_id=ec.id) as subscriber_count,
+      (SELECT COUNT(*) FROM email_campaigns WHERE email_client_id=ec.id) as campaign_count
+    FROM email_clients ec
+    ORDER BY ec.name ASC
   `).all();
   res.json(rows);
 });
 
+router.post('/clients', (req, res) => {
+  const { name, color } = req.body;
+  if (!name) return res.status(400).json({ error: 'Name required' });
+  const id = uuid();
+  db.prepare('INSERT INTO email_clients (id,name,color) VALUES (?,?,?)')
+    .run(id, name.trim(), color || '#1D9E75');
+  res.json(db.prepare('SELECT * FROM email_clients WHERE id=?').get(id));
+});
+
+router.put('/clients/:id', (req, res) => {
+  const { name, color } = req.body;
+  const c = db.prepare('SELECT * FROM email_clients WHERE id=?').get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  db.prepare('UPDATE email_clients SET name=?,color=? WHERE id=?')
+    .run(name ?? c.name, color ?? c.color, req.params.id);
+  res.json(db.prepare('SELECT * FROM email_clients WHERE id=?').get(req.params.id));
+});
+
+router.delete('/clients/:id', (req, res) => {
+  const lists    = db.prepare('SELECT id FROM email_lists WHERE email_client_id=?').all(req.params.id);
+  const campaigns = db.prepare('SELECT id FROM email_campaigns WHERE email_client_id=?').all(req.params.id);
+  db.transaction(() => {
+    for (const l of lists) db.prepare('DELETE FROM email_subscribers WHERE list_id=?').run(l.id);
+    for (const c of campaigns) db.prepare('DELETE FROM email_sends WHERE campaign_id=?').run(c.id);
+    db.prepare('DELETE FROM email_lists WHERE email_client_id=?').run(req.params.id);
+    db.prepare('DELETE FROM email_campaigns WHERE email_client_id=?').run(req.params.id);
+    db.prepare('DELETE FROM email_brands WHERE email_client_id=?').run(req.params.id);
+    db.prepare('DELETE FROM email_clients WHERE id=?').run(req.params.id);
+  })();
+  res.json({ ok: true });
+});
+
+// ── BRANDS ────────────────────────────────────────────────────────────────────
+
+router.get('/brands', (req, res) => {
+  const { email_client_id } = req.query;
+  const rows = email_client_id
+    ? db.prepare('SELECT * FROM email_brands WHERE email_client_id=? ORDER BY name ASC').all(email_client_id)
+    : db.prepare('SELECT * FROM email_brands ORDER BY name ASC').all();
+  res.json(rows);
+});
+
 router.post('/brands', (req, res) => {
-  const { client_id, name, from_name, from_email, reply_to, color } = req.body;
-  if (!client_id || !name || !from_name || !from_email) {
+  const { email_client_id, name, from_name, from_email, reply_to, color } = req.body;
+  if (!email_client_id || !name || !from_name || !from_email) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
   const id = uuid();
-  db.prepare('INSERT INTO email_brands (id,client_id,name,from_name,from_email,reply_to,color) VALUES (?,?,?,?,?,?,?)')
-    .run(id, client_id, name, from_name, from_email, reply_to || from_email, color || '#1D9E75');
+  db.prepare('INSERT INTO email_brands (id,email_client_id,name,from_name,from_email,reply_to,color) VALUES (?,?,?,?,?,?,?)')
+    .run(id, email_client_id, name, from_name, from_email, reply_to || from_email, color || '#1D9E75');
   res.json(db.prepare('SELECT * FROM email_brands WHERE id=?').get(id));
 });
 
@@ -74,24 +112,24 @@ router.delete('/brands/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// ── LISTS ────────────────────────────────────────────────────────────────────
+// ── LISTS ─────────────────────────────────────────────────────────────────────
 
 router.get('/lists', (req, res) => {
-  const { client_id } = req.query;
-  const rows = client_id
-    ? db.prepare('SELECT * FROM email_lists WHERE client_id=? ORDER BY created_at DESC').all(client_id)
-    : db.prepare('SELECT el.*, c.name as client_name FROM email_lists el JOIN clients c ON el.client_id=c.id ORDER BY el.created_at DESC').all();
+  const { email_client_id } = req.query;
+  const rows = email_client_id
+    ? db.prepare('SELECT * FROM email_lists WHERE email_client_id=? ORDER BY created_at DESC').all(email_client_id)
+    : db.prepare('SELECT * FROM email_lists ORDER BY created_at DESC').all();
   res.json(rows);
 });
 
 router.post('/lists', (req, res) => {
-  const { client_id, name, from_name, from_email, reply_to } = req.body;
-  if (!client_id || !name || !from_name || !from_email || !reply_to) {
+  const { email_client_id, name, from_name, from_email, reply_to } = req.body;
+  if (!email_client_id || !name || !from_name || !from_email || !reply_to) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
   const id = uuid();
-  db.prepare('INSERT INTO email_lists (id,client_id,name,from_name,from_email,reply_to) VALUES (?,?,?,?,?,?)')
-    .run(id, client_id, name, from_name, from_email, reply_to);
+  db.prepare('INSERT INTO email_lists (id,email_client_id,name,from_name,from_email,reply_to) VALUES (?,?,?,?,?,?)')
+    .run(id, email_client_id, name, from_name, from_email, reply_to);
   res.json(db.prepare('SELECT * FROM email_lists WHERE id=?').get(id));
 });
 
@@ -101,7 +139,7 @@ router.delete('/lists/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// ── SUBSCRIBERS ──────────────────────────────────────────────────────────────
+// ── SUBSCRIBERS ───────────────────────────────────────────────────────────────
 
 router.get('/lists/:id/subscribers', (req, res) => {
   const { status } = req.query;
@@ -118,7 +156,6 @@ router.post('/lists/:id/subscribers', (req, res) => {
   try {
     db.prepare('INSERT INTO email_subscribers (id,list_id,email,name) VALUES (?,?,?,?)')
       .run(id, req.params.id, email.toLowerCase().trim(), name || null);
-    // update count
     db.prepare("UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?")
       .run(req.params.id, req.params.id);
     res.json({ ok: true, id });
@@ -128,11 +165,9 @@ router.post('/lists/:id/subscribers', (req, res) => {
   }
 });
 
-// Bulk import from CSV text
 router.post('/lists/:id/import', (req, res) => {
   const { csv } = req.body;
   if (!csv) return res.status(400).json({ error: 'No CSV data' });
-
   const lines  = csv.trim().split('\n').filter(Boolean);
   const insert = db.prepare('INSERT OR IGNORE INTO email_subscribers (id,list_id,email,name) VALUES (?,?,?,?)');
   const insertMany = db.transaction((rows) => {
@@ -146,15 +181,10 @@ router.post('/lists/:id/import', (req, res) => {
     }
     return added;
   });
-
-  // skip header row if it contains "email"
   const dataRows = lines[0]?.toLowerCase().includes('email') ? lines.slice(1) : lines;
   const added = insertMany(dataRows);
-
-  // update count
   db.prepare("UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?")
     .run(req.params.id, req.params.id);
-
   res.json({ ok: true, added });
 });
 
@@ -166,34 +196,24 @@ router.delete('/lists/:listId/subscribers/:subId', (req, res) => {
   res.json({ ok: true });
 });
 
-// ── CAMPAIGNS ────────────────────────────────────────────────────────────────
+// ── CAMPAIGNS ─────────────────────────────────────────────────────────────────
 
 router.get('/campaigns', (req, res) => {
-  const { client_id } = req.query;
-  const rows = client_id
-    ? db.prepare(`SELECT ec.*, el.name as list_name, c.name as client_name
-        FROM email_campaigns ec
-        JOIN email_lists el ON ec.list_id=el.id
-        JOIN clients c ON ec.client_id=c.id
-        WHERE ec.client_id=? ORDER BY ec.created_at DESC`).all(client_id)
-    : db.prepare(`SELECT ec.*, el.name as list_name, c.name as client_name
-        FROM email_campaigns ec
-        JOIN email_lists el ON ec.list_id=el.id
-        JOIN clients c ON ec.client_id=c.id
-        ORDER BY ec.created_at DESC`).all();
+  const { email_client_id } = req.query;
+  const rows = email_client_id
+    ? db.prepare(`SELECT ec.*, el.name as list_name FROM email_campaigns ec JOIN email_lists el ON ec.list_id=el.id WHERE ec.email_client_id=? ORDER BY ec.created_at DESC`).all(email_client_id)
+    : db.prepare(`SELECT ec.*, el.name as list_name FROM email_campaigns ec JOIN email_lists el ON ec.list_id=el.id ORDER BY ec.created_at DESC`).all();
   res.json(rows);
 });
 
 router.post('/campaigns', (req, res) => {
-  const { client_id, list_id, title, subject, from_name, from_email, reply_to, html_body, plain_body, scheduled_at } = req.body;
-  if (!client_id || !list_id || !title || !subject || !from_name || !from_email || !html_body) {
+  const { email_client_id, list_id, title, subject, from_name, from_email, reply_to, html_body, plain_body, scheduled_at } = req.body;
+  if (!email_client_id || !list_id || !title || !subject || !from_name || !from_email || !html_body) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
   const id = uuid();
-  db.prepare(`INSERT INTO email_campaigns
-    (id,client_id,list_id,title,subject,from_name,from_email,reply_to,html_body,plain_body,status,scheduled_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, client_id, list_id, title, subject, from_name, from_email, reply_to || from_email, html_body, plain_body || null, scheduled_at ? 'scheduled' : 'draft', scheduled_at || null);
+  db.prepare(`INSERT INTO email_campaigns (id,email_client_id,list_id,title,subject,from_name,from_email,reply_to,html_body,plain_body,status,scheduled_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(id, email_client_id, list_id, title, subject, from_name, from_email, reply_to || from_email, html_body, plain_body || null, scheduled_at ? 'scheduled' : 'draft', scheduled_at || null);
   res.json(db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(id));
 });
 
@@ -202,16 +222,9 @@ router.put('/campaigns/:id', (req, res) => {
   const current = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
   if (!current) return res.status(404).json({ error: 'Not found' });
   if (current.status === 'sent') return res.status(400).json({ error: 'Cannot edit a sent campaign' });
-
   const status = scheduled_at ? 'scheduled' : 'draft';
-  db.prepare(`UPDATE email_campaigns SET
-    title=?, subject=?, from_name=?, from_email=?, reply_to=?, html_body=?, plain_body=?,
-    scheduled_at=?, status=?, list_id=COALESCE(?,list_id)
-    WHERE id=?`)
-    .run(title ?? current.title, subject ?? current.subject, from_name ?? current.from_name,
-      from_email ?? current.from_email, reply_to ?? current.reply_to,
-      html_body ?? current.html_body, plain_body ?? current.plain_body,
-      scheduled_at ?? current.scheduled_at, status, list_id ?? null, req.params.id);
+  db.prepare(`UPDATE email_campaigns SET title=?,subject=?,from_name=?,from_email=?,reply_to=?,html_body=?,plain_body=?,scheduled_at=?,status=?,list_id=COALESCE(?,list_id) WHERE id=?`)
+    .run(title ?? current.title, subject ?? current.subject, from_name ?? current.from_name, from_email ?? current.from_email, reply_to ?? current.reply_to, html_body ?? current.html_body, plain_body ?? current.plain_body, scheduled_at ?? current.scheduled_at, status, list_id ?? null, req.params.id);
   res.json(db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id));
 });
 
@@ -224,7 +237,7 @@ router.delete('/campaigns/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// ── SEND ─────────────────────────────────────────────────────────────────────
+// ── SEND ──────────────────────────────────────────────────────────────────────
 
 router.post('/campaigns/:id/send', async (req, res) => {
   const campaign = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
@@ -235,34 +248,20 @@ router.post('/campaigns/:id/send', async (req, res) => {
   const subscribers = db.prepare("SELECT * FROM email_subscribers WHERE list_id=? AND status='subscribed'").all(campaign.list_id);
   if (subscribers.length === 0) return res.status(400).json({ error: 'No active subscribers in list' });
 
-  // Mark as sending immediately
   db.prepare("UPDATE email_campaigns SET status='sending' WHERE id=?").run(campaign.id);
-
   const baseUrl = `${req.protocol}://${req.get('host')}`;
-
-  // Fire and forget — respond immediately, send in background
   res.json({ ok: true, subscribers: subscribers.length });
 
   try {
     const results = await sendCampaign({
-      campaign,
-      subscribers,
-      baseUrl,
+      campaign, subscribers, baseUrl,
       onProgress: (pct) => {
         db.prepare('UPDATE email_campaigns SET sent_count=? WHERE id=?')
           .run(Math.round(subscribers.length * pct / 100), campaign.id);
       },
     });
-
-    // Record individual sends
     const insertSend = db.prepare('INSERT OR IGNORE INTO email_sends (id,campaign_id,subscriber_id,status) VALUES (?,?,?,?)');
-    const insertAll  = db.transaction(() => {
-      for (const sub of subscribers) {
-        insertSend.run(uuid(), campaign.id, sub.id, 'sent');
-      }
-    });
-    insertAll();
-
+    db.transaction(() => { for (const sub of subscribers) insertSend.run(uuid(), campaign.id, sub.id, 'sent'); })();
     db.prepare(`UPDATE email_campaigns SET status='sent', sent_at=datetime('now'), sent_count=? WHERE id=?`)
       .run(results.sent, campaign.id);
   } catch (err) {
@@ -271,100 +270,54 @@ router.post('/campaigns/:id/send', async (req, res) => {
   }
 });
 
-// ── UNSUBSCRIBE (public — no auth) ───────────────────────────────────────────
+// ── UNSUBSCRIBE (public) ──────────────────────────────────────────────────────
 
 router.get('/unsubscribe', (req, res) => {
   const { sid, cid } = req.query;
   if (!sid) return res.status(400).send('Invalid unsubscribe link');
-
   const sub = db.prepare('SELECT * FROM email_subscribers WHERE id=?').get(sid);
   if (!sub) return res.status(404).send('Subscriber not found');
-
   db.prepare("UPDATE email_subscribers SET status='unsubscribed', unsubscribed_at=datetime('now') WHERE id=?").run(sid);
   db.prepare("UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?")
     .run(sub.list_id, sub.list_id);
-
-  if (cid) {
-    db.prepare('UPDATE email_campaigns SET unsubscribe_count=unsubscribe_count+1 WHERE id=?').run(cid);
-  }
-
+  if (cid) db.prepare('UPDATE email_campaigns SET unsubscribe_count=unsubscribe_count+1 WHERE id=?').run(cid);
   res.send(`<!DOCTYPE html><html><head><title>Unsubscribed</title>
     <style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f3;}
     .box{text-align:center;padding:40px;max-width:400px;}h1{font-size:22px;font-weight:500;color:#1a1a1a;margin-bottom:12px;}
     p{color:#666;font-size:14px;line-height:1.6;}</style></head>
     <body><div class="box"><h1>You've been unsubscribed</h1>
-    <p>Your email address has been removed from this mailing list. You won't receive any further emails from this campaign.</p>
+    <p>Your email address has been removed from this mailing list.</p>
     </div></body></html>`);
 });
 
-// ── DOMAIN HEALTH ────────────────────────────────────────────────────────────
+// ── DOMAIN HEALTH ─────────────────────────────────────────────────────────────
 
 router.get('/domain-health/:domain', async (req, res) => {
   const domain = req.params.domain;
   const results = { domain, spf: null, dkim: null, dmarc: null, mx: null, error: null };
-
   try {
-    // SPF
-    try {
-      const txt = await resolve(domain);
-      const spfRecord = txt.flat().find(r => r.startsWith('v=spf1'));
-      results.spf = spfRecord
-        ? { status: 'pass', record: spfRecord }
-        : { status: 'missing', record: null };
-    } catch { results.spf = { status: 'missing', record: null }; }
-
-    // DMARC
-    try {
-      const dmarc = await resolve(`_dmarc.${domain}`);
-      const rec   = dmarc.flat().find(r => r.startsWith('v=DMARC1'));
-      results.dmarc = rec
-        ? { status: 'pass', record: rec }
-        : { status: 'missing', record: null };
-    } catch { results.dmarc = { status: 'missing', record: null }; }
-
-    // MX
-    try {
-      const mx = await resolveMx(domain);
-      results.mx = mx.length > 0
-        ? { status: 'pass', records: mx.map(r => r.exchange) }
-        : { status: 'missing', records: [] };
-    } catch { results.mx = { status: 'missing', records: [] }; }
-
-    // DKIM — we check the common selectors used by SES and Google
-    const selectors = ['amazonses', 'google', 'default', 'mail', 'dkim'];
-    let dkimFound   = false;
+    try { const txt = await resolve(domain); const spfRecord = txt.flat().find(r=>r.startsWith('v=spf1')); results.spf = spfRecord ? { status:'pass', record:spfRecord } : { status:'missing', record:null }; } catch { results.spf = { status:'missing', record:null }; }
+    try { const dmarc = await resolve(`_dmarc.${domain}`); const rec = dmarc.flat().find(r=>r.startsWith('v=DMARC1')); results.dmarc = rec ? { status:'pass', record:rec } : { status:'missing', record:null }; } catch { results.dmarc = { status:'missing', record:null }; }
+    try { const mx = await resolveMx(domain); results.mx = mx.length>0 ? { status:'pass', records:mx.map(r=>r.exchange) } : { status:'missing', records:[] }; } catch { results.mx = { status:'missing', records:[] }; }
+    const selectors = ['amazonses','google','default','mail','dkim'];
+    let dkimFound = false;
     for (const sel of selectors) {
-      try {
-        const rec = await resolve(`${sel}._domainkey.${domain}`);
-        if (rec.flat().some(r => r.includes('v=DKIM1'))) {
-          results.dkim = { status: 'pass', selector: sel };
-          dkimFound = true;
-          break;
-        }
-      } catch { /* try next selector */ }
+      try { const rec = await resolve(`${sel}._domainkey.${domain}`); if (rec.flat().some(r=>r.includes('v=DKIM1'))) { results.dkim = { status:'pass', selector:sel }; dkimFound=true; break; } } catch {}
     }
-    if (!dkimFound) results.dkim = { status: 'missing', selector: null };
-
-  } catch (err) {
-    results.error = err.message;
-  }
-
+    if (!dkimFound) results.dkim = { status:'missing', selector:null };
+  } catch (err) { results.error = err.message; }
   res.json(results);
 });
 
-// ── VERIFIED SES DOMAINS (live from AWS) ─────────────────────────────────────
+// ── VERIFIED SES DOMAINS (live from AWS) ──────────────────────────────────────
+
 router.get('/verified-domains', async (req, res) => {
   try {
     const domains = await getVerifiedDomains();
     res.json(domains);
   } catch (err) {
-    // Fallback to known list if AWS unreachable (e.g. dev environment)
     console.error('[verified-domains] AWS error, using fallback:', err.message);
-    res.json([
-      'thegreenagents.com','sweetbyte.co.uk','clear-a-way.co.uk',
-      'itcloudpros.uk','mail.engineersolutions.co.uk','syncsure.cloud',
-      'socialecho.ai','clearerpaths.co.uk','mail.weprintcatalogues.com',
-    ]);
+    res.json(['thegreenagents.com','sweetbyte.co.uk','clear-a-way.co.uk','itcloudpros.uk','mail.engineersolutions.co.uk','syncsure.cloud','socialecho.ai','clearerpaths.co.uk','mail.weprintcatalogues.com']);
   }
 });
 

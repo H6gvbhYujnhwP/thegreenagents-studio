@@ -50,29 +50,37 @@ db.exec(`
 `);
 
 // ── Email module tables ───────────────────────────────────────────────────────
+// email_clients is completely separate from the LinkedIn 'clients' table
 db.exec(`
+  CREATE TABLE IF NOT EXISTS email_clients (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    color TEXT DEFAULT '#1D9E75',
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS email_brands (
     id TEXT PRIMARY KEY,
-    client_id TEXT NOT NULL,
+    email_client_id TEXT NOT NULL,
     name TEXT NOT NULL,
     from_name TEXT NOT NULL,
     from_email TEXT NOT NULL,
     reply_to TEXT NOT NULL,
     color TEXT DEFAULT '#1D9E75',
     created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (client_id) REFERENCES clients(id)
+    FOREIGN KEY (email_client_id) REFERENCES email_clients(id)
   );
 
   CREATE TABLE IF NOT EXISTS email_lists (
     id TEXT PRIMARY KEY,
-    client_id TEXT NOT NULL,
+    email_client_id TEXT NOT NULL,
     name TEXT NOT NULL,
     from_name TEXT NOT NULL,
     from_email TEXT NOT NULL,
     reply_to TEXT NOT NULL,
     subscriber_count INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (client_id) REFERENCES clients(id)
+    FOREIGN KEY (email_client_id) REFERENCES email_clients(id)
   );
 
   CREATE TABLE IF NOT EXISTS email_subscribers (
@@ -90,7 +98,7 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS email_campaigns (
     id TEXT PRIMARY KEY,
-    client_id TEXT NOT NULL,
+    email_client_id TEXT NOT NULL,
     list_id TEXT NOT NULL,
     title TEXT NOT NULL,
     subject TEXT NOT NULL,
@@ -108,7 +116,7 @@ db.exec(`
     bounce_count INTEGER DEFAULT 0,
     unsubscribe_count INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (client_id) REFERENCES clients(id),
+    FOREIGN KEY (email_client_id) REFERENCES email_clients(id),
     FOREIGN KEY (list_id) REFERENCES email_lists(id)
   );
 
