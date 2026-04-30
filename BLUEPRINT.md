@@ -1,25 +1,47 @@
 # THEGREENAGENTS STUDIO — COMPLETE BLUEPRINT
-**Last updated: April 2026 — Session 2 complete**
-> This document is the single source of truth for any new session working on this codebase. Read this entirely before touching any code.
+**Last updated: April 2026 — Session 4 complete**
+> This is the single source of truth. Read ALL of it before touching any code. Every session starts by cloning the repo and reading this file.
+
+---
+
+## SIDEBAR ARCHITECTURE — CRITICAL
+
+Each sidebar nav item is a completely separate app section with its own component, routes, and DB tables. They share the sidebar and auth only. Never let changes in one section affect another.
+
+| Nav item | Component | Purpose |
+|---|---|---|
+| Dashboard | `Dashboard.jsx` | Client overview + stats |
+| Clients | `ClientDetail.jsx` | LinkedIn campaign pipeline |
+| Email | `EmailSection.jsx` | Email campaigns via AWS SES |
+
+The sidebar has no section labels — just a thin divider between the LinkedIn items (Dashboard, Clients) and the Email item. Labels were removed because they changed the visual weight of the sidebar.
+
+Routing lives in `Dashboard.jsx`: `view === 'email'` renders `EmailSection`, everything else is the LinkedIn pipeline. Adding a new section = add a nav item to `Sidebar.jsx`, add a route condition in `Dashboard.jsx`, create a new component.
+
+---
+
+## HOW WE WORK (read this first)
+
+- Wez communicates via short messages and screenshots
+- Always clone/pull repo and read BLUEPRINT.md at the start of every session
+- Always read relevant source files before editing
+- Always syntax check before committing: `node --check server/file.js`
+- Discuss UI changes with mockup widgets BEFORE building
+- Every change committed with clear message and pushed to main immediately
+- Render auto-deploys on every push to main (~3-5 min build)
+- Always tell Wez which folder every file goes in, in short format: `file.js` → `server/routes/`
+- Never use require() — ESM only (import/export)
+- Never use localStorage in artifacts
 
 ---
 
 ## WHAT THIS APP IS
 
-**The Green Agents Studio** is a private internal web application for the agency THEGREENAGENTS.COM. It automates the end-to-end production and deployment of LinkedIn content campaigns for B2B clients.
+**The Green Agents Studio** is a private internal web app for THEGREENAGENTS.COM. It does two things:
 
-The app generates LinkedIn posts using GPT-4o (with the LinkedIn New Client Master system prompt), generates matching images using Google's Gemini Nano Banana API, uploads images to Cloudflare R2, and deploys every post as a **draft** into Supergrow via MCP — all from a single dashboard.
+**1. LinkedIn campaigns** — generates LinkedIn posts via Claude + images via Gemini, deploys as drafts to Supergrow for client approval.
 
-**The operator's journey for a client is:**
-1. Open the client on the dashboard
-2. Confirm RAG document is uploaded (PDF, MD, or TXT)
-3. Hit **Run Campaign**
-4. Watch live progress — posts generated, images created
-5. **Review all 12 posts with images** before anything goes to Supergrow
-6. Click **Send Drafts to Supergrow** — posts land as drafts in Supergrow Kanban
-7. Client approves posts by dragging Draft → Approved in Supergrow Kanban
-8. Agency schedules approved posts in Supergrow
-9. Supergrow publishes to LinkedIn at scheduled time
+**2. Email campaigns** — sends email campaigns directly via AWS SES. Full replacement for Sendy. Brands, mailing lists, subscribers, campaigns, domain health checker. No Sendy dependency.
 
 ---
 
@@ -28,32 +50,33 @@ The app generates LinkedIn posts using GPT-4o (with the LinkedIn New Client Mast
 | Item | Location |
 |---|---|
 | GitHub repo | `https://github.com/H6gvbhYujnhwP/thegreenagents-studio` |
-| Live app URL | `https://studio.thegreenagents.com` |
+| Live app | `https://studio.thegreenagents.com` |
 | Render service | `thegreenagents-studio` (Starter, $7/month) |
-| Render service ID | `srv-d7f5khfaqgkc73a260og` |
-| Render disk | `/var/data` — 1GB persistent disk for SQLite |
-| SQLite database | `/var/data/studio.db` (set via `DB_PATH` env var) |
-| Main website | `thegreenagents.com` — separate static site on Render, do NOT touch |
+| Render disk | `/var/data` — 1GB persistent SQLite |
+| SQLite DB | `/var/data/studio.db` (env: `DB_PATH`) |
+| Sendy (being replaced) | `https://sendy.thegreenagents.com` |
+| AWS SES region | `eu-north-1` (Stockholm) |
+| AWS IAM user | `tga-studio-ses` (AmazonSESFullAccess) |
 
 ---
 
 ## TECH STACK
 
-| Layer | Technology | Purpose |
-|---|---|---|
-| Runtime | Node.js 22 (ESM — `"type": "module"`) | Server runtime |
-| Web framework | Express.js | API + static file serving |
-| Database | SQLite via `better-sqlite3` | Client and campaign storage |
-| Frontend | React 18 + Vite | UI |
-| Auth | RESTORED — cookie-session with STUDIO_PASSWORD | Fully working |
-| AI — posts | OpenAI GPT-4o (`openai` package) | LinkedIn post generation |
-| AI — images | Google Gemini `gemini-2.5-flash-image` (`@google/genai` package) | Nano Banana image generation |
-| Image storage | Cloudflare R2 via `@aws-sdk/client-s3` | Public image hosting for Supergrow |
-| Scheduling | Supergrow MCP via `@modelcontextprotocol/sdk` | LinkedIn post drafting |
-| File uploads | `multer` (memory storage) | RAG document upload |
-| Progress | Server-Sent Events (SSE) | Live campaign progress in browser |
-| Hosting | Render Starter ($7/month) | Single Node.js web service |
-| PDF parsing | `pdfjs-dist` (transitive dep, no extra install) | RAG PDF text extraction |
+| Layer | Technology |
+|---|---|
+| Runtime | Node.js 22 ESM (`"type":"module"`) |
+| Framework | Express.js |
+| Database | SQLite via `better-sqlite3` |
+| Frontend | React 18 + Vite |
+| Auth | Stateless Bearer token in localStorage. `window.fetch` patched in `App.jsx` to auto-add `Authorization: Bearer` to all `/api/` calls |
+| LinkedIn posts | Claude `claude-sonnet-4-5` via Anthropic SDK + web_search tool + prompt caching |
+| Images | Gemini `gemini-2.5-flash-image` via `@google/genai` SDK (Nano Banana style) |
+| Image storage | Cloudflare R2 via `@aws-sdk/client-s3` |
+| LinkedIn deploy | Supergrow MCP — `create_post` only (drafts, never queue_post) |
+| Email sending | AWS SES via `@aws-sdk/client-ses` |
+| File uploads | `multer` (memory storage) |
+| Progress | Server-Sent Events (SSE) |
+| Hosting | Render |
 
 ---
 
@@ -62,381 +85,300 @@ The app generates LinkedIn posts using GPT-4o (with the LinkedIn New Client Mast
 ```
 thegreenagents-studio/
 ├── index.html
-├── package.json                        ESM, "type": "module"
+├── package.json
 ├── vite.config.js
 ├── render.yaml
-├── .npmrc                              legacy-peer-deps=true
-├── .gitignore
+├── BLUEPRINT.md                        ← this file
 │
 ├── server/
-│   ├── index.js                        Express app, port 10000 (Render) or 3001 (local)
-│   ├── db.js                           SQLite setup
+│   ├── index.js                        Express app entry point
+│   ├── db.js                           SQLite schema + connection
 │   ├── middleware/
-│   │   └── auth.js                     AUTH DISABLED — passthrough next() for testing
+│   │   └── auth.js                     Bearer token auth (requireAuth)
 │   ├── routes/
-│   │   ├── auth.js                     POST /login, /logout, GET /check
-│   │   ├── clients.js                  CRUD + RAG upload + Supergrow auto-sync
-│   │   └── campaigns.js                Campaign pipeline, SSE, deploy endpoint
+│   │   ├── auth.js                     POST /login, GET /check
+│   │   ├── clients.js                  Client CRUD + RAG upload + Supergrow sync
+│   │   ├── campaigns.js                LinkedIn campaign pipeline + SSE + deploy
+│   │   └── email.js                    Email brands/lists/subscribers/campaigns/send/domain
 │   ├── services/
-│   │   ├── openai.js                   GPT-4o post generation (LinkedIn Master prompt)
+│   │   ├── openai.js                   Claude post generation (LinkedIn system prompt)
 │   │   ├── gemini.js                   Nano Banana image generation
-│   │   ├── r2.js                       Cloudflare R2 image upload
-│   │   └── supergrow.js                Supergrow MCP client (dual-transport)
+│   │   ├── r2.js                       Cloudflare R2 upload
+│   │   ├── supergrow.js                Supergrow MCP client
+│   │   └── ses.js                      AWS SES email sending service
 │   └── utils/
-│       └── extractText.js              PDF/text extraction for RAG uploads
+│       └── extractText.js              PDF/text extraction for RAG
 │
 └── src/
     ├── main.jsx
-    ├── App.jsx                         AUTH DISABLED — renders Dashboard directly
+    ├── App.jsx                         Auth check + global fetch patch
     ├── index.css
     └── components/
-        ├── Dashboard.jsx               Client grid + auto-sync on load
-        ├── Sidebar.jsx
+        ├── Dashboard.jsx               Client grid + email nav routing
+        ├── Sidebar.jsx                 Nav: Dashboard, Clients, Email
         ├── ClientCard.jsx
         ├── NewClientModal.jsx
-        ├── ClientDetail.jsx            Client detail, RAG upload, run campaign, history
-        └── CampaignProgress.jsx        Live SSE progress + post review grid + deploy button
+        ├── ClientDetail.jsx            Client detail + RAG + campaign history
+        ├── CampaignProgress.jsx        Live SSE progress + post review grid + deploy
+        └── EmailSection.jsx            Full email module (split-pane Option E layout)
 ```
 
 ---
 
 ## DATABASE SCHEMA
 
-**clients table**
+### LinkedIn tables
+
+**clients**
 ```sql
-id TEXT PRIMARY KEY
-name TEXT                         -- e.g. "The Green Agents"
-brand TEXT                        -- e.g. "The Green Agents" (used in image branding)
-website TEXT
-supergrow_workspace_name TEXT
-supergrow_workspace_id TEXT       -- UUID from Supergrow workspace URL
-supergrow_api_key TEXT            -- Per-client Supergrow API key (from Supergrow Settings > MCP)
-timezone TEXT                     -- e.g. "Europe/London"
-cadence TEXT                      -- e.g. "Daily", "3x week"
-posting_identity TEXT             -- "personal" or "company"
-approval_mode TEXT                -- currently IGNORED — always uses create_post (drafts)
-rag_filename TEXT
-rag_content TEXT                  -- Extracted plain text (NOT raw bytes) — PDFs are parsed
-created_at TEXT
-updated_at TEXT
+id, name, brand, website, supergrow_workspace_name, supergrow_workspace_id,
+supergrow_api_key, timezone, cadence, posting_identity, approval_mode,
+rag_filename, rag_content, created_at, updated_at
 ```
 
-**campaigns table**
+**campaigns**
 ```sql
-id TEXT PRIMARY KEY
-client_id TEXT
-status TEXT                       -- pending | running | awaiting_approval | completed | failed
-stage TEXT                        -- generating_posts | generating_images | awaiting_approval | deploying | done | error
-progress INTEGER                  -- 0-100
-total_posts INTEGER               -- 12 for testing, 96 for production
-posts_generated INTEGER
-images_generated INTEGER
-posts_deployed INTEGER
-posts_json TEXT                   -- JSON array of all posts with image_urls, quality scores, etc.
-error_log TEXT
-files_json TEXT                   -- JSON object of output files (content as strings)
-created_at TEXT
-completed_at TEXT
+id, client_id, status, stage, progress, total_posts, posts_generated,
+images_generated, posts_deployed, posts_json, error_log, files_json,
+created_at, completed_at
+```
+
+### Email tables (added Session 4)
+
+**email_brands**
+```sql
+id, client_id, name, from_name, from_email, reply_to, color, created_at
+```
+One brand per client. Stores the default from/reply-to settings for all campaigns.
+
+**email_lists**
+```sql
+id, client_id, name, from_name, from_email, reply_to, subscriber_count, created_at
+```
+
+**email_subscribers**
+```sql
+id, list_id, email, name, status (subscribed|unsubscribed|bounced),
+created_at, unsubscribed_at, bounced_at
+UNIQUE(list_id, email)
+```
+
+**email_campaigns**
+```sql
+id, client_id, list_id, title, subject, from_name, from_email, reply_to,
+html_body, plain_body, status (draft|scheduled|sending|sent|failed),
+scheduled_at, sent_at, sent_count, open_count, click_count,
+bounce_count, unsubscribe_count, created_at
+```
+
+**email_sends**
+```sql
+id, campaign_id, subscriber_id, status, opened_at, clicked_at, bounced_at, sent_at
 ```
 
 ---
 
 ## ENVIRONMENT VARIABLES (set in Render)
 
-| Key | Value | Notes |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | `sk-ant-api03-...` | Still in env but Claude is no longer used for posts |
-| `OPENAI_AI_KEY` | `sk-proj-...` | **NOTE: named OPENAI_AI_KEY not OPENAI_API_KEY** — code handles both |
-| `GEMINI_API_KEY` | `AIza...` | Google AI Studio key |
-| `SUPERGROW_MCP_URL` | `https://mcp.supergrow.ai/mcp?api_key=...` | Master API key URL |
-| `R2_ACCOUNT_ID` | `9c5edb3cc8262aa7b43de4b42b970b99` | Cloudflare account ID |
-| `R2_ACCESS_KEY_ID` | `67815f3fd80704cfab3139dbc37c7bb1` | R2 access key |
-| `R2_SECRET_ACCESS_KEY` | `350763615e7ed3...` | R2 secret key |
-| `R2_BUCKET_NAME` | `supergrowfortga` | R2 bucket name |
-| `R2_ENDPOINT` | `https://9c5edb3cc8262aa7b43de4b42b970b99.r2.cloudflarestorage.com` | |
-| `R2_PUBLIC_URL` | `https://pub-142245a59cdd4552a84f0f2d3e8ac94e.r2.dev` | Public image base URL |
-| `STUDIO_USERNAME` | `greenagents` | Login username (default if not set: "greenagents") |
-| `STUDIO_PASSWORD` | `86sdg88gdsd6&DF!` | Login password |
-| `SESSION_SECRET` | `greenagents_studio_2026_secret_key` | |
-| `NODE_ENV` | `production` | |
-| `DB_PATH` | `/var/data/studio.db` | Persistent disk |
+| Key | Notes |
+|---|---|
+| `ANTHROPIC_API_KEY` | Claude API — used for LinkedIn post generation |
+| `OPENAI_AI_KEY` | Legacy env var name (not OPENAI_API_KEY) — kept for compatibility |
+| `GEMINI_API_KEY` | Google AI Studio — Nano Banana images |
+| `SUPERGROW_MCP_URL` | Master Supergrow MCP URL with api_key param |
+| `R2_ACCOUNT_ID` | Cloudflare R2 |
+| `R2_ACCESS_KEY_ID` | Cloudflare R2 |
+| `R2_SECRET_ACCESS_KEY` | Cloudflare R2 |
+| `R2_BUCKET_NAME` | `supergrowfortga` |
+| `R2_ENDPOINT` | R2 endpoint URL |
+| `R2_PUBLIC_URL` | Public R2 image base URL |
+| `STUDIO_USERNAME` | Login username (default: `greenagents`) |
+| `STUDIO_PASSWORD` | Login password |
+| `DB_PATH` | `/var/data/studio.db` |
+| `AWS_ACCESS_KEY_ID` | NEW Session 4 — tga-studio-ses IAM user |
+| `AWS_SECRET_ACCESS_KEY` | NEW Session 4 — tga-studio-ses IAM user |
+| `AWS_SES_REGION` | `eu-north-1` |
 
 ---
 
-## AUTH STATUS — RESTORED ✅
+## AUTH
 
-Auth is active. `server/middleware/auth.js` enforces `req.session.authenticated`.
-`src/App.jsx` shows Login screen → Dashboard after successful login.
-Password is `STUDIO_PASSWORD` env var in Render — verify no trailing space if login fails.
+Stateless Bearer token. On login, server returns a token stored in `localStorage`. `App.jsx` patches `window.fetch` globally to add `Authorization: Bearer <token>` to every `/api/` request. No cookies, no sessions.
 
----
-
-## HOW SUPERGROW MCP WORKS (confirmed via live testing)
-
-### Authentication
-- API key in URL query param: `https://mcp.supergrow.ai/mcp?api_key=YOUR_KEY`
-- No login/session exchange — key in URL is the only auth
-- Per-client keys stored in `clients.supergrow_api_key`
-- Missing key returns HTTP 401 with `{"error":"Missing api_key query parameter"}`
-- Wrong key returns MCP-level error: `{"errors":["Invalid API key"]}`
-
-### Transport
-- **Streamable HTTP** — POST to `/mcp` then GET for SSE stream
-- GET to `/mcp` returns 405 — no separate `/sse` endpoint
-- Our code tries Streamable HTTP first, falls back to SSE (cached per API key)
-
-### Tool: create_post (what we use — ALWAYS drafts)
-```json
-{
-  "workspace_id": "uuid",
-  "text": "post content",           // NOTE: 'text' not 'content'
-  "image_urls": ["https://..."],    // optional array
-  "linked_in_company_page_id": "uuid"  // optional
-}
-```
-Returns: `{ status: "ok", post: { id, text, status: "draft", app_url, ... } }`
-
-### Tool: queue_post (NOT used — creates draft with auto-assigned slot)
-Same args as create_post. Returns same structure plus `time_slot_instance`.
-
-### Tool: score_post (DISABLED — times out consistently)
-```json
-{ "workspace_id": "uuid", "text": "post content" }
-```
-Returns: `{ score: 0-100, feedback: "...", suggestions: ["..."] }`
-**Currently disabled** — was timing out on every call (20s × 12 posts = 4 min waste).
-Quality gate was: score < 70 triggers GPT-4o rewrite. Re-enable when MCP is stable.
-
-### Tool: list_workspaces
-No args. Returns array of `{ id, name, created_at, type, ... }`.
-Used by auto-sync on dashboard load to add new workspaces as clients.
-
-### Supergrow Approval Workflow (Kanban)
-Three columns: **Drafts → Approved → Published**
-- `create_post` lands posts in **Drafts** column
-- Client/operator drags card from Drafts → Approved
-- Agency clicks Schedule inside approved post to assign time slot
-- Supergrow publishes at scheduled time
-- Approval works on **pure drafts** — no slot assignment needed before approval
-
-### Known issue: delete_post on a queued post
-Returns 422 "Post cannot be deleted". Must `unschedule_post` first.
-There is a test post (id: `69985593-9a5d-4adb-a149-9038bb4aaa07`) in the
-Wesley Sweetman workspace that may need manual deletion from Supergrow.
+`server/middleware/auth.js` exports `requireAuth` — used on all protected routes.
+`/api/email/unsubscribe` is public (no auth) — handles unsubscribe link clicks from emails.
 
 ---
 
-## HOW THE CAMPAIGN PIPELINE WORKS
+## EMAIL MODULE (Session 4 — full build)
 
-### Stage flow
+### Architecture
+AWS SES sends all emails. No Sendy. `server/services/ses.js` wraps the SES SDK.
+
+### UI layout — Option E split-pane
+Left panel: searchable brand list (240px, scrollable, scales to hundreds of clients).
+Right panel: selected brand's Campaigns / Lists / Domains / Settings tabs.
+Brand stores from_name, from_email, reply_to — inherited by lists and campaigns.
+
+### API routes (`/api/email/`)
 ```
-generating_posts → generating_images → awaiting_approval → deploying → done
+GET    /brands                    List all brands with stats
+POST   /brands                    Create brand
+PUT    /brands/:id                Edit brand
+DELETE /brands/:id                Delete brand
+
+GET    /lists                     All lists (filter by ?client_id=)
+POST   /lists                     Create list
+DELETE /lists/:id                 Delete list + subscribers
+
+GET    /lists/:id/subscribers     Get subscribers (filter by ?status=)
+POST   /lists/:id/subscribers     Add single subscriber
+POST   /lists/:id/import          Bulk CSV import
+DELETE /lists/:listId/subscribers/:subId   Unsubscribe
+
+GET    /campaigns                 All campaigns (filter by ?client_id=)
+POST   /campaigns                 Create campaign
+PUT    /campaigns/:id             Edit campaign
+DELETE /campaigns/:id             Delete campaign
+POST   /campaigns/:id/send        Send campaign (background, responds immediately)
+
+GET    /unsubscribe               PUBLIC — handles unsubscribe link clicks
+GET    /domain-health/:domain     DNS checks: SPF, DKIM, DMARC, MX
+GET    /verified-domains          List of SES-verified domains
 ```
 
-**Stage 1 — Post generation (GPT-4o, ~2-3 min)**
-- Fetches Content DNA from Supergrow (non-fatal if fails)
-- Calls OpenAI Responses API with web_search to get live LinkedIn algorithm context
-- Sends full RAG + algorithm context + LinkedIn Master system prompt to GPT-4o
-- Returns 12 posts (change `POSTS_PER_CAMPAIGN` in openai.js for 96)
-- Each post has: id, topic, angle, buyer_segment, cta_type, content_pillar, format,
-  suggested_day, suggested_time, linkedin_post_text, image_prompt
+### SES sending
+- Batches at 10 emails per batch, 800ms delay between batches (~12/sec, under 14/sec limit)
+- Auto-injects unsubscribe link into every email (HTML + plain text)
+- Unsubscribe link format: `/api/email/unsubscribe?sid=SUBSCRIBER_ID&cid=CAMPAIGN_ID`
+- Send runs in background — HTTP responds immediately with subscriber count
 
-**Stage 2 — SCORING DISABLED**
-- score_post was timing out on 100% of calls (20s each)
-- Posts proceed directly to image generation
+### Verified SES domains (eu-north-1)
+thegreenagents.com, sweetbyte.co.uk, clear-a-way.co.uk, itcloudpros.uk,
+mail.engineersolutions.co.uk, syncsure.cloud, socialecho.ai, clearerpaths.co.uk,
+mail.weprintcatalogues.com
 
-**Stage 3 — Image generation (Gemini Nano Banana, ~1-2 min)**
-- Model: `gemini-2.5-flash-image` via `@google/genai` SDK
-- Full Nano Banana spec applied (see IMAGE GENERATION section)
-- Rate limit delay ONLY fires on successful generation (not on failures)
-- Failed images are logged but don't stop the campaign
-- Images uploaded to R2 at `images/{clientId}/{postId}-{uuid}.jpg`
-
-**Stage 4 — awaiting_approval (operator review)**
-- Pipeline STOPS here
-- All 12 post cards with images shown in review grid
-- Operator reviews, then clicks "Send N Drafts to Supergrow →"
-- NOTHING goes to Supergrow until that button is clicked
-
-**Stage 5 — Deploying (create_post, ~30 sec)**
-- ALL posts sent as create_post (draft) — NEVER queue_post
-- Each post includes image_urls if image was generated
-- Single retry on failure
-- 500ms delay between calls
+### AWS IAM
+User: `tga-studio-ses` | Policy: `AmazonSESFullAccess` | Account: 262023811768
+Root account keys should be deactivated (security recommendation in IAM dashboard).
 
 ---
 
-## IMAGE GENERATION — NANO BANANA SPEC
+## LINKEDIN POST GENERATION (Session 4 updates)
 
-"Nano Banana" is Google's codename for `gemini-2.5-flash-image`.
-The spec comes from: `/Universal_NANO_BANNA_Image_Generation_Prompt_(Client-Agnostic)`
+Model: `claude-sonnet-4-5` via Anthropic SDK with web_search tool + prompt caching.
 
-**Every image must have:**
-- Brand name (`client.brand`) at bottom right — always
-- 16:9 landscape for text posts, 1:1 square for carousel covers
-- Scroll-stopper design: bold typography, high contrast, colour blocking
-- Text on image allowed (hooks, stats, titles ≤15 words)
-- Audience-tailored: uses `post.buyer_segment`
-- NO stock photo clichés: no handshakes, no laptop photos, no whiteboard people
+### Key prompt rules added Session 4
 
-**SDK:** `@google/genai` (NOT the old `@google/generative-ai`)
-```js
-import { GoogleGenAI } from '@google/genai';
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-const response = await ai.models.generateContent({
-  model: 'gemini-2.5-flash-image',
-  contents: promptString,
-  config: { responseModalities: ['TEXT', 'IMAGE'] }
-});
-```
+**Story-first structure (mandatory)**
+Every post opens with a scene, person, or specific situation. The insight lands at the END of the story, not the top. No opening with a claim or thesis.
 
-**Free tier limits:** 500 images/day, 10 RPM (reset midnight Pacific)
+**Anti-duplication gate**
+12 mandatory content angles (myth-busting, how-it-works, objection-handling, stat/data, client story, contrarian take, behind-the-scenes, buyer pain, comparison, trend, FAQ, stakes). No two posts may share the same angle or CTA.
 
----
+**Batch uniqueness check**
+Claude scans all posts before finalising — each must teach a genuinely different lesson.
 
-## POST GENERATION — GPT-4o WITH LINKEDIN MASTER PROMPT
+**Format mix (12 posts)**
+- 8-9 Text Posts
+- 2-3 Founder Stories (first person, specific, human)
+- 1 Video Script
+- No carousels, no documents
 
-**Model:** `gpt-4o` via `openai` package
-**System prompt:** Full LinkedIn New Client Master instructions (in `server/services/openai.js`)
-**Key rules from the prompt:**
-- Minimum 1,200 characters per post body
-- First 2 lines = scroll-stopping hook, under 140 chars combined
-- No external URLs in post body
-- End every post with a specific open-ended question (never "Thoughts?")
-- Banned words: delve, landscape, testament, crucial, unlock, game-changer, etc.
-- Formats: Text Post, Carousel, Video Script, Founder Story
-- Vary formats across the batch (min 2 carousels per 12 posts)
-
-**Algorithm context:** Uses OpenAI Responses API with web_search tool to fetch
-current LinkedIn algorithm best practices before every campaign run.
-Falls back to static built-in guidelines if web search unavailable.
-
-**Posts per campaign:** `POSTS_PER_CAMPAIGN = 12` (testing)
-Change to 96 for production. Note: 96 posts will need batching (GPT-4o ~16k token limit).
-
-**JSON response format per post:**
-```json
-{
-  "id": 1,
-  "topic": "",
-  "angle": "",
-  "buyer_segment": "",
-  "cta_type": "",
-  "content_pillar": "Authority | Story | Education | Commercial | Engagement",
-  "format": "Text Post | Carousel | Video Script",
-  "suggested_day": "Tuesday",
-  "suggested_time": "08:00",
-  "linkedin_post_text": "",
-  "image_prompt": ""
-}
-```
+**Other rules**
+- No emojis, no decorative symbols
+- Minimum 1,200 characters per text post
+- Short paragraphs, blank line between every paragraph
+- Banned words: delve, landscape, testament, crucial, unlock, game-changer, robust, seamless, holistic, leverage (as verb)
+- RAG document is the ONLY source of truth for content
 
 ---
 
-## RAG DOCUMENT HANDLING
+## SUPERGROW MCP — KEY FACTS
 
-- Stored as plain text in `clients.rag_content` column
-- PDFs are parsed via `pdfjs-dist` in `server/utils/extractText.js`
-- Supports: `.pdf`, `.txt`, `.md`, `.csv` (anything else = UTF-8 string)
-- Upload limit: 20MB via multer
-- **Current client John Wicks uses `The_Green_Agents_RAG_Master.pdf`**
-
-**IMPORTANT:** Any client whose RAG was uploaded BEFORE commit `6b6872b` (April 15 2026)
-has binary garbage stored. Re-upload their PDF via Edit Client → Replace.
+- Transport: POST to /mcp, GET for SSE stream
+- Auth: `?api_key=` query param ONLY (no headers)
+- Use `create_post` only — never `queue_post`
+- `create_post` field is `text` not `content`
+- `score_post` disabled — times out 100% of the time on Render
+- EventSource cannot send headers — SSE auth uses `?token=` query param
 
 ---
 
-## AUTO-SYNC (Supergrow → App)
+## KNOWN ISSUES / DO NOT RE-LEARN
 
-On every dashboard load, `POST /api/clients/sync` is called:
-- Uses the master API key from `SUPERGROW_MCP_URL` env var
-- Calls `list_workspaces` to get all Supergrow workspaces
-- Creates new client records for any workspace not already in the DB
-- Never modifies existing clients
-- New clients get defaults: timezone=Europe/London, cadence=Daily, approval_mode=auto
-
-Known workspaces in the account:
-- john wicks's Workspace (`cd842050-...`)
-- sweetbyte
-- The Manson Group (`914be39a-f90d-4635-b216-6a2c7281abbd`)
-- Cube6
-- Tower leasing (added April 15 2026)
+- `OPENAI_AI_KEY` is the env var (not `OPENAI_API_KEY`) — code handles both
+- `better-sqlite3` requires `npm rebuild better-sqlite3 --build-from-source` in build
+- Gemini working model: `gemini-2.5-flash-image` with `@google/genai` SDK
+- PDF RAG: uses pdfjs-dist extraction. Old binary uploads need re-upload
+- `score_post` MCP timeouts — do NOT re-enable
+- `schedule_post` MCP returns "Invalid time slot" — not used
+- Stockholm (eu-north-1) SES shows padlock in AWS console — it IS enabled, padlock = opt-in region indicator only
 
 ---
 
-## THE JOHN WICKS CLIENT (primary test client)
+## WHAT'S BEEN BUILT (session history)
 
-**Who:** John Wicks, Co-founder of THEGREENAGENTS.COM
-**Voice:** Plain speaking, light-hearted, slightly irreverent, UK English
-**Anti-jargon:** Hates corporate fluff, vanity metrics, abstract marketing
-**Focus:** Tangible outcomes — new customers, sales leads, predictable pipeline
-**RAG file:** `The_Green_Agents_RAG_Master.pdf` (5 pages)
-**Supergrow workspace:** john wicks's Workspace
-**Content:** Two-Engine System (Outreach Engine + Social Trust Engine)
-**Target:** UK SMEs, 50-200 employees, MDs/Founders/CEOs, no CMO
+### Sessions 1-3
+- Full auth system (Bearer token)
+- LinkedIn campaign pipeline with SSE live progress
+- Per-card post/image regeneration (Edit, Rewrite, New image)
+- Campaign history with clickable cards and delete
+- Claude Sonnet post generation with web search + prompt caching
+- Nano Banana image generation (Gemini)
+- Cancel campaign button
+- Image yes/no modal on campaign start
+- Full image display (objectFit: contain)
 
----
-
-## SUPERGROW MCP — FULL TOOL REFERENCE (38 tools confirmed live)
-
-Core tools used by this app:
-| Tool | Args | Used? |
-|---|---|---|
-| `list_workspaces` | none | ✅ Auto-sync |
-| `create_post` | workspace_id, text, image_urls?, linked_in_company_page_id? | ✅ Deploy |
-| `queue_post` | workspace_id, text, image_urls?, linked_in_company_page_id? | ❌ Not used |
-| `get_content_dna` | workspace_id | ✅ Before generation |
-| `score_post` | workspace_id, text | ⏸ Disabled (timeouts) |
-| `get_company_pages` | workspace_id | ✅ Available |
-| `schedule_post` | workspace_id, post_id, year, month, day_of_the_month, hour, minute | ❌ Tested, failed (Invalid time slot) |
-| `delete_post` | workspace_id, post_id | ⚠️ 422 if post is queued |
-
-Other available tools (not yet used):
-`list_posts`, `get_post`, `update_post`, `delete_post`, `create_public_link`,
-`delete_public_link`, `unschedule_post`, `publish_post`, `get_weekly_calendar`,
-`get_monthly_calendar`, `get_kanban_board`, `get_kanban_column`, `get_weekly_reports`,
-`get_followers`, `get_metrics`, `extract_content`, `extract_youtube`, `extract_pdf`,
-`extract_audio`, `questions_from_topic`, `questions_from_text`, `kb_ingest`,
-`kb_list`, `kb_get`, `kb_delete`, `kb_search`, `regenerate_content_dna`,
-`get_linkedin_accounts`, `create_auto_plug_comments`, `list_auto_plug_comments`,
-`delete_auto_plug_comment`
-
-**score_post returns 0-100 (NOT 0-10). Quality gate threshold = 70.**
+### Session 4
+- Story-first post structure enforced in prompt
+- Anti-duplication gate + 12 content angle rotation
+- Batch uniqueness check added to quality gate
+- Full email module built: `server/services/ses.js`, `server/routes/email.js`
+- Email DB tables: email_brands, email_lists, email_subscribers, email_campaigns, email_sends
+- EmailSection.jsx — Option E split-pane UI (brands left, content right)
+- Sidebar updated with Email nav item under Outreach section
+- Dashboard routes `view==='email'` to EmailSection
+- AWS SES IAM user `tga-studio-ses` created with AmazonSESFullAccess
+- Env vars added to Render: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SES_REGION
 
 ---
 
-## WHAT NEEDS BUILDING NEXT (priority order)
+## WHAT TO BUILD NEXT (priority order)
 
-### ✅ 1. Individual post/image regeneration — DONE (Session 2)
-Per-card buttons on the review grid:
-- 🔄 New image — calls Nano Banana for just that post, replaces card image
-- ✏️ Edit text — inline textarea directly on the card with Save/Cancel
-- 🔄 Rewrite post — GPT-4o rewrites just that post, SSE streams result back
-SSE event type `post_updated` carries `{ postIndex, post }` — card updates live.
+### 1. Email module — test and fix
+First real use: create a brand → create a list → import CSV → create campaign → send.
+Likely issues to watch for:
+- `@aws-sdk/client-ses` install on Render (check build logs)
+- SES send errors (check IAM permissions, verified domain used as from_email)
+- CSV import edge cases
 
-### ✅ 2. Persist review grid after deploy — DONE (Session 2)
-`deployToDrafts` now parses Supergrow `create_post` response and saves
-`supergrow_post_id` and `supergrow_app_url` per post into `posts_json`.
-Post cards in the done state show a green "View in Supergrow →" link.
+### 2. Email — inbox triage (Google Workspace)
+Connect Google Workspace mailboxes so replies to email outreach can be triaged:
+- See all replies across all client mailboxes in one view
+- One-click unsubscribe a reply sender from their Sendy/SES list
+- Flag reply as interested lead
+- Needs: Gmail API + Google OAuth app setup
+- Phase 2 — do email send first
 
-### ✅ 3. Re-enable auth — DONE (Session 2)
-`server/middleware/auth.js` restored, `src/App.jsx` restored with Login flow.
+### 3. Email — open/click tracking
+- Open tracking: inject 1px transparent image pixel per send
+- Click tracking: wrap all links in redirect through `/api/email/track/click`
+- Update `open_count` and `click_count` on email_campaigns when fired
 
-### ✅ 4. Campaign history clickable — DONE (Session 2)
-Campaign history rows are now clickable and reopen the full post grid.
-- `awaiting_approval` campaigns show amber "Ready to review" badge + "Review posts →" 
-- `completed` campaigns show green "Deployed" badge + "View results →"
-- Clicking any row opens CampaignProgress which renders the full review grid from DB
-- Posts and images persist indefinitely in `posts_json` until the client record is deleted
+### 4. Email — list quality checker
+- Integrate ZeroBounce or NeverBounce API to verify lists before sending
+- Prevents bounces that damage domain reputation
+- Wez to confirm which service they have/want
 
-### 5. Scale to 96 posts
-`POSTS_PER_CAMPAIGN` in openai.js = 96
-Will need batching: 8 calls × 12 posts each (GPT-4o 16k token limit).
-Gemini free tier: 500 images/day at 10 RPM — 96 images = ~10 min.
+### 5. Scale LinkedIn to 96 posts
+- `POSTS_PER_CAMPAIGN` in openai.js currently = 12 (testing)
+- Production = 96, needs batching: 8 calls × 12 posts each
+- Gemini free tier: 500 images/day at 10 RPM — 96 images ≈ 10 min
 
-### 6. Scheduling
-`queue_post` auto-assigns next available slot from workspace calendar.
-For now, posts go as drafts and are scheduled manually in Supergrow.
+### 6. LinkedIn scheduling
+- Posts go as drafts currently, manually scheduled in Supergrow
+- `queue_post` auto-assigns next available slot — test if it works now
 
 ---
 
@@ -444,93 +386,20 @@ For now, posts go as drafts and are scheduled manually in Supergrow.
 
 **Build command:** `npm install --include=dev && npm run build`
 **Start command:** `npm start`
-**Build process:**
-1. `npm install --include=dev`
-2. `npm rebuild better-sqlite3 --build-from-source`
-3. `vite build`
-4. `node server/index.js`
-
-**Auto-deploys** on every push to `main`.
-Build takes ~3-5 minutes. Check Render logs if build fails.
+**Auto-deploys** on every push to `main`. Build takes ~3-5 minutes.
 
 ---
 
-## KNOWN ISSUES AND NOTES
+## CLIENTS IN THE SYSTEM
 
-**OPENAI_AI_KEY vs OPENAI_API_KEY**
-Render env var is `OPENAI_AI_KEY` (typo). Code accepts either:
-`process.env.OPENAI_API_KEY || process.env.OPENAI_AI_KEY`
-Startup log shows: `OPENAI_API_KEY: SET ✓ (using OPENAI_AI_KEY)`
+LinkedIn (Supergrow workspaces):
+- john wicks's Workspace (primary test client)
+- sweetbyte
+- The Manson Group
+- Cube6
+- Tower Leasing
 
-**better-sqlite3 requires native compilation**
-Build command must include `npm rebuild better-sqlite3 --build-from-source`.
-
-**ESM throughout**
-`"type": "module"` in package.json. Use `import/export` everywhere.
-Use `import.meta.dirname` or `fileURLToPath(import.meta.url)` for `__dirname`.
-
-**score_post MCP timeouts**
-Supergrow MCP `score_post` tool times out on every call from Render (~20s each).
-Scoring is disabled. Quality gate at 70/100 is ready to re-enable.
-The code for scoring + GPT-4o auto-fix still exists in openai.js (`fixPost`).
-
-**Gemini model history**
-- `gemini-2.0-flash-exp` — deprecated, 404
-- `gemini-2.0-flash-preview-image-generation` — deprecated, 404
-- `gemini-2.5-flash-image` — CURRENT, working ✅
-
-**PDF RAG storage**
-Old uploads (before commit 6b6872b) stored binary. Re-upload to fix.
-New uploads use pdfjs-dist extraction — all formats work correctly.
-
-**Session/Cookie auth**
-Uses `cookie-session`, not `express-session`. Session stored in signed cookie.
-`secure: true` in production — requires HTTPS (Render provides this).
-
-**Supergrow auto-sync**
-Runs on every dashboard load. Creates new clients from Supergrow workspaces.
-New clients get master API key from SUPERGROW_MCP_URL env var.
-Per-client API key should be set manually after auto-creation for real campaigns.
-
----
-
-## API ROUTES REFERENCE
-
-| Method | Route | Auth | Description |
-|---|---|---|---|
-| POST | `/api/auth/login` | No | Login |
-| POST | `/api/auth/logout` | No | Logout |
-| GET | `/api/auth/check` | No | Check session |
-| GET | `/api/clients` | Yes | List all clients |
-| GET | `/api/clients/workspaces?api_key=` | Yes | Fetch Supergrow workspaces |
-| POST | `/api/clients/sync` | Yes | Auto-sync Supergrow workspaces |
-| GET | `/api/clients/test-supergrow` | Yes | Test Supergrow MCP connection |
-| GET | `/api/clients/:id` | Yes | Get client + campaign history |
-| POST | `/api/clients` | Yes | Create client (multipart with RAG) |
-| PUT | `/api/clients/:id` | Yes | Update client (multipart with RAG) |
-| DELETE | `/api/clients/:id` | Yes | Delete client + all campaigns |
-| POST | `/api/campaigns/start/:clientId` | Yes | Start campaign (async) |
-| GET | `/api/campaigns/progress/:id` | Yes | SSE stream for live progress |
-| POST | `/api/campaigns/:id/deploy` | Yes | Deploy posts to Supergrow as drafts |
-| GET | `/api/campaigns/client/:clientId` | Yes | List campaigns for a client |
-| POST | `/api/campaigns/:id/regenerate-image/:postIndex` | Yes | Regenerate image for one post (async, SSE response) |
-| POST | `/api/campaigns/:id/regenerate-post/:postIndex` | Yes | Rewrite post text via GPT-4o (async, SSE response) |
-| PATCH | `/api/campaigns/:id/edit-post/:postIndex` | Yes | Save inline text edit for one post |
-
----
-
-## GIT HISTORY — KEY COMMITS
-
-| Commit | What changed |
-|---|---|
-| `aa82978` | Added SSE transport fallback + timeouts to supergrow.js |
-| `4c16199` | Fixed content→text bug, score scale 0-100, suggestions array |
-| `604dadf` | Fixed 401 redirect, improved login diagnostics |
-| `9f60602` | Disabled auth for testing |
-| `4ca05ef` | Replaced Claude with GPT-4o, added awaiting_approval stage + preview grid |
-| `6b6872b` | Fixed OPENAI crash (env var name) + PDF text extraction |
-| `cc6cbf5` | Removed score_post (100% timeout), fixed progress bar, UI overhaul |
-| `884486d` | Fixed Gemini model, skip delay on image fail, fixed post grid render |
-| `7684f28` | Implemented full Nano Banana image spec |
-| `e72c55d` | Switched to gemini-2.5-flash-image + @google/genai SDK (CURRENT) |
+Email brands to create (match to clients above after session 4 deploy):
+- Create one brand per client in the Email section
+- Use verified SES domain matching each client
 

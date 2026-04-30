@@ -23,14 +23,12 @@ export default function Sidebar({ onLogout, activeView, onNavigate }) {
       </div>
 
       <div style={{ flex:1, padding:'12px 0' }}>
-        <div style={{ fontSize:10, color:'rgba(159,225,203,0.5)', textTransform:'uppercase', letterSpacing:'0.06em', padding:'6px 20px 4px' }}>Content</div>
         {navItems.map(item => (
           <NavBtn key={item.id} item={item} active={activeView === item.id} onNavigate={onNavigate} />
         ))}
 
-        <div style={{ margin:'10px 16px', borderTop:'0.5px solid rgba(255,255,255,0.1)' }} />
+        <div style={{ margin:'8px 16px', borderTop:'0.5px solid rgba(255,255,255,0.1)' }} />
 
-        <div style={{ fontSize:10, color:'rgba(159,225,203,0.5)', textTransform:'uppercase', letterSpacing:'0.06em', padding:'6px 20px 4px' }}>Outreach</div>
         {emailItems.map(item => (
           <NavBtn key={item.id} item={item} active={activeView === item.id} onNavigate={onNavigate} />
         ))}
