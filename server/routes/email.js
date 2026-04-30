@@ -425,14 +425,9 @@ router.post('/campaigns/:id/test', async (req, res) => {
   if (!campaign) return res.status(404).json({ error: 'Not found' });
 
   try {
-    // For test sends, inject a clean footer without a real unsubscribe link
-    const testFooter = `<p style="margin-top:32px;font-size:11px;color:#999;text-align:center;border-top:1px solid #eee;padding-top:16px;">
-      <strong>TEST SEND</strong> — This is a preview only.
-    </p>`;
+    const testFooter = `<p style="margin-top:32px;font-size:11px;color:#999;text-align:center;border-top:1px solid #eee;padding-top:16px;"><strong>TEST SEND</strong> — This is a preview only.</p>`;
     const rawHtml = campaign.html_body.replace(/\[Name\]/gi, 'there');
-    const html = rawHtml.includes('</body>')
-      ? rawHtml.replace('</body>', `${testFooter}</body>`)
-      : rawHtml + testFooter;
+    const html = rawHtml.includes('</body>') ? rawHtml.replace('</body>', `${testFooter}</body>`) : rawHtml + testFooter;
 
     const { sendEmail } = await import('../services/ses.js');
     await sendEmail({
@@ -443,10 +438,11 @@ router.post('/campaigns/:id/test', async (req, res) => {
       replyTo:   campaign.reply_to || campaign.from_email,
       subject:   `[TEST] ${campaign.subject}`,
       htmlBody:  html,
-      plainBody: `TEST SEND\n\n${campaign.plain_body || campaign.html_body.replace(/<[^>]+>/g,'')}\n\n---\nThis is a test send. Unsubscribe link disabled.`,
+      plainBody: `TEST SEND\n\n${campaign.plain_body || campaign.html_body.replace(/<[^>]+>/g,'')}`,
     });
     res.json({ ok: true });
   } catch (err) {
+    console.error('[test-send] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
