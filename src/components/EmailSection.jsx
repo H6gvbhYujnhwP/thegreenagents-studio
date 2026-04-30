@@ -168,12 +168,28 @@ function ImportModal({ list, onClose, onSaved }) {
 
 function CampaignModal({ emailClient, lists, initial, onClose, onSaved }) {
   const editing = !!initial?.id;
-  const [form, setForm] = useState({ list_id:initial?.list_id||'', title:initial?.title||'', subject:initial?.subject||'', from_name:initial?.from_name||'', from_email:initial?.from_email||'', reply_to:initial?.reply_to||'', html_body:initial?.html_body||'', scheduled_at:initial?.scheduled_at||'' });
+  const [form, setForm] = useState({
+    list_id:      initial?.list_id      || (lists.length===1 ? lists[0].id : ''),
+    title:        initial?.title        || '',
+    subject:      initial?.subject      || '',
+    from_name:    initial?.from_name    || '',
+    from_email:   initial?.from_email   || '',
+    reply_to:     initial?.reply_to     || '',
+    html_body:    initial?.html_body    || '',
+    scheduled_at: initial?.scheduled_at || '',
+  });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
+
   async function save() {
-    if (!form.list_id||!form.title||!form.subject||!form.from_email||!form.html_body) { setErr('Fill all required fields'); return; }
+    const missing = [];
+    if (!form.list_id)   missing.push('mailing list');
+    if (!form.title)     missing.push('campaign title');
+    if (!form.subject)   missing.push('email subject');
+    if (!form.from_email) missing.push('from email');
+    if (!form.html_body) missing.push('email body');
+    if (missing.length) { setErr(`Please fill in: ${missing.join(', ')}`); return; }
     setSaving(true); setErr('');
     const r = await fetch(editing?`/api/email/campaigns/${initial.id}`:'/api/email/campaigns', { method:editing?'PUT':'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({...form, email_client_id:emailClient.id}) });
     const d = await r.json();
