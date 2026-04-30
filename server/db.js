@@ -49,4 +49,69 @@ db.exec(`
   );
 `);
 
+// ── Email module tables ───────────────────────────────────────────────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS email_lists (
+    id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    from_name TEXT NOT NULL,
+    from_email TEXT NOT NULL,
+    reply_to TEXT NOT NULL,
+    subscriber_count INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (client_id) REFERENCES clients(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS email_subscribers (
+    id TEXT PRIMARY KEY,
+    list_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    name TEXT,
+    status TEXT DEFAULT 'subscribed',
+    created_at TEXT DEFAULT (datetime('now')),
+    unsubscribed_at TEXT,
+    bounced_at TEXT,
+    FOREIGN KEY (list_id) REFERENCES email_lists(id),
+    UNIQUE(list_id, email)
+  );
+
+  CREATE TABLE IF NOT EXISTS email_campaigns (
+    id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    list_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    from_name TEXT NOT NULL,
+    from_email TEXT NOT NULL,
+    reply_to TEXT NOT NULL,
+    html_body TEXT NOT NULL,
+    plain_body TEXT,
+    status TEXT DEFAULT 'draft',
+    scheduled_at TEXT,
+    sent_at TEXT,
+    sent_count INTEGER DEFAULT 0,
+    open_count INTEGER DEFAULT 0,
+    click_count INTEGER DEFAULT 0,
+    bounce_count INTEGER DEFAULT 0,
+    unsubscribe_count INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (client_id) REFERENCES clients(id),
+    FOREIGN KEY (list_id) REFERENCES email_lists(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS email_sends (
+    id TEXT PRIMARY KEY,
+    campaign_id TEXT NOT NULL,
+    subscriber_id TEXT NOT NULL,
+    status TEXT DEFAULT 'sent',
+    opened_at TEXT,
+    clicked_at TEXT,
+    bounced_at TEXT,
+    sent_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (campaign_id) REFERENCES email_campaigns(id),
+    FOREIGN KEY (subscriber_id) REFERENCES email_subscribers(id)
+  );
+`);
+
 export default db;

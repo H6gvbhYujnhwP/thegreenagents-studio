@@ -3,6 +3,7 @@ import Sidebar from './Sidebar.jsx';
 import ClientCard from './ClientCard.jsx';
 import NewClientModal from './NewClientModal.jsx';
 import ClientDetail from './ClientDetail.jsx';
+import EmailSection from './EmailSection.jsx';
 
 export default function Dashboard({ onLogout }) {
   const [clients, setClients] = useState([]);
@@ -51,6 +52,15 @@ export default function Dashboard({ onLogout }) {
           onBack={() => setSelectedClient(null)}
           onRefresh={loadClients}
         />
+      </div>
+    );
+  }
+
+  if (view === 'email') {
+    return (
+      <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
+        <Sidebar onLogout={onLogout} activeView="email" onNavigate={setView} />
+        <EmailSection clients={clients} />
       </div>
     );
   }
