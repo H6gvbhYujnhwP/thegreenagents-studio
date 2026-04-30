@@ -644,12 +644,32 @@ export default function EmailSection() {
 
   async function loadAll() {
     setLoading(true);
-    const [c, vd] = await Promise.all([
-      fetch('/api/email/clients').then(r=>r.json()),
+    // 1. Fetch verified domains from AWS and existing clients in parallel
+    const [vd, c] = await Promise.all([
       fetch('/api/email/verified-domains').then(r=>r.json()),
+      fetch('/api/email/clients').then(r=>r.json()),
     ]);
-    setClients(Array.isArray(c)?c:[]);
-    setVerifiedDomains(Array.isArray(vd)?vd:[]);
+    const domains = Array.isArray(vd) ? vd : [];
+    let currentClients = Array.isArray(c) ? c : [];
+    setVerifiedDomains(domains);
+
+    // 2. Auto-create a client for any domain not already in the list
+    const existingNames = currentClients.map(cl => cl.name.toLowerCase());
+    const toCreate = domains.filter(d => !existingNames.includes(d.toLowerCase()));
+    if (toCreate.length > 0) {
+      await Promise.all(toCreate.map(domain =>
+        fetch('/api/email/clients', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: domain, color: '#1D9E75' }),
+        })
+      ));
+      // Reload clients after auto-creation
+      const refreshed = await fetch('/api/email/clients').then(r=>r.json());
+      currentClients = Array.isArray(refreshed) ? refreshed : [];
+    }
+
+    setClients(currentClients);
     setLoading(false);
   }
 
