@@ -31,7 +31,7 @@ function sign(date, region, service, secret) {
 
 function buildAuthHeader(params, body) {
   const now      = new Date();
-  const amzDate  = now.toISOString().replace(/[:\-]|\.\d{3}/g, '').slice(0, 15) + 'Z';
+  const amzDate  = now.toISOString().replace(/[-:]|\.\d{3}/g, '');
   const date     = amzDate.slice(0, 8);
   const method   = 'POST';
   const uri      = '/';
@@ -65,9 +65,8 @@ function sesRequest(params) {
       path:     '/',
       method:   'POST',
       headers: {
-        'Content-Type':   'application/x-www-form-urlencoded',
-        'Content-Length': Buffer.byteLength(body),
-        'host':           HOST,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'host':         HOST,
         ...authHdr,
       },
     };
