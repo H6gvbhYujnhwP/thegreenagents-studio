@@ -32,6 +32,48 @@ router.get('/stats', async (req, res) => {
   }
 });
 
+// ── BRANDS ───────────────────────────────────────────────────────────────────
+
+router.get('/brands', (req, res) => {
+  const rows = db.prepare(`
+    SELECT eb.*,
+      c.name as client_name,
+      (SELECT COUNT(*) FROM email_lists WHERE client_id=eb.client_id) as list_count,
+      (SELECT COALESCE(SUM(subscriber_count),0) FROM email_lists WHERE client_id=eb.client_id) as subscriber_count,
+      (SELECT COUNT(*) FROM email_campaigns WHERE client_id=eb.client_id) as campaign_count,
+      (SELECT status FROM email_campaigns WHERE client_id=eb.client_id ORDER BY created_at DESC LIMIT 1) as last_campaign_status
+    FROM email_brands eb
+    JOIN clients c ON eb.client_id=c.id
+    ORDER BY eb.name ASC
+  `).all();
+  res.json(rows);
+});
+
+router.post('/brands', (req, res) => {
+  const { client_id, name, from_name, from_email, reply_to, color } = req.body;
+  if (!client_id || !name || !from_name || !from_email) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+  const id = uuid();
+  db.prepare('INSERT INTO email_brands (id,client_id,name,from_name,from_email,reply_to,color) VALUES (?,?,?,?,?,?,?)')
+    .run(id, client_id, name, from_name, from_email, reply_to || from_email, color || '#1D9E75');
+  res.json(db.prepare('SELECT * FROM email_brands WHERE id=?').get(id));
+});
+
+router.put('/brands/:id', (req, res) => {
+  const { name, from_name, from_email, reply_to, color } = req.body;
+  const b = db.prepare('SELECT * FROM email_brands WHERE id=?').get(req.params.id);
+  if (!b) return res.status(404).json({ error: 'Not found' });
+  db.prepare('UPDATE email_brands SET name=?,from_name=?,from_email=?,reply_to=?,color=? WHERE id=?')
+    .run(name ?? b.name, from_name ?? b.from_name, from_email ?? b.from_email, reply_to ?? b.reply_to, color ?? b.color, req.params.id);
+  res.json(db.prepare('SELECT * FROM email_brands WHERE id=?').get(req.params.id));
+});
+
+router.delete('/brands/:id', (req, res) => {
+  db.prepare('DELETE FROM email_brands WHERE id=?').run(req.params.id);
+  res.json({ ok: true });
+});
+
 // ── LISTS ────────────────────────────────────────────────────────────────────
 
 router.get('/lists', (req, res) => {

@@ -51,6 +51,18 @@ db.exec(`
 
 // ── Email module tables ───────────────────────────────────────────────────────
 db.exec(`
+  CREATE TABLE IF NOT EXISTS email_brands (
+    id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    from_name TEXT NOT NULL,
+    from_email TEXT NOT NULL,
+    reply_to TEXT NOT NULL,
+    color TEXT DEFAULT '#1D9E75',
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (client_id) REFERENCES clients(id)
+  );
+
   CREATE TABLE IF NOT EXISTS email_lists (
     id TEXT PRIMARY KEY,
     client_id TEXT NOT NULL,
