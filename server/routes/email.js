@@ -37,7 +37,7 @@ router.get('/clients', (req, res) => {
   const rows = db.prepare(`
     SELECT ec.*,
       (SELECT COUNT(*) FROM email_lists WHERE email_client_id=ec.id) as list_count,
-      (SELECT COALESCE(SUM(subscriber_count),0) FROM email_lists WHERE email_client_id=ec.id) as subscriber_count,
+      (SELECT COALESCE(SUM(s.cnt),0) FROM (SELECT COUNT(*) as cnt FROM email_subscribers es JOIN email_lists el ON es.list_id=el.id WHERE el.email_client_id=ec.id AND es.status='subscribed') s) as subscriber_count,
       (SELECT COUNT(*) FROM email_campaigns WHERE email_client_id=ec.id) as campaign_count
     FROM email_clients ec
     ORDER BY ec.name ASC
@@ -116,9 +116,19 @@ router.delete('/brands/:id', (req, res) => {
 
 router.get('/lists', (req, res) => {
   const { email_client_id } = req.query;
+  const q = `
+    SELECT l.*,
+      (SELECT COUNT(*) FROM email_subscribers WHERE list_id=l.id AND status='subscribed')   as subscriber_count,
+      (SELECT COUNT(*) FROM email_subscribers WHERE list_id=l.id AND status='bounced')      as bounced_count,
+      (SELECT COUNT(*) FROM email_subscribers WHERE list_id=l.id AND status='unsubscribed') as unsubscribed_count,
+      (SELECT COUNT(*) FROM email_subscribers WHERE list_id=l.id AND status='spam')         as spam_count
+    FROM email_lists l
+    ${email_client_id ? 'WHERE l.email_client_id=?' : ''}
+    ORDER BY l.created_at DESC
+  `;
   const rows = email_client_id
-    ? db.prepare('SELECT * FROM email_lists WHERE email_client_id=? ORDER BY created_at DESC').all(email_client_id)
-    : db.prepare('SELECT * FROM email_lists ORDER BY created_at DESC').all();
+    ? db.prepare(q).all(email_client_id)
+    : db.prepare(q).all();
   res.json(rows);
 });
 
