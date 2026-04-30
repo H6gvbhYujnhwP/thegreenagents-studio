@@ -366,3 +366,150 @@ router.get('/verified-domains', async (req, res) => {
 });
 
 export default router;
+
+// ── CAMPAIGN QUEUE (per list) ─────────────────────────────────────────────────
+
+// Get all campaigns for a list, ordered by queue position
+router.get('/lists/:id/queue', (req, res) => {
+  const rows = db.prepare(`
+    SELECT c.*, el.name as list_name,
+      (SELECT COUNT(*) FROM email_subscribers WHERE list_id=c.list_id AND status='subscribed') as total_subscribers
+    FROM email_campaigns c
+    LEFT JOIN email_lists el ON c.list_id=el.id
+    WHERE c.list_id=?
+    ORDER BY c.queue_position ASC, c.created_at ASC
+  `).all(req.params.id);
+  res.json(rows);
+});
+
+// Reorder queue
+router.post('/lists/:id/queue/reorder', (req, res) => {
+  const { order } = req.body; // array of campaign ids in new order
+  if (!Array.isArray(order)) return res.status(400).json({ error: 'order must be array' });
+  const update = db.prepare('UPDATE email_campaigns SET queue_position=? WHERE id=?');
+  db.transaction(() => { order.forEach((id, i) => update.run(i + 1, id)); })();
+  res.json({ ok: true });
+});
+
+// ── DRIP SEND ─────────────────────────────────────────────────────────────────
+
+router.post('/campaigns/:id/start-drip', async (req, res) => {
+  const { daily_limit, drip_start_at, send_order } = req.body;
+  if (!daily_limit || daily_limit < 1) return res.status(400).json({ error: 'Daily limit required' });
+
+  const campaign = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Not found' });
+
+  db.prepare(`UPDATE email_campaigns SET
+    daily_limit=?, drip_start_at=?, send_order=?, status='scheduled', drip_sent=0
+    WHERE id=?`).run(daily_limit, drip_start_at || new Date().toISOString(), send_order || 'top', req.params.id);
+
+  res.json({ ok: true });
+});
+
+router.post('/campaigns/:id/pause', (req, res) => {
+  const c = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  const newStatus = c.status === 'paused' ? 'sending' : 'paused';
+  db.prepare('UPDATE email_campaigns SET status=? WHERE id=?').run(newStatus, req.params.id);
+  res.json({ ok: true, status: newStatus });
+});
+
+// ── TEST SEND ─────────────────────────────────────────────────────────────────
+
+router.post('/campaigns/:id/test', async (req, res) => {
+  const { test_email } = req.body;
+  if (!test_email) return res.status(400).json({ error: 'Test email required' });
+
+  const campaign = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Not found' });
+
+  try {
+    const { sendCampaign } = await import('../services/ses.js');
+    await sendCampaign({
+      campaign,
+      subscribers: [{ id: 'test', email: test_email, name: 'Test' }],
+      baseUrl: `${req.protocol}://${req.get('host')}`,
+      isTest: true,
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── CAMPAIGN REPORT ───────────────────────────────────────────────────────────
+
+router.get('/campaigns/:id/report', (req, res) => {
+  const campaign = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Not found' });
+
+  // Link click stats
+  const linkClicks = db.prepare(`
+    SELECT url,
+      COUNT(DISTINCT subscriber_id) as unique_clicks,
+      COUNT(*) as total_clicks
+    FROM email_link_clicks
+    WHERE campaign_id=?
+    GROUP BY url
+    ORDER BY unique_clicks DESC
+  `).all(req.params.id);
+
+  // Country breakdown from subscriber data (approximated by email domain TLD)
+  // In future this will come from tracking pixel headers
+  const openers = db.prepare(`
+    SELECT es.email FROM email_sends es
+    WHERE es.campaign_id=? AND es.status='opened'
+  `).all(req.params.id);
+
+  res.json({
+    campaign,
+    link_clicks: linkClicks,
+    openers_count: openers.length,
+  });
+});
+
+// ── EXPORTS ───────────────────────────────────────────────────────────────────
+
+router.get('/campaigns/:id/export/:type', (req, res) => {
+  const { type } = req.params;
+  const campaign = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Not found' });
+
+  let rows = [];
+  const header = 'Name,Email,Status\n';
+
+  if (type === 'openers') {
+    rows = db.prepare(`
+      SELECT es.name, es.email, 'Opened' as status
+      FROM email_subscribers es
+      JOIN email_sends esnd ON esnd.subscriber_id=es.id
+      WHERE esnd.campaign_id=? AND esnd.opened_at IS NOT NULL
+    `).all(req.params.id);
+  } else if (type === 'clickers') {
+    rows = db.prepare(`
+      SELECT DISTINCT es.name, es.email, 'Clicked' as status
+      FROM email_subscribers es
+      JOIN email_link_clicks elc ON elc.subscriber_id=es.id
+      WHERE elc.campaign_id=?
+    `).all(req.params.id);
+  } else if (type === 'non-openers') {
+    rows = db.prepare(`
+      SELECT es.name, es.email, 'Not opened' as status
+      FROM email_subscribers es
+      JOIN email_sends esnd ON esnd.subscriber_id=es.id
+      WHERE esnd.campaign_id=? AND esnd.opened_at IS NULL
+    `).all(req.params.id);
+  } else if (type === 'bounced') {
+    rows = db.prepare(`
+      SELECT es.name, es.email, 'Bounced' as status
+      FROM email_subscribers es
+      WHERE es.list_id=? AND es.status='bounced'
+    `).all(campaign.list_id);
+  }
+
+  const csv = header + rows.map(r => `"${r.name||''}","${r.email}","${r.status}"`).join('\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="${type}-${req.params.id}.csv"`);
+  res.send(csv);
+});

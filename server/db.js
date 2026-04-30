@@ -190,7 +190,74 @@ for (const { table, col, def } of migrations) {
   }
 }
 
-// 4. Add bounced/spam status support to email_subscribers if needed
+// 5. Fix email_campaigns — same old client_id constraint issue
+{
+  const campCols = db.prepare('PRAGMA table_info(email_campaigns)').all().map(r => r.name);
+  if (campCols.includes('client_id')) {
+    console.log('[db] migration: rebuilding email_campaigns to remove old client_id constraint');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS email_campaigns_new (
+        id TEXT PRIMARY KEY,
+        email_client_id TEXT NOT NULL DEFAULT '',
+        list_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        from_name TEXT NOT NULL,
+        from_email TEXT NOT NULL,
+        reply_to TEXT NOT NULL,
+        html_body TEXT NOT NULL,
+        plain_body TEXT,
+        status TEXT DEFAULT 'draft',
+        scheduled_at TEXT,
+        sent_at TEXT,
+        sent_count INTEGER DEFAULT 0,
+        open_count INTEGER DEFAULT 0,
+        click_count INTEGER DEFAULT 0,
+        bounce_count INTEGER DEFAULT 0,
+        unsubscribe_count INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+      INSERT INTO email_campaigns_new
+        SELECT id, COALESCE(email_client_id,''), list_id, title, subject, from_name, from_email, reply_to, html_body, plain_body, status, scheduled_at, sent_at, sent_count, open_count, click_count, bounce_count, unsubscribe_count, created_at
+        FROM email_campaigns;
+      DROP TABLE email_campaigns;
+      ALTER TABLE email_campaigns_new RENAME TO email_campaigns;
+    `);
+    console.log('[db] migration: email_campaigns rebuilt successfully');
+  }
+}
+
+// 7. Add drip/queue columns to email_campaigns
+{
+  const campCols = db.prepare('PRAGMA table_info(email_campaigns)').all().map(r => r.name);
+  const toAdd = [
+    { col:'daily_limit',    def:'INTEGER DEFAULT 0' },
+    { col:'queue_position', def:'INTEGER DEFAULT 0' },
+    { col:'drip_start_at',  def:'TEXT' },
+    { col:'drip_sent',      def:'INTEGER DEFAULT 0' },
+    { col:'send_order',     def:"TEXT DEFAULT 'top'" },
+    { col:'spam_count',     def:'INTEGER DEFAULT 0' },
+  ];
+  for (const { col, def } of toAdd) {
+    if (!campCols.includes(col)) {
+      db.exec(`ALTER TABLE email_campaigns ADD COLUMN ${col} ${def}`);
+      console.log(`[db] migration: added ${col} to email_campaigns`);
+    }
+  }
+}
+
+// 8. Create email_link_clicks table for tracking per-link stats
+db.exec(`
+  CREATE TABLE IF NOT EXISTS email_link_clicks (
+    id TEXT PRIMARY KEY,
+    campaign_id TEXT NOT NULL,
+    subscriber_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    clicked_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (campaign_id) REFERENCES email_campaigns(id),
+    FOREIGN KEY (subscriber_id) REFERENCES email_subscribers(id)
+  );
+`);
 {
   const subCols = db.prepare('PRAGMA table_info(email_subscribers)').all().map(r => r.name);
   if (!subCols.includes('spam_at')) {
