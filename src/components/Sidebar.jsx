@@ -1,8 +1,7 @@
 import React from 'react';
 
 const navItems = [
-  { id: 'dashboard', label: 'Dashboard', icon: <GridIcon /> },
-  { id: 'clients',   label: 'Clients',   icon: <UsersIcon /> },
+  { id: 'clients', label: 'Social Media Posts', icon: <UsersIcon /> },
 ];
 
 const emailItems = [

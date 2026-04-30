@@ -7,7 +7,7 @@ import EmailSection from './EmailSection.jsx';
 
 export default function Dashboard({ onLogout }) {
   const [clients, setClients] = useState([]);
-  const [view, setView] = useState('dashboard');
+  const [view, setView] = useState('clients');
   const [selectedClient, setSelectedClient] = useState(null);
   const [showNewClient, setShowNewClient] = useState(false);
   const [loading, setLoading] = useState(true);
