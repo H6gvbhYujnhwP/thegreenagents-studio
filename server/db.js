@@ -134,4 +134,33 @@ db.exec(`
   );
 `);
 
+// ── Migrations — safe to run on every startup ─────────────────────────────────
+// These handle upgrading an existing database that has the old schema.
+
+// 1. Create email_clients table if it doesn't exist yet
+db.exec(`
+  CREATE TABLE IF NOT EXISTS email_clients (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    color TEXT DEFAULT '#1D9E75',
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+// 2. For each email table, add email_client_id column if it's missing
+//    (SQLite doesn't support ALTER TABLE DROP COLUMN before 3.35, so we just ADD)
+const migrations = [
+  { table: 'email_brands',    col: 'email_client_id', def: "TEXT NOT NULL DEFAULT ''" },
+  { table: 'email_lists',     col: 'email_client_id', def: "TEXT NOT NULL DEFAULT ''" },
+  { table: 'email_campaigns', col: 'email_client_id', def: "TEXT NOT NULL DEFAULT ''" },
+];
+
+for (const { table, col, def } of migrations) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(r => r.name);
+  if (!cols.includes(col)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+    console.log(`[db] migration: added ${col} to ${table}`);
+  }
+}
+
 export default db;
