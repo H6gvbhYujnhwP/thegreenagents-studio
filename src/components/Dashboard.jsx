@@ -6,87 +6,82 @@ import ClientDetail from './ClientDetail.jsx';
 import EmailSection from './EmailSection.jsx';
 
 export default function Dashboard({ onLogout }) {
-  const [clients, setClients] = useState([]);
-  const [view, setView] = useState('clients');
+  const [clients, setClients]           = useState([]);
+  const [view, setView]                 = useState('clients');
   const [selectedClient, setSelectedClient] = useState(null);
-  const [showNewClient, setShowNewClient] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [showNewClient, setShowNewClient]   = useState(false);
+  const [loading, setLoading]           = useState(true);
 
   async function loadClients() {
     setLoading(true);
     try {
       const res = await fetch('/api/clients');
       if (res.ok) setClients(await res.json());
-    } catch (e) {
-      console.error('loadClients error:', e);
-    }
+    } catch (e) { console.error('loadClients error:', e); }
     setLoading(false);
   }
 
   async function syncAndLoad() {
-    // Sync Supergrow workspaces then reload client list
     try {
-      const res = await fetch('/api/clients/sync', { method: 'POST' });
+      const res = await fetch('/api/clients/sync', { method:'POST' });
       if (res.ok) {
         const data = await res.json();
         if (data.added > 0) console.log(`[sync] Added ${data.added} new workspace(s)`);
-        if (data.error) console.warn('[sync] Supergrow sync warning:', data.error);
       }
-    } catch (e) {
-      console.warn('[sync] sync request failed:', e.message);
-    }
+    } catch (e) { console.warn('[sync] sync request failed:', e.message); }
     await loadClients();
   }
 
-  useEffect(() => { syncAndLoad(); }, []);
+  useEffect(()=>{ syncAndLoad(); }, []);
 
-  const totalPosts = clients.reduce((acc, c) => acc + (c.campaign_count || 0) * 96, 0);
-  const activeRuns = clients.filter(c => c.last_status === 'running').length;
+  function handleNavigate(v) {
+    setView(v);
+    setSelectedClient(null);
+  }
 
+  // ── Email Campaigns views ──────────────────────────────────────────────────
+  if (view === 'email-customers' || view === 'email-domain-health') {
+    return (
+      <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+        <EmailSection initialTab={view === 'email-domain-health' ? 'domains' : 'customers'} />
+      </div>
+    );
+  }
+
+  // ── Client detail view ────────────────────────────────────────────────────
   if (selectedClient) {
     return (
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
-        <Sidebar onLogout={onLogout} activeView="clients" onNavigate={v => { setView(v); setSelectedClient(null); }} />
-        <ClientDetail
-          clientId={selectedClient}
-          onBack={() => setSelectedClient(null)}
-          onRefresh={loadClients}
-        />
+        <Sidebar onLogout={onLogout} activeView="clients" onNavigate={handleNavigate} />
+        <ClientDetail clientId={selectedClient} onBack={()=>setSelectedClient(null)} onRefresh={loadClients} />
       </div>
     );
   }
 
-  if (view === 'email') {
-    return (
-      <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
-        <Sidebar onLogout={onLogout} activeView="email" onNavigate={setView} />
-        <EmailSection clients={clients} />
-      </div>
-    );
-  }
+  // ── Social Media Posts (Supergrow) ────────────────────────────────────────
+  const totalPosts = clients.reduce((acc,c)=>acc+(c.campaign_count||0)*96, 0);
+  const activeRuns = clients.filter(c=>c.last_status==='running').length;
 
   return (
     <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
-      <Sidebar onLogout={onLogout} activeView={view} onNavigate={setView} />
+      <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
 
       <div style={{ flex:1, overflow:'auto', padding:28 }}>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:24 }}>
-          <h1 style={{ fontSize:20, fontWeight:500, color:'#1a1a1a' }}>Dashboard</h1>
-          <button
-            onClick={() => setShowNewClient(true)}
-            style={{ background:'#1D9E75', color:'#fff', border:'none', padding:'8px 18px', borderRadius:8, fontWeight:500 }}
-          >
+          <h1 style={{ fontSize:20, fontWeight:500, color:'#1a1a1a' }}>Supergrow</h1>
+          <button onClick={()=>setShowNewClient(true)} style={{ background:'#1D9E75', color:'#fff', border:'none', padding:'8px 18px', borderRadius:8, fontWeight:500, cursor:'pointer' }}>
             + New client
           </button>
         </div>
 
         <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:12, marginBottom:28 }}>
           {[
-            { label:'Total clients', value: clients.length, sub: `${activeRuns} active run${activeRuns !== 1 ? 's' : ''}` },
-            { label:'Posts queued', value: totalPosts.toLocaleString(), sub: 'all time' },
-            { label:'Images generated', value: totalPosts.toLocaleString(), sub: 'via Nano Banana' },
-            { label:'Campaigns run', value: clients.reduce((a,c) => a + (c.campaign_count || 0), 0), sub: 'all time' }
-          ].map(s => (
+            { label:'Total clients',      value:clients.length, sub:`${activeRuns} active run${activeRuns!==1?'s':''}` },
+            { label:'Posts queued',       value:totalPosts.toLocaleString(), sub:'all time' },
+            { label:'Images generated',   value:totalPosts.toLocaleString(), sub:'via Nano Banana' },
+            { label:'Campaigns run',      value:clients.reduce((a,c)=>a+(c.campaign_count||0),0), sub:'all time' }
+          ].map(s=>(
             <div key={s.label} style={{ background:'#fff', border:'0.5px solid #e0e0dc', borderRadius:8, padding:'14px 16px' }}>
               <div style={{ fontSize:12, color:'#888', marginBottom:4 }}>{s.label}</div>
               <div style={{ fontSize:26, fontWeight:500, color:'#1a1a1a' }}>{s.value}</div>
@@ -95,37 +90,28 @@ export default function Dashboard({ onLogout }) {
           ))}
         </div>
 
-        <div style={{ fontSize:11, fontWeight:500, color:'#999', textTransform:'uppercase', letterSpacing:'0.06em', marginBottom:12 }}>
-          Clients
-        </div>
+        <div style={{ fontSize:11, fontWeight:500, color:'#999', textTransform:'uppercase', letterSpacing:'0.06em', marginBottom:12 }}>Clients</div>
 
         {loading ? (
           <div style={{ color:'#888', padding:'40px 0', textAlign:'center' }}>Loading...</div>
         ) : clients.length === 0 ? (
-          <div style={{ background:'#fff', border:'0.5px dashed #d0d0cc', borderRadius:12, padding:'48px', textAlign:'center' }}>
+          <div style={{ background:'#fff', border:'0.5px dashed #d0d0cc', borderRadius:12, padding:48, textAlign:'center' }}>
             <div style={{ fontSize:15, color:'#888', marginBottom:12 }}>No clients yet</div>
-            <button onClick={() => setShowNewClient(true)} style={{ background:'#1D9E75', color:'#fff', border:'none', padding:'8px 18px', borderRadius:8, fontWeight:500 }}>
+            <button onClick={()=>setShowNewClient(true)} style={{ background:'#1D9E75', color:'#fff', border:'none', padding:'8px 18px', borderRadius:8, fontWeight:500, cursor:'pointer' }}>
               Add your first client
             </button>
           </div>
         ) : (
           <div style={{ display:'grid', gridTemplateColumns:'repeat(2, 1fr)', gap:12 }}>
-            {clients.map(client => (
-              <ClientCard
-                key={client.id}
-                client={client}
-                onClick={() => setSelectedClient(client.id)}
-              />
+            {clients.map(client=>(
+              <ClientCard key={client.id} client={client} onClick={()=>setSelectedClient(client.id)} />
             ))}
           </div>
         )}
       </div>
 
       {showNewClient && (
-        <NewClientModal
-          onClose={() => setShowNewClient(false)}
-          onCreated={() => { setShowNewClient(false); loadClients(); }}
-        />
+        <NewClientModal onClose={()=>setShowNewClient(false)} onCreated={()=>{ setShowNewClient(false); loadClients(); }} />
       )}
     </div>
   );

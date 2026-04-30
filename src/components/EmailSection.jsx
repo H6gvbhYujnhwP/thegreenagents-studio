@@ -563,7 +563,7 @@ function ClientPanel({ emailClient, onRefresh, onEditClient }) {
 
       {/* Tabs */}
       <div style={{ display:'flex', borderBottom:`0.5px solid ${BORDER}`, background:CARD }}>
-        {['campaigns','lists','domains'].map(t=>(
+        {['campaigns','lists'].map(t=>(
           <button key={t} onClick={()=>setTab(t)} style={{ padding:'9px 18px', fontSize:13, border:'none', background:'transparent', cursor:'pointer', color:tab===t?GREEN:MUTED, fontWeight:tab===t?500:400, borderBottom:tab===t?`2px solid ${GREEN}`:'2px solid transparent', textTransform:'capitalize' }}>{t}</button>
         ))}
       </div>
@@ -652,13 +652,34 @@ function ClientPanel({ emailClient, onRefresh, onEditClient }) {
 
 // ── Main EmailSection ─────────────────────────────────────────────────────────
 
-export default function EmailSection() {
+export default function EmailSection({ initialTab = 'customers' }) {
   const [clients, setClients]     = useState([]);
   const [selected, setSelected]   = useState(null);
   const [search, setSearch]       = useState('');
   const [loading, setLoading]     = useState(true);
   const [modal, setModal]         = useState(null);
   const [modalData, setModalData] = useState({});
+  const [domains, setDomains]     = useState([]);
+  const [domainsLoading, setDomainsLoading] = useState(false);
+
+  // If sidebar navigated to Domain Health, show that view
+  const isDomainView = initialTab === 'domains';
+
+  useEffect(()=>{
+    if (isDomainView) {
+      loadDomains();
+    } else {
+      loadAll();
+    }
+  },[initialTab]);
+
+  async function loadDomains() {
+    setDomainsLoading(true); setDomains([]);
+    const vd = await fetch('/api/email/verified-domains').then(r=>r.json());
+    if (!Array.isArray(vd)||vd.length===0) { setDomainsLoading(false); return; }
+    Promise.all(vd.map(d=>fetch(`/api/email/domain-health/${d}`).then(r=>r.json())))
+      .then(results=>{ setDomains(results); setDomainsLoading(false); });
+  }
 
   useEffect(()=>{ loadAll(); },[]);
 
@@ -686,6 +707,32 @@ export default function EmailSection() {
   const filtered = clients.filter(c=>c.name.toLowerCase().includes(search.toLowerCase()));
   const selectedClient = clients.find(c=>c.id===selected);
 
+  // ── Domain Health top-level view (from sidebar) ───────────────────────────
+  if (isDomainView) {
+    return (
+      <div style={{ flex:1, display:'flex', flexDirection:'column', height:'100vh', overflow:'hidden' }}>
+        <div style={{ padding:'14px 20px', borderBottom:`0.5px solid ${BORDER}`, background:CARD, display:'flex', alignItems:'center', gap:12 }}>
+          <div style={{ fontSize:15, fontWeight:500, color:TEXT }}>Domain Health</div>
+          <div style={{ marginLeft:'auto' }}>
+            <Btn small onClick={loadDomains}>Refresh</Btn>
+          </div>
+        </div>
+        <div style={{ flex:1, overflow:'auto', padding:20, background:BG }}>
+          {domainsLoading ? (
+            <div style={{ color:MUTED, textAlign:'center', padding:40 }}>Checking all domains…</div>
+          ) : domains.length===0 ? (
+            <div style={{ color:MUTED, textAlign:'center', padding:40 }}>No verified domains found.</div>
+          ) : (
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+              {domains.map(d=><DomainCard key={d.domain} data={d} />)}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Customers view (from sidebar) ─────────────────────────────────────────
   return (
     <div style={{ flex:1, display:'flex', height:'100vh', overflow:'hidden' }}>
       {/* Left panel */}
