@@ -198,9 +198,12 @@ function CampaignModal({ brand, lists, verifiedDomains, initial, onClose, onSave
           <select value={form.from_email} onChange={e=>set('from_email',e.target.value)}
             style={{ width:'100%', padding:'8px 12px', border:`0.5px solid ${BORDER}`, borderRadius:7, fontSize:13, color:TEXT, background:CARD }}>
             <option value="">— select —</option>
+            {/* Always show brand's saved email first */}
+            {brand.from_email && <option value={brand.from_email}>{brand.from_email} (brand default)</option>}
             {verifiedDomains.map(d=>[
-              <option key={`hello@${d}`} value={`hello@${d}`}>hello@{d}</option>,
-              <option key={`noreply@${d}`} value={`noreply@${d}`}>noreply@{d}</option>,
+              brand.from_email!==`hello@${d}`    && <option key={`hello@${d}`}    value={`hello@${d}`}>hello@{d}</option>,
+              brand.from_email!==`noreply@${d}`  && <option key={`noreply@${d}`}  value={`noreply@${d}`}>noreply@{d}</option>,
+              brand.from_email!==`contact@${d}`  && <option key={`contact@${d}`}  value={`contact@${d}`}>contact@{d}</option>,
             ])}
           </select>
         </div>
@@ -388,26 +391,25 @@ function BrandPanel({ brand, lists, verifiedDomains, clients, onRefresh, onEditB
 
   const brandLists = lists.filter(l=>l.client_id===brand.client_id);
 
-  useEffect(()=>{ loadCampaigns(); },[brand.id]);
+  useEffect(()=>{
+    loadCampaigns();
+  },[brand.id]);
+
+  // Poll every 5s while any campaign is in 'sending' state
+  useEffect(()=>{
+    const hasSending = campaigns.some(c=>c.status==='sending');
+    if (!hasSending) return;
+    const timer = setInterval(loadCampaigns, 5000);
+    return ()=>clearInterval(timer);
+  },[campaigns]);
 
   async function loadCampaigns() {
     setLoading(true);
     const r = await fetch(`/api/email/campaigns?client_id=${brand.client_id}`);
-    setCampaigns(Array.isArray(await r.json()) ? await r.json() : []);
+    const d = await r.json();
+    setCampaigns(Array.isArray(d)?d:[]);
     setLoading(false);
   }
-
-  // Fix: reload properly
-  useEffect(()=>{
-    async function go() {
-      setLoading(true);
-      const r = await fetch(`/api/email/campaigns?client_id=${brand.client_id}`);
-      const d = await r.json();
-      setCampaigns(Array.isArray(d)?d:[]);
-      setLoading(false);
-    }
-    go();
-  },[brand.id]);
 
   async function deleteCampaign(id) {
     if (!confirm('Delete this campaign?')) return;
@@ -417,14 +419,19 @@ function BrandPanel({ brand, lists, verifiedDomains, clients, onRefresh, onEditB
     onRefresh();
   }
 
+  const [sendStatus, setSendStatus] = useState(null); // { id, msg, ok }
+
   async function sendNow(id) {
     if (!confirm('Send this campaign now to all active subscribers?')) return;
+    setSendStatus({ id, msg: 'Starting send…', ok: null });
     const r = await fetch(`/api/email/campaigns/${id}/send`,{ method:'POST' });
     const d = await r.json();
-    if (d.ok) alert(`Sending to ${d.subscribers} subscribers — running in background.`);
-    else alert(d.error||'Send failed');
-    const r2 = await fetch(`/api/email/campaigns?client_id=${brand.client_id}`);
-    const d2 = await r2.json(); setCampaigns(Array.isArray(d2)?d2:[]);
+    if (d.ok) {
+      setSendStatus({ id, msg: `Sending to ${d.subscribers} subscribers — status updates automatically…`, ok: true });
+    } else {
+      setSendStatus({ id, msg: d.error||'Send failed', ok: false });
+    }
+    loadCampaigns();
   }
 
   async function deleteList(id) {
@@ -512,8 +519,14 @@ function BrandPanel({ brand, lists, verifiedDomains, clients, onRefresh, onEditB
                       <Btn small onClick={()=>{ setModalData(c); setModal('edit-campaign'); }}>Edit</Btn>
                       <Btn small variant="primary" onClick={()=>sendNow(c.id)}>Send now</Btn>
                     </>}
+                    {c.status==='sending' && <span style={{ fontSize:12, color:GREEN }}>⏳ Sending…</span>}
                     {c.status!=='sending' && <Btn small variant="danger" onClick={()=>deleteCampaign(c.id)}>Delete</Btn>}
                   </div>
+                  {sendStatus?.id===c.id && (
+                    <div style={{ marginTop:8, padding:'6px 10px', borderRadius:6, fontSize:12, background:sendStatus.ok===false?'#fdecea':sendStatus.ok?`${GREEN}15`:'#f5f5f3', color:sendStatus.ok===false?DANGER:sendStatus.ok?DARK:MUTED }}>
+                      {sendStatus.msg}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

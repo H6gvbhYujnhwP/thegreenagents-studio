@@ -1,4 +1,4 @@
-import { SESClient, SendEmailCommand, GetSendQuotaCommand } from '@aws-sdk/client-ses';
+import { SESClient, SendEmailCommand, GetSendQuotaCommand, ListIdentitiesCommand, GetIdentityVerificationAttributesCommand } from '@aws-sdk/client-ses';
 
 const ses = new SESClient({
   region: process.env.AWS_SES_REGION || 'eu-north-1',
@@ -34,6 +34,23 @@ export async function getQuota() {
     maxSendRate:   data.MaxSendRate,
     sentLast24Hours: data.SentLast24Hours,
   };
+}
+
+// ── Get verified domain identities from AWS ───────────────────────────────────
+// Returns only domain-level verified identities (not individual email addresses)
+export async function getVerifiedDomains() {
+  // Fetch all identities of type Domain
+  const listCmd = new ListIdentitiesCommand({ IdentityType: 'Domain', MaxItems: 100 });
+  const listData = await ses.send(listCmd);
+  const identities = listData.Identities || [];
+  if (identities.length === 0) return [];
+
+  // Check verification status — only return ones that are actually verified
+  const attrCmd = new GetIdentityVerificationAttributesCommand({ Identities: identities });
+  const attrData = await ses.send(attrCmd);
+  const attrs = attrData.VerificationAttributes || {};
+
+  return identities.filter(id => attrs[id]?.VerificationStatus === 'Success').sort();
 }
 
 // ── Send a campaign to a list of subscribers ──────────────────────────────────

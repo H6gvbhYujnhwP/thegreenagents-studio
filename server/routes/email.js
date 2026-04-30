@@ -2,7 +2,7 @@ import express from 'express';
 import { v4 as uuid } from 'uuid';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
-import { sendCampaign, getQuota } from '../services/ses.js';
+import { sendCampaign, getQuota, getVerifiedDomains } from '../services/ses.js';
 import dns from 'dns';
 import { promisify } from 'util';
 
@@ -352,22 +352,20 @@ router.get('/domain-health/:domain', async (req, res) => {
   res.json(results);
 });
 
-// ── VERIFIED SES DOMAINS (for from-address picker) ───────────────────────────
-// Returns the list of domains we know are verified, sourced from env or hardcoded
-router.get('/verified-domains', (req, res) => {
-  // These are the verified identities we confirmed from the AWS console screenshots
-  const domains = [
-    'thegreenagents.com',
-    'sweetbyte.co.uk',
-    'clear-a-way.co.uk',
-    'itcloudpros.uk',
-    'mail.engineersolutions.co.uk',
-    'syncsure.cloud',
-    'socialecho.ai',
-    'clearerpaths.co.uk',
-    'mail.weprintcatalogues.com',
-  ];
-  res.json(domains);
+// ── VERIFIED SES DOMAINS (live from AWS) ─────────────────────────────────────
+router.get('/verified-domains', async (req, res) => {
+  try {
+    const domains = await getVerifiedDomains();
+    res.json(domains);
+  } catch (err) {
+    // Fallback to known list if AWS unreachable (e.g. dev environment)
+    console.error('[verified-domains] AWS error, using fallback:', err.message);
+    res.json([
+      'thegreenagents.com','sweetbyte.co.uk','clear-a-way.co.uk',
+      'itcloudpros.uk','mail.engineersolutions.co.uk','syncsure.cloud',
+      'socialecho.ai','clearerpaths.co.uk','mail.weprintcatalogues.com',
+    ]);
+  }
 });
 
 export default router;
