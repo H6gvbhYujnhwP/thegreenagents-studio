@@ -1,4 +1,4 @@
-import { SESClient, SendEmailCommand, GetSendQuotaCommand, ListIdentitiesCommand, GetIdentityVerificationAttributesCommand } from '@aws-sdk/client-ses';
+import { SESClient, SendRawEmailCommand, GetSendQuotaCommand, ListIdentitiesCommand, GetIdentityVerificationAttributesCommand } from '@aws-sdk/client-ses';
 
 const ses = new SESClient({
   region: process.env.AWS_SES_REGION || 'eu-north-1',
@@ -10,40 +10,55 @@ const ses = new SESClient({
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ── Send a single email ───────────────────────────────────────────────────────
-// Uses ConfigurationSetName 'no-tracking' if it exists in your AWS account,
-// which disables the AWS tracking pixel. Create it in AWS SES console:
-// SES → Configuration Sets → Create → name it 'no-tracking' → disable open/click tracking.
-export async function sendEmail({ to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody }) {
+// ── Build a raw MIME email (same approach as Sendy — bypasses AWS pixel injection) ──
+function buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody }) {
+  const boundary = `boundary_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const toAddress = toName ? `${toName} <${to}>` : to;
   const plain = plainBody || htmlToPlain(htmlBody);
 
-  const params = {
-    Source: `${fromName} <${fromEmail}>`,
-    Destination: { ToAddresses: [toName ? `${toName} <${to}>` : to] },
-    Message: {
-      Subject: { Data: subject, Charset: 'UTF-8' },
-      Body: {
-        Html: { Data: htmlBody, Charset: 'UTF-8' },
-        Text: { Data: plain,    Charset: 'UTF-8' },
-      },
-    },
-    ReplyToAddresses: [replyTo || fromEmail],
-  };
+  // Encode subject for non-ASCII characters
+  const encodedSubject = `=?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`;
 
-  // If NO_TRACKING_CONFIG_SET env var is set, use it to suppress AWS pixel
-  // Set this to the name of a Configuration Set in SES with tracking disabled
-  if (process.env.SES_CONFIGURATION_SET) {
-    params.ConfigurationSetName = process.env.SES_CONFIGURATION_SET;
-  }
+  const raw = [
+    `From: ${fromName} <${fromEmail}>`,
+    `To: ${toAddress}`,
+    `Reply-To: ${replyTo || fromEmail}`,
+    `Subject: ${encodedSubject}`,
+    `MIME-Version: 1.0`,
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    ``,
+    `--${boundary}`,
+    `Content-Type: text/plain; charset=UTF-8`,
+    `Content-Transfer-Encoding: quoted-printable`,
+    ``,
+    plain,
+    ``,
+    `--${boundary}`,
+    `Content-Type: text/html; charset=UTF-8`,
+    `Content-Transfer-Encoding: quoted-printable`,
+    ``,
+    htmlBody,
+    ``,
+    `--${boundary}--`,
+  ].join('\r\n');
 
-  return ses.send(new SendEmailCommand(params));
+  return Buffer.from(raw);
+}
+
+// ── Send a single email using SendRawEmail (no AWS pixel injection) ───────────
+export async function sendEmail({ to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody }) {
+  const rawMessage = buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody });
+  const cmd = new SendRawEmailCommand({
+    RawMessage: { Data: rawMessage },
+  });
+  return ses.send(cmd);
 }
 
 // ── Send a campaign to a list of subscribers ──────────────────────────────────
 export async function sendCampaign({ campaign, subscribers, baseUrl, onProgress }) {
   const results = { sent: 0, failed: 0, errors: [] };
   const BATCH_SIZE = 10;
-  const DELAY_MS   = 800;
+  const DELAY_MS   = 800; // ~12/sec, safely under 14/sec SES limit
 
   for (let i = 0; i < subscribers.length; i += BATCH_SIZE) {
     const batch = subscribers.slice(i, i + BATCH_SIZE);
