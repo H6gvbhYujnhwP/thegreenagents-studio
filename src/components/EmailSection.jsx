@@ -116,7 +116,6 @@ function ImportModal({list,onClose,onSaved}){
 function parseCSV(text) {
   const lines = text.trim().split('\n').filter(Boolean);
   if (!lines.length) return { headers: [], rows: [] };
-  // Parse quoted CSV properly
   function parseLine(line) {
     const result = []; let cur = ''; let inQ = false;
     for (let i = 0; i < line.length; i++) {
@@ -131,6 +130,346 @@ function parseCSV(text) {
   const headers = parseLine(lines[0]);
   const rows    = lines.slice(1).map(parseLine);
   return { headers, rows };
+}
+
+// Extract first name from a full name string
+function firstNameFrom(fullName) {
+  if (!fullName) return '';
+  return fullName.trim().split(/\s+/)[0] || fullName;
+}
+
+// Resolve display name from a row given mapping
+function resolveDisplayName(row, colMapping, nameType) {
+  const val = row[colMapping] ?? '';
+  if (nameType === 'full')  return firstNameFrom(val);
+  if (nameType === 'first') return val;
+  if (nameType === 'last')  return val;
+  return val;
+}
+
+function ImportNewListModal({ emailClient, onClose, onSaved }) {
+  const [step, setStep]       = useState(1);
+  const [csv, setCsv]         = useState('');
+  const [fileName, setFileName] = useState('');
+  const [parsed, setParsed]   = useState(null);
+  // colRoles: map from column index → role ('email'|'first'|'last'|'full'|'skip')
+  const [colRoles, setColRoles] = useState({});
+  const [listName, setListName] = useState('');
+  const [fromName, setFromName] = useState('');
+  const [fromEmail, setFromEmail] = useState('');
+  const [issues, setIssues]   = useState([]);
+  const [saving, setSaving]   = useState(false);
+  const [result, setResult]   = useState(null);
+  const fileRef = useRef();
+
+  function handleFile(e) {
+    const f = e.target.files[0]; if (!f) return;
+    setFileName(f.name);
+    new Promise(res => { const r = new FileReader(); r.onload = ev => res(ev.target.result); r.readAsText(f); })
+      .then(text => {
+        setCsv(text);
+        const p = parseCSV(text);
+        setParsed(p);
+        autoDetect(p.headers);
+      });
+  }
+
+  function autoDetect(headers) {
+    const roles = {};
+    headers.forEach((h, i) => {
+      const l = h.toLowerCase();
+      if (l.includes('email') || l.includes('e-mail')) roles[i] = 'email';
+      else if (l === 'name' || l === 'full name' || l === 'fullname') roles[i] = 'full';
+      else if (l.includes('first')) roles[i] = 'first';
+      else if (l.includes('last') || l.includes('surname')) roles[i] = 'last';
+      else roles[i] = 'skip';
+    });
+    setColRoles(roles);
+  }
+
+  function setRole(idx, role) {
+    // Only one column can be email, first, last, or full at a time
+    setColRoles(prev => {
+      const next = { ...prev };
+      if (role !== 'skip') {
+        Object.keys(next).forEach(k => { if (next[k] === role) next[k] = 'skip'; });
+      }
+      next[idx] = role;
+      return next;
+    });
+  }
+
+  const emailIdx = Object.keys(colRoles).find(i => colRoles[i] === 'email');
+  const nameIdx  = Object.keys(colRoles).find(i => colRoles[i] === 'first' || colRoles[i] === 'full');
+  const lastIdx  = Object.keys(colRoles).find(i => colRoles[i] === 'last');
+
+  function getFirstName(row) {
+    if (nameIdx === undefined) return '';
+    const val = row[nameIdx] || '';
+    return colRoles[nameIdx] === 'full' ? firstNameFrom(val) : val;
+  }
+
+  function getFullStoredName(row) {
+    const parts = [];
+    if (nameIdx !== undefined) {
+      const val = row[nameIdx] || '';
+      parts.push(colRoles[nameIdx] === 'full' ? firstNameFrom(val) : val);
+    }
+    if (lastIdx !== undefined) parts.push(row[lastIdx] || '');
+    return parts.filter(Boolean).join(' ');
+  }
+
+  function validateAndNext() {
+    const errs = [];
+    if (emailIdx === undefined) errs.push('You must assign the Email column');
+    if (!listName.trim()) errs.push('List name is required');
+    if (!fromName.trim()) errs.push('From name is required');
+    if (!fromEmail.trim()) errs.push('From email is required');
+    if (errs.length) { setIssues(errs); return; }
+
+    // Check email validity
+    const badRows = [];
+    parsed.rows.forEach((row, i) => {
+      const email = row[emailIdx] || '';
+      if (!email) { badRows.push({ row: i+2, issue: 'Missing email' }); return; }
+      if (!email.includes('@') || !email.includes('.')) badRows.push({ row: i+2, issue: `Invalid email: ${email}` });
+    });
+    setIssues(badRows.slice(0, 10));
+    setStep(3);
+  }
+
+  async function doImport() {
+    setSaving(true);
+    const listRes = await fetch('/api/email/lists', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email_client_id: emailClient.id, name: listName, from_name: fromName, from_email: fromEmail, reply_to: fromEmail }),
+    });
+    const listData = await listRes.json();
+    if (listData.error) { setResult({ error: listData.error }); setSaving(false); return; }
+
+    const mappedCsv = [
+      'Name,Email,Status',
+      ...parsed.rows.map(row => {
+        const name  = getFullStoredName(row);
+        const email = row[emailIdx] || '';
+        return `"${name}","${email}","subscribed"`;
+      })
+    ].join('\n');
+
+    const impRes = await fetch(`/api/email/lists/${listData.id}/import`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ csv: mappedCsv }),
+    });
+    const impData = await impRes.json();
+    setResult(impData); setSaving(false);
+    if (impData.ok) onSaved();
+  }
+
+  const ROLE_OPTIONS = [
+    { value:'email', label:'Email address ✱' },
+    { value:'full',  label:'Full name (split on first space)' },
+    { value:'first', label:'First name only' },
+    { value:'last',  label:'Last name only' },
+    { value:'skip',  label:'— skip this column —' },
+  ];
+
+  function roleColor(role) {
+    if (role==='email') return { border:`0.5px solid ${GREEN}`, background:`${GREEN}08`, color:DARK };
+    if (role==='first'||role==='full') return { border:`0.5px solid ${BLUE}`, background:'#E6F1FB', color:'#0C447C' };
+    if (role==='last') return { border:`0.5px solid ${BLUE}40`, background:'#E6F1FB60', color:'#185FA5' };
+    return { border:`0.5px solid ${BORDER}`, background:'transparent', color:MUTED };
+  }
+
+  function cellColor(role) {
+    if (role==='email') return DARK;
+    if (role==='first'||role==='full'||role==='last') return '#0C447C';
+    return MUTED;
+  }
+
+  const previewRows = parsed?.rows?.slice(0, 4) || [];
+
+  return (
+    <Modal title="Import — create new list" onClose={onClose} wide>
+
+      {/* Step indicator */}
+      <div style={{ display:'flex', gap:6, alignItems:'center', marginBottom:20 }}>
+        {['Upload file','Map columns','Review & import'].map((s,i)=>(
+          <React.Fragment key={s}>
+            <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+              <div style={{ width:20, height:20, borderRadius:'50%', background:step>i+1?GREEN:step===i+1?GREEN:BORDER, color:'#fff', fontSize:10, fontWeight:700, display:'flex', alignItems:'center', justifyContent:'center' }}>{step>i+1?'✓':i+1}</div>
+              <span style={{ fontSize:12, color:step===i+1?TEXT:MUTED, fontWeight:step===i+1?500:400 }}>{s}</span>
+            </div>
+            {i<2&&<div style={{ flex:1, height:1, background:BORDER, margin:'0 4px' }}/>}
+          </React.Fragment>
+        ))}
+      </div>
+
+      {/* ── Step 1 — Upload ── */}
+      {step===1&&(
+        <div>
+          <div style={{ border:`2px dashed ${BORDER}`, borderRadius:10, padding:32, textAlign:'center', marginBottom:16, background:BG }}>
+            <div style={{ fontSize:13, color:MUTED, marginBottom:12 }}>Drop a CSV or click to browse</div>
+            <input ref={fileRef} type="file" accept=".csv,.txt" onChange={handleFile} style={{ display:'none' }}/>
+            <Btn onClick={()=>fileRef.current?.click()}>Choose file</Btn>
+            {fileName&&<div style={{ fontSize:12, color:GREEN, marginTop:10 }}>✓ {fileName} — {parsed?.rows?.length||0} rows detected</div>}
+          </div>
+          {parsed&&(
+            <div style={{ fontSize:12, color:MUTED, marginBottom:4 }}>
+              Columns found: {parsed.headers.map(h=><span key={h} style={{ margin:'0 3px', padding:'2px 7px', background:BG, border:`0.5px solid ${BORDER}`, borderRadius:4, fontSize:11, color:TEXT }}>{h}</span>)}
+            </div>
+          )}
+          <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginTop:16 }}>
+            <Btn onClick={onClose}>Cancel</Btn>
+            <Btn variant="primary" onClick={()=>setStep(2)} disabled={!parsed}>Next →</Btn>
+          </div>
+        </div>
+      )}
+
+      {/* ── Step 2 — CSV table with column dropdowns ── */}
+      {step===2&&parsed&&(
+        <div>
+          <div style={{ fontSize:12, color:MUTED, marginBottom:10, background:BG, padding:'8px 12px', borderRadius:7 }}>
+            <b style={{ color:TEXT }}>{fileName}</b> — {parsed.rows.length} contacts. Use the dropdown above each column to tell us what it contains. Columns set to "skip" won't be imported.
+          </div>
+
+          {/* Scrollable CSV table */}
+          <div style={{ overflowX:'auto', border:`0.5px solid ${BORDER}`, borderRadius:8, marginBottom:16 }}>
+            <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+              <thead>
+                <tr style={{ background:BG }}>
+                  {parsed.headers.map((h, i) => (
+                    <th key={i} style={{ padding:'10px 12px', borderBottom:`0.5px solid ${BORDER}`, textAlign:'left', minWidth:150, verticalAlign:'bottom' }}>
+                      <div style={{ fontSize:10, color:MUTED, marginBottom:4, fontWeight:500, textTransform:'uppercase', letterSpacing:'.05em' }}>{h}</div>
+                      <select
+                        value={colRoles[i]||'skip'}
+                        onChange={e=>setRole(i, e.target.value)}
+                        style={{ width:'100%', fontSize:11, padding:'3px 6px', borderRadius:5, ...roleColor(colRoles[i]||'skip') }}>
+                        {ROLE_OPTIONS.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {previewRows.map((row, ri) => (
+                  <tr key={ri} style={{ background:ri%2===0?CARD:BG }}>
+                    {parsed.headers.map((_, ci) => {
+                      const role = colRoles[ci]||'skip';
+                      const isName = role==='full'||role==='first'||role==='last';
+                      const val = row[ci]||'';
+                      return (
+                        <td key={ci} style={{ padding:'7px 12px', borderBottom:`0.5px solid ${BORDER}`, color:cellColor(role), verticalAlign:'middle' }}>
+                          {val||<span style={{ color:BORDER }}>—</span>}
+                          {/* Show Hi preview for name column */}
+                          {isName && ri===0 && val && (
+                            <span style={{ fontSize:10, padding:'1px 5px', borderRadius:3, background:'#E6F1FB', color:'#0C447C', marginLeft:6, fontWeight:500 }}>
+                              → Hi, {colRoles[ci]==='full'?firstNameFrom(val):val}
+                            </span>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* List details */}
+          <div style={{ borderTop:`0.5px solid ${BORDER}`, paddingTop:14, marginBottom:14 }}>
+            <div style={{ fontSize:12, fontWeight:500, color:TEXT, marginBottom:10 }}>New list details</div>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 20px' }}>
+              <Input label="List name *" value={listName} onChange={setListName} placeholder="e.g. Suffolk wave 1" required/>
+              <Input label="From name *" value={fromName} onChange={setFromName} placeholder="Wez at Sweetbyte" required/>
+              <Input label="From email *" value={fromEmail} onChange={setFromEmail} placeholder={`hello@${emailClient.name}`} required/>
+            </div>
+          </div>
+
+          {/* [Name] tip */}
+          <div style={{ background:`${GREEN}10`, border:`0.5px solid ${GREEN}40`, borderRadius:7, padding:'8px 12px', fontSize:12, color:DARK, marginBottom:14 }}>
+            Use <b>[Name]</b> in your campaign emails — e.g. "Hi, [Name]" — and it inserts the first name automatically for each recipient.
+          </div>
+
+          {issues.length>0&&<div style={{ background:'#fdecea', borderRadius:7, padding:'8px 12px', fontSize:12, color:DANGER, marginBottom:12 }}>{issues.map((e,i)=><div key={i}>{typeof e==='string'?e:`Row ${e.row}: ${e.issue}`}</div>)}</div>}
+
+          {/* Status bar */}
+          <div style={{ fontSize:11, color:MUTED, marginBottom:10 }}>
+            {emailIdx!==undefined&&<span style={{ color:GREEN, marginRight:10 }}>✓ Email mapped</span>}
+            {emailIdx===undefined&&<span style={{ color:DANGER, marginRight:10 }}>✗ Email not mapped</span>}
+            {nameIdx!==undefined&&<span style={{ color:BLUE, marginRight:10 }}>✓ Name mapped ({colRoles[nameIdx]==='full'?'full name — split on first space':colRoles[nameIdx]+' name'})</span>}
+            {Object.values(colRoles).filter(r=>r==='skip').length>0&&<span style={{ color:MUTED }}>{Object.values(colRoles).filter(r=>r==='skip').length} columns will be ignored</span>}
+          </div>
+
+          <div style={{ display:'flex', justifyContent:'space-between', gap:8 }}>
+            <Btn onClick={()=>setStep(1)}>← Back</Btn>
+            <Btn variant="primary" onClick={validateAndNext}>Check fields & preview →</Btn>
+          </div>
+        </div>
+      )}
+
+      {/* ── Step 3 — Review ── */}
+      {step===3&&parsed&&(
+        <div>
+          {issues.length>0?(
+            <div style={{ background:'#fff3cd', border:`0.5px solid ${AMBER}40`, borderRadius:8, padding:'10px 14px', marginBottom:14 }}>
+              <div style={{ fontSize:12, fontWeight:500, color:AMBER, marginBottom:6 }}>⚠ {issues.length} row{issues.length>1?'s':''} with issues — these will be skipped:</div>
+              {issues.map((is,i)=><div key={i} style={{ fontSize:12, color:AMBER }}>Row {is.row}: {is.issue}</div>)}
+            </div>
+          ):(
+            <div style={{ background:`${GREEN}12`, border:`0.5px solid ${GREEN}40`, borderRadius:8, padding:'10px 14px', marginBottom:14, fontSize:12, color:DARK }}>
+              ✓ All email addresses look valid
+            </div>
+          )}
+
+          <div style={{ background:BG, borderRadius:8, padding:'10px 14px', marginBottom:14, fontSize:12 }}>
+            <div style={{ display:'flex', gap:20, flexWrap:'wrap' }}>
+              <span><b style={{ color:TEXT }}>List:</b> <span style={{ color:MUTED }}>{listName}</span></span>
+              <span><b style={{ color:TEXT }}>From:</b> <span style={{ color:MUTED }}>{fromName} &lt;{fromEmail}&gt;</span></span>
+              <span><b style={{ color:TEXT }}>Total:</b> <span style={{ color:MUTED }}>{parsed.rows.length} contacts</span></span>
+              <span><b style={{ color:TEXT }}>To import:</b> <span style={{ color:GREEN, fontWeight:500 }}>{parsed.rows.length - issues.length}</span></span>
+            </div>
+          </div>
+
+          <div style={{ marginBottom:14 }}>
+            <div style={{ fontSize:12, fontWeight:500, color:MUTED, marginBottom:6 }}>Preview — first 5 contacts</div>
+            <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
+              <thead>
+                <tr style={{ background:BG }}>
+                  <th style={{ padding:'6px 10px', textAlign:'left', color:MUTED, fontWeight:500, borderBottom:`0.5px solid ${BORDER}` }}>Name stored</th>
+                  <th style={{ padding:'6px 10px', textAlign:'left', color:MUTED, fontWeight:500, borderBottom:`0.5px solid ${BORDER}` }}>Email</th>
+                  <th style={{ padding:'6px 10px', textAlign:'left', color:MUTED, fontWeight:500, borderBottom:`0.5px solid ${BORDER}` }}>Hi, [Name] preview</th>
+                </tr>
+              </thead>
+              <tbody>
+                {parsed.rows.slice(0,5).map((row,i)=>{
+                  const name  = getFullStoredName(row);
+                  const email = row[emailIdx]||'';
+                  const hi    = firstNameFrom(name);
+                  return(
+                    <tr key={i}>
+                      <td style={{ padding:'6px 10px', borderBottom:`0.5px solid ${BORDER}`, color:'#0C447C' }}>{name||<span style={{ color:MUTED }}>—</span>}</td>
+                      <td style={{ padding:'6px 10px', borderBottom:`0.5px solid ${BORDER}`, color:DARK }}>{email||<span style={{ color:DANGER }}>missing</span>}</td>
+                      <td style={{ padding:'6px 10px', borderBottom:`0.5px solid ${BORDER}` }}>
+                        {hi?<span style={{ fontSize:12 }}>Hi, <b style={{ color:GREEN }}>{hi}</b></span>:<span style={{ color:MUTED }}>—</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {result&&<div style={{ padding:'8px 12px', background:result.ok?`${GREEN}15`:'#fdecea', borderRadius:7, fontSize:13, color:result.ok?DARK:DANGER, marginBottom:12 }}>{result.ok?`✓ List "${listName}" created with ${result.added} contacts.`:result.error}</div>}
+
+          <div style={{ display:'flex', justifyContent:'space-between', gap:8 }}>
+            <Btn onClick={()=>setStep(2)}>← Back</Btn>
+            {!result?.ok&&<Btn variant="primary" onClick={doImport} disabled={saving}>{saving?'Creating list…':'Create list & import'}</Btn>}
+            {result?.ok&&<Btn onClick={onClose}>Done</Btn>}
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
 }
 
 function ImportNewListModal({ emailClient, onClose, onSaved }) {

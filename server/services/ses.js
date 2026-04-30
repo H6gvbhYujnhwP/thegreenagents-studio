@@ -43,13 +43,18 @@ export async function sendEmail({ to, toName, fromName, fromEmail, replyTo, subj
 export async function sendCampaign({ campaign, subscribers, baseUrl, onProgress }) {
   const results = { sent: 0, failed: 0, errors: [] };
   const BATCH_SIZE = 10;
-  const DELAY_MS   = 800; // ~12/sec, safely under 14/sec SES limit
+  const DELAY_MS   = 800;
 
   for (let i = 0; i < subscribers.length; i += BATCH_SIZE) {
     const batch = subscribers.slice(i, i + BATCH_SIZE);
 
     await Promise.all(batch.map(async (sub) => {
       try {
+        // Replace [Name] with subscriber's first name
+        const firstName = sub.name ? sub.name.trim().split(/\s+/)[0] : '';
+        const htmlBody  = (campaign.html_body  || '').replace(/\[Name\]/gi, firstName);
+        const plainBody = (campaign.plain_body || htmlToPlain(campaign.html_body || '')).replace(/\[Name\]/gi, firstName);
+
         await sendEmail({
           to:        sub.email,
           toName:    sub.name,
@@ -57,8 +62,8 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, onProgress 
           fromEmail: campaign.from_email,
           replyTo:   campaign.reply_to,
           subject:   campaign.subject,
-          htmlBody:  campaign.html_body,
-          plainBody: campaign.plain_body || htmlToPlain(campaign.html_body),
+          htmlBody,
+          plainBody,
         });
         results.sent++;
       } catch (err) {

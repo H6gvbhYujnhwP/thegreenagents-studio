@@ -429,9 +429,10 @@ router.post('/campaigns/:id/test', async (req, res) => {
     const testFooter = `<p style="margin-top:32px;font-size:11px;color:#999;text-align:center;border-top:1px solid #eee;padding-top:16px;">
       <strong>TEST SEND</strong> — This is a preview only.
     </p>`;
-    const html = campaign.html_body.includes('</body>')
-      ? campaign.html_body.replace('</body>', `${testFooter}</body>`)
-      : campaign.html_body + testFooter;
+    const rawHtml = campaign.html_body.replace(/\[Name\]/gi, 'there');
+    const html = rawHtml.includes('</body>')
+      ? rawHtml.replace('</body>', `${testFooter}</body>`)
+      : rawHtml + testFooter;
 
     const { sendEmail } = await import('../services/ses.js');
     await sendEmail({
