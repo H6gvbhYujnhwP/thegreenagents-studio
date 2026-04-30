@@ -168,23 +168,57 @@ router.post('/lists/:id/subscribers', (req, res) => {
 router.post('/lists/:id/import', (req, res) => {
   const { csv } = req.body;
   if (!csv) return res.status(400).json({ error: 'No CSV data' });
-  const lines  = csv.trim().split('\n').filter(Boolean);
-  const insert = db.prepare('INSERT OR IGNORE INTO email_subscribers (id,list_id,email,name) VALUES (?,?,?,?)');
+
+  const lines = csv.trim().split('\n').filter(Boolean);
+  if (lines.length === 0) return res.json({ ok: true, added: 0 });
+
+  // Parse header row to find column positions (handles Sendy and simple formats)
+  const headerLine = lines[0].replace(/"/g, '').toLowerCase();
+  const headers = headerLine.split(',').map(h => h.trim());
+  const emailIdx  = headers.findIndex(h => h === 'email');
+  const nameIdx   = headers.findIndex(h => h === 'name');
+  const statusIdx = headers.findIndex(h => h === 'status');
+
+  // If no header row found, treat first column as email, second as name
+  const hasHeader = emailIdx !== -1;
+  const dataRows  = hasHeader ? lines.slice(1) : lines;
+
+  // Map Sendy status values to our internal status values
+  function mapStatus(raw) {
+    if (!raw) return 'subscribed';
+    const s = raw.toLowerCase().trim();
+    if (s === 'bounced')      return 'bounced';
+    if (s === 'unsubscribed') return 'unsubscribed';
+    if (s === 'spam' || s === 'marked as spam') return 'spam';
+    if (s === 'unconfirmed')  return 'unsubscribed'; // treat unconfirmed as unsub
+    return 'subscribed'; // Active, Subscribed etc
+  }
+
+  const insert = db.prepare('INSERT OR IGNORE INTO email_subscribers (id,list_id,email,name,status) VALUES (?,?,?,?,?)');
   const insertMany = db.transaction((rows) => {
     let added = 0;
     for (const line of rows) {
-      const [emailRaw, nameRaw] = line.split(',');
-      const email = emailRaw?.trim().toLowerCase();
+      // Handle quoted CSV values properly
+      const cols = line.match(/(".*?"|[^,]+|(?<=,)(?=,)|^(?=,)|(?<=,)$)/g)
+        ?.map(v => v.replace(/^"|"$/g, '').trim()) || line.split(',').map(v => v.trim());
+
+      const email  = hasHeader ? cols[emailIdx]  : cols[0];
+      const name   = hasHeader ? cols[nameIdx]   : cols[1];
+      const status = hasHeader && statusIdx !== -1 ? mapStatus(cols[statusIdx]) : 'subscribed';
+
       if (!email || !email.includes('@')) continue;
-      insert.run(uuid(), req.params.id, email, nameRaw?.trim() || null);
+      insert.run(uuid(), req.params.id, email.toLowerCase(), name || null, status);
       added++;
     }
     return added;
   });
-  const dataRows = lines[0]?.toLowerCase().includes('email') ? lines.slice(1) : lines;
+
   const added = insertMany(dataRows);
+
+  // Update subscriber count (active only)
   db.prepare("UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?")
     .run(req.params.id, req.params.id);
+
   res.json({ ok: true, added });
 });
 

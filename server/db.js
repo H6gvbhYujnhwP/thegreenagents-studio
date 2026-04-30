@@ -163,4 +163,40 @@ for (const { table, col, def } of migrations) {
   }
 }
 
+// 3. Fix email_lists — old table has client_id as NOT NULL which blocks inserts.
+//    Recreate it without that constraint if client_id column still exists.
+{
+  const listCols = db.prepare('PRAGMA table_info(email_lists)').all().map(r => r.name);
+  if (listCols.includes('client_id')) {
+    console.log('[db] migration: rebuilding email_lists to remove old client_id constraint');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS email_lists_new (
+        id TEXT PRIMARY KEY,
+        email_client_id TEXT NOT NULL DEFAULT '',
+        name TEXT NOT NULL,
+        from_name TEXT NOT NULL,
+        from_email TEXT NOT NULL,
+        reply_to TEXT NOT NULL,
+        subscriber_count INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+      INSERT INTO email_lists_new (id, email_client_id, name, from_name, from_email, reply_to, subscriber_count, created_at)
+        SELECT id, COALESCE(email_client_id,''), name, from_name, from_email, reply_to, subscriber_count, created_at
+        FROM email_lists;
+      DROP TABLE email_lists;
+      ALTER TABLE email_lists_new RENAME TO email_lists;
+    `);
+    console.log('[db] migration: email_lists rebuilt successfully');
+  }
+}
+
+// 4. Add bounced/spam status support to email_subscribers if needed
+{
+  const subCols = db.prepare('PRAGMA table_info(email_subscribers)').all().map(r => r.name);
+  if (!subCols.includes('spam_at')) {
+    db.exec(`ALTER TABLE email_subscribers ADD COLUMN spam_at TEXT`);
+    console.log('[db] migration: added spam_at to email_subscribers');
+  }
+}
+
 export default db;

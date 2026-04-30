@@ -287,7 +287,10 @@ function ImportModal({ list, onClose, onSaved }) {
 
   return (
     <Modal title={`Import — ${list.name}`} onClose={onClose}>
-      <p style={{ fontSize:13, color:MUTED, marginBottom:12 }}>CSV format: <code>email, name</code> (name optional). Header row optional.</p>
+      <p style={{ fontSize:13, color:MUTED, marginBottom:12 }}>
+        Supports Sendy exports directly — Name, Email and Status columns are mapped automatically.
+        Simple format (email, name) also works.
+      </p>
       <input ref={fileRef} type="file" accept=".csv,.txt" onChange={handleFile} style={{ fontSize:13, marginBottom:12 }} />
       {csv && <Input label="Preview / edit" value={csv} onChange={setCsv} rows={8} />}
       {result && (
@@ -333,7 +336,7 @@ function SubsModal({ list, onClose, onSaved }) {
   return (
     <Modal title={`Subscribers — ${list.name}`} onClose={onClose} wide>
       <div style={{ display:'flex', gap:6, marginBottom:14 }}>
-        {['subscribed','unsubscribed','bounced'].map(s=>(
+        {['subscribed','unsubscribed','bounced','spam'].map(s=>(
           <button key={s} onClick={()=>setFilter(s)} style={{
             padding:'4px 14px', fontSize:12, border:`0.5px solid ${BORDER}`, borderRadius:20,
             background:filter===s?GREEN:'transparent', color:filter===s?'#fff':MUTED, cursor:'pointer', textTransform:'capitalize'
