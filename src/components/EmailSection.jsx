@@ -158,18 +158,7 @@ function BrandModal({ emailClient, initial, verifiedDomains, onClose, onSaved })
     <Modal title={editing ? 'Edit brand' : 'New sending identity'} onClose={onClose}>
       <Input label="Brand / identity name *" value={form.name} onChange={v=>set('name',v)} placeholder="Tower Leasing" required />
       <Input label="From name *" value={form.from_name} onChange={v=>set('from_name',v)} placeholder="Wez at Tower Leasing" required />
-      <div style={{ marginBottom:14 }}>
-        <label style={{ display:'block', fontSize:12, color:MUTED, marginBottom:4 }}>From email *</label>
-        <select value={form.from_email} onChange={e=>set('from_email',e.target.value)}
-          style={{ width:'100%', padding:'8px 12px', border:`0.5px solid ${BORDER}`, borderRadius:7, fontSize:13, color:TEXT, background:CARD }}>
-          <option value="">— select verified domain —</option>
-          {verifiedDomains.map(d=>[
-            <option key={`hello@${d}`} value={`hello@${d}`}>hello@{d}</option>,
-            <option key={`noreply@${d}`} value={`noreply@${d}`}>noreply@{d}</option>,
-            <option key={`contact@${d}`} value={`contact@${d}`}>contact@{d}</option>,
-          ])}
-        </select>
-      </div>
+      <Input label="From email *" value={form.from_email} onChange={v=>set('from_email',v)} placeholder={`hello@${emailClient.name}`} required />
       <Input label="Reply-to (leave blank to match from email)" value={form.reply_to} onChange={v=>set('reply_to',v)} />
       <div style={{ marginBottom:14 }}>
         <label style={{ display:'block', fontSize:12, color:MUTED, marginBottom:6 }}>Colour</label>
@@ -220,24 +209,19 @@ function CampaignModal({ emailClient, lists, verifiedDomains, initial, onClose, 
   return (
     <Modal title={editing ? 'Edit campaign' : 'New campaign'} onClose={onClose} wide>
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 20px' }}>
-        <SelInput label="Mailing list *" value={form.list_id} onChange={v=>set('list_id',v)}
-          options={lists.map(l=>({value:l.id,label:l.name}))} required />
-        <Input label="Campaign title *" value={form.title} onChange={v=>set('title',v)} placeholder="May outreach wave 1" required />
-        <Input label="Email subject *" value={form.subject} onChange={v=>set('subject',v)} placeholder="Is waiting costing your business?" required />
-        <Input label="From name" value={form.from_name} onChange={v=>set('from_name',v)} />
         <div style={{ marginBottom:14 }}>
-          <label style={{ display:'block', fontSize:12, color:MUTED, marginBottom:4 }}>From email</label>
-          <select value={form.from_email} onChange={e=>set('from_email',e.target.value)}
+          <label style={{ display:'block', fontSize:12, color:MUTED, marginBottom:4 }}>Mailing list *</label>
+          <select value={form.list_id} onChange={e=>set('list_id',e.target.value)}
             style={{ width:'100%', padding:'8px 12px', border:`0.5px solid ${BORDER}`, borderRadius:7, fontSize:13, color:TEXT, background:CARD }}>
-            <option value="">— select —</option>
-            {verifiedDomains.map(d=>[
-              <option key={`hello@${d}`} value={`hello@${d}`}>hello@{d}</option>,
-              <option key={`noreply@${d}`} value={`noreply@${d}`}>noreply@{d}</option>,
-              <option key={`contact@${d}`} value={`contact@${d}`}>contact@{d}</option>,
-            ])}
+            <option value="">— select list —</option>
+            {lists.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}
           </select>
         </div>
-        <Input label="Reply-to" value={form.reply_to} onChange={v=>set('reply_to',v)} />
+        <Input label="Campaign title *" value={form.title} onChange={v=>set('title',v)} placeholder="May outreach wave 1" required />
+        <Input label="Email subject *" value={form.subject} onChange={v=>set('subject',v)} placeholder="Is waiting costing your business?" required />
+        <Input label="From name" value={form.from_name} onChange={v=>set('from_name',v)} placeholder="Wez at Sweetbyte" />
+        <Input label="From email *" value={form.from_email} onChange={v=>set('from_email',v)} placeholder={`hello@${emailClient.name}`} required />
+        <Input label="Reply-to (leave blank to match from email)" value={form.reply_to} onChange={v=>set('reply_to',v)} placeholder={form.from_email||`hello@${emailClient.name}`} />
         <Input label="Schedule send (optional)" value={form.scheduled_at} onChange={v=>set('scheduled_at',v)} type="datetime-local" />
       </div>
       <Input label="Email body (HTML) *" value={form.html_body} onChange={v=>set('html_body',v)}
@@ -270,18 +254,7 @@ function ListModal({ emailClient, verifiedDomains, onClose, onSaved }) {
     <Modal title="New mailing list" onClose={onClose}>
       <Input label="List name *" value={form.name} onChange={v=>set('name',v)} placeholder="May prospects — SME finance" required />
       <Input label="From name *" value={form.from_name} onChange={v=>set('from_name',v)} placeholder="Wez at Tower Leasing" required />
-      <div style={{ marginBottom:14 }}>
-        <label style={{ display:'block', fontSize:12, color:MUTED, marginBottom:4 }}>From email *</label>
-        <select value={form.from_email} onChange={e=>set('from_email',e.target.value)}
-          style={{ width:'100%', padding:'8px 12px', border:`0.5px solid ${BORDER}`, borderRadius:7, fontSize:13, color:TEXT, background:CARD }}>
-          <option value="">— select verified domain —</option>
-          {verifiedDomains.map(d=>[
-            <option key={`hello@${d}`} value={`hello@${d}`}>hello@{d}</option>,
-            <option key={`noreply@${d}`} value={`noreply@${d}`}>noreply@{d}</option>,
-            <option key={`contact@${d}`} value={`contact@${d}`}>contact@{d}</option>,
-          ])}
-        </select>
-      </div>
+      <Input label="From email *" value={form.from_email} onChange={v=>set('from_email',v)} placeholder={`hello@${emailClient.name}`} required />
       <Input label="Reply-to (leave blank to match from email)" value={form.reply_to} onChange={v=>set('reply_to',v)} />
       <div style={{ display:'flex', justifyContent:'flex-end', gap:8 }}>
         <Btn onClick={onClose}>Cancel</Btn>
