@@ -119,6 +119,16 @@ function buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, html
     `MIME-Version: 1.0`,
   ];
 
+  // Force SES to use a specific configuration set, overriding any account default.
+  // Set SES_CONFIGURATION_SET env var to the name of a config set with NO open-
+  // tracking event destination (e.g. "studio-no-tracking") — this is the only
+  // deterministic way to stop the awstrack.me pixel injection. Without this,
+  // SES applies whatever default config set is set on the account/identity.
+  const configSet = process.env.SES_CONFIGURATION_SET;
+  if (configSet) {
+    headers.push(`X-SES-CONFIGURATION-SET: ${configSet}`);
+  }
+
   // List-Unsubscribe headers (RFC 2369 + RFC 8058) — Gmail/Outlook deliverability win.
   // Only added when we have a campaign-bound unsubscribe URL.
   if (listUnsubUrl) {
