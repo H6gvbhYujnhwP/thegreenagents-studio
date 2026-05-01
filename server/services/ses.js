@@ -29,18 +29,15 @@ function sign(date, region, service, secret) {
   return hmac(k3, 'aws4_request', 'binary');
 }
 
-function buildAuthHeader(params, body) {
+function buildAuthHeader(body) {
   const now      = new Date();
   const amzDate  = now.toISOString().replace(/[-:]|\.\d{3}/g, '');
   const date     = amzDate.slice(0, 8);
-  const method   = 'POST';
-  const uri      = '/';
-  const payload  = body;
-  const payHash  = crypto.createHash('sha256').update(payload).digest('hex');
+  const payHash  = crypto.createHash('sha256').update(body).digest('hex');
 
-  const canonHeaders = `content-type:application/x-www-form-urlencoded\nhost:${HOST}\nx-amz-date:${amzDate}\n`;
+  const canonHeaders  = `content-type:application/x-www-form-urlencoded\nhost:${HOST}\nx-amz-date:${amzDate}\n`;
   const signedHeaders = 'content-type;host;x-amz-date';
-  const canonReq = [method, uri, '', canonHeaders, signedHeaders, payHash].join('\n');
+  const canonReq      = ['POST', '/', '', canonHeaders, signedHeaders, payHash].join('\n');
 
   const credScope  = `${date}/${REGION}/email/aws4_request`;
   const strToSign  = ['AWS4-HMAC-SHA256', amzDate, credScope, crypto.createHash('sha256').update(canonReq).digest('hex')].join('\n');
@@ -56,8 +53,10 @@ function buildAuthHeader(params, body) {
 // ── Raw HTTPS POST to SES API ─────────────────────────────────────────────────
 function sesRequest(params) {
   return new Promise((resolve, reject) => {
-    const body    = new URLSearchParams(params).toString();
-    const authHdr = buildAuthHeader(params, body);
+    // Sort params alphabetically — required for correct AWS Signature V4 (Sendy does ksort)
+    const sorted = Object.keys(params).sort().reduce((acc, k) => { acc[k] = params[k]; return acc; }, {});
+    const body   = new URLSearchParams(sorted).toString();
+    const authHdr = buildAuthHeader(body);
 
     const options = {
       hostname: HOST,
