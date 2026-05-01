@@ -336,6 +336,43 @@ router.get('/diag', async (req, res) => {
   res.json(out);
 });
 
+// GET /api/email/diag/raw-mime — returns the raw MIME we'd send for a test email.
+// Does NOT send anything. Used to verify what headers actually reach the
+// buildRawEmail output (specifically the X-SES-CONFIGURATION-SET header).
+router.get('/diag/raw-mime', async (req, res) => {
+  const fromEmail = req.query.from || 'test@example.com';
+  const toEmail   = req.query.to   || 'recipient@example.com';
+
+  const headers = [
+    `From: Test Sender <${fromEmail}>`,
+    `To: ${toEmail}`,
+    `Reply-To: ${fromEmail}`,
+    `Subject: =?UTF-8?B?${Buffer.from('Diag MIME Dump').toString('base64')}?=`,
+    `MIME-Version: 1.0`,
+  ];
+  const configSet = process.env.SES_CONFIGURATION_SET;
+  if (configSet) headers.push(`X-SES-CONFIGURATION-SET: ${configSet}`);
+  headers.push(`Content-Type: multipart/alternative; boundary="b_diag"`);
+
+  const mime = [
+    ...headers, '',
+    '--b_diag',
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: quoted-printable', '',
+    'This is the diag MIME dump.', '',
+    '--b_diag--',
+  ].join('\r\n');
+
+  res.json({
+    SES_CONFIGURATION_SET_env: configSet || 'NOT SET',
+    config_set_header_in_mime: mime.includes('X-SES-CONFIGURATION-SET'),
+    raw_mime_preview: mime,
+    explanation: configSet
+      ? "If 'config_set_header_in_mime' is true, the header IS being added. If you still see awstrack.me pixels in real sends, the issue is AWS-side — config set name mismatch, or AWS not honoring it for that identity."
+      : "SES_CONFIGURATION_SET env var is empty in this Node process. Header won't be added.",
+  });
+});
+
 // Helper: call SES GetSendQuota via our raw signer (same code path as SendRawEmail)
 async function rawSesGetSendQuota() {
   // We deliberately import the internal sesRequest — but it's not exported.
