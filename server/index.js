@@ -32,5 +32,6 @@ app.listen(PORT, () => {
   console.log(`[env] AWS_ACCESS_KEY_ID:     ${process.env.AWS_ACCESS_KEY_ID                             ? 'SET ✓' : 'MISSING ✗'}`);
   console.log(`[env] AWS_SECRET_ACCESS_KEY: ${process.env.AWS_SECRET_ACCESS_KEY                         ? 'SET ✓' : 'MISSING ✗'}`);
   console.log(`[env] AWS_SES_REGION:        ${process.env.AWS_SES_REGION || 'eu-north-1 (default)'}`);
+  console.log(`[env] SES_CONFIGURATION_SET: ${process.env.SES_CONFIGURATION_SET || 'NOT SET (account default config set will apply)'}`);
   console.log(`[env] DB_PATH:               ${process.env.DB_PATH || '(default)'}`);
 });

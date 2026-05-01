@@ -298,6 +298,7 @@ router.get('/diag', async (req, res) => {
     AWS_SECRET_ACCESS_KEY_ok: sk.length === 40 && sk === sk.trim(),
     AWS_SES_REGION:        process.env.AWS_SES_REGION || 'eu-north-1 (default)',
     PUBLIC_URL:            process.env.PUBLIC_URL || 'NOT SET (using request host)',
+    SES_CONFIGURATION_SET: process.env.SES_CONFIGURATION_SET || 'NOT SET (no X-SES-CONFIGURATION-SET header will be added — AWS account default applies)',
     has_whitespace_in_ak:  ak !== ak.trim(),
     has_whitespace_in_sk:  sk !== sk.trim(),
   };
@@ -866,17 +867,16 @@ router.get('/campaigns/:id/report', (req, res) => {
     ORDER BY unique_clicks DESC
   `).all(req.params.id);
 
-  // Country breakdown from subscriber data (approximated by email domain TLD)
-  // In future this will come from tracking pixel headers
+  // Openers count
   const openers = db.prepare(`
-    SELECT es.email FROM email_sends es
-    WHERE es.campaign_id=? AND es.status='opened'
-  `).all(req.params.id);
+    SELECT COUNT(*) as c FROM email_sends
+    WHERE campaign_id=? AND opened_at IS NOT NULL
+  `).get(req.params.id);
 
   res.json({
     campaign,
     link_clicks: linkClicks,
-    openers_count: openers.length,
+    openers_count: openers.c,
   });
 });
 
