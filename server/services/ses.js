@@ -24,15 +24,23 @@ const SK      = process.env.AWS_SECRET_ACCESS_KEY;
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ── AWS Signature V4 ──────────────────────────────────────────────────────────
-function hmac(key, data, enc) {
-  return crypto.createHmac('sha256', key).update(data).digest(enc);
+// IMPORTANT: when chaining HMACs, keep keys as Buffers — never digest('binary')
+// and pass the resulting string back in. Node converts that string to UTF-8 when
+// used as a key, which silently corrupts any byte ≥ 0x80, so signing fails
+// roughly half the time depending on the secret. digest() with no arg returns
+// a Buffer that round-trips correctly.
+function hmacBuf(key, data) {
+  return crypto.createHmac('sha256', key).update(data).digest();
+}
+function hmacHex(key, data) {
+  return crypto.createHmac('sha256', key).update(data).digest('hex');
 }
 
 function sign(date, region, service, secret) {
-  const k1 = hmac('AWS4' + secret, date, 'binary');
-  const k2  = hmac(k1, region, 'binary');
-  const k3  = hmac(k2, service, 'binary');
-  return hmac(k3, 'aws4_request', 'binary');
+  const k1 = hmacBuf('AWS4' + secret, date);
+  const k2 = hmacBuf(k1, region);
+  const k3 = hmacBuf(k2, service);
+  return hmacBuf(k3, 'aws4_request');
 }
 
 function buildAuthHeader(body) {
@@ -48,7 +56,7 @@ function buildAuthHeader(body) {
   const credScope  = `${date}/${REGION}/email/aws4_request`;
   const strToSign  = ['AWS4-HMAC-SHA256', amzDate, credScope, crypto.createHash('sha256').update(canonReq).digest('hex')].join('\n');
   const signingKey = sign(date, REGION, 'email', SK);
-  const signature  = hmac(signingKey, strToSign, 'hex');
+  const signature  = hmacHex(signingKey, strToSign);
 
   return {
     Authorization: `AWS4-HMAC-SHA256 Credential=${AK}/${credScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,

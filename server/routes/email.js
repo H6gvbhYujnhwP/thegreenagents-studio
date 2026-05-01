@@ -362,10 +362,11 @@ async function rawSesGetSendQuota() {
   const strToSign  = ['AWS4-HMAC-SHA256', amzDate, credScope, crypto.createHash('sha256').update(canonReq).digest('hex')].join('\n');
 
   const hmac = (key, data, enc) => crypto.createHmac('sha256', key).update(data).digest(enc);
-  const k1 = hmac('AWS4' + SK, date, 'binary');
-  const k2 = hmac(k1, REGION, 'binary');
-  const k3 = hmac(k2, 'email', 'binary');
-  const signingKey = hmac(k3, 'aws4_request', 'binary');
+  // Keep keys as Buffers between HMAC stages — see ses.js for why.
+  const k1 = hmac('AWS4' + SK, date);
+  const k2 = hmac(k1, REGION);
+  const k3 = hmac(k2, 'email');
+  const signingKey = hmac(k3, 'aws4_request');
   const signature  = hmac(signingKey, strToSign, 'hex');
 
   return new Promise((resolve, reject) => {
