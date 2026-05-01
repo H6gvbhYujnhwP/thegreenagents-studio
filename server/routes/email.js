@@ -102,62 +102,96 @@ router.get('/track/click/:campaignId/:subscriberId/:hash', (req, res) => {
   res.redirect(302, url);
 });
 
-// ── SNS webhook for bounces + complaints ─────────────────────────────────────
-// AWS SES → SNS topic → POSTs JSON to this endpoint.
-// Handles three message types:
-//   - SubscriptionConfirmation: GET the SubscribeURL to confirm
-//   - Notification: parse Message field for bounce/complaint
-//   - UnsubscribeConfirmation: just log
+// ── SNS webhooks for bounces + complaints (split, to mirror Sendy) ───────────
+// We share the same SNS topics as Sendy:
+//   - bounces topic   → POSTs to /api/email/sns/bounces
+//   - complaints topic → POSTs to /api/email/sns/complaints
+// Both apps subscribe to both topics; SNS fans out to all subscribers.
 //
-// Note: We accept text/plain bodies because AWS SNS sends Content-Type:
-// text/plain by default. express.json() at the app level will only parse
-// application/json, so we re-parse here.
-router.post('/sns', express.text({ type: '*/*', limit: '500kb' }), (req, res) => {
-  let body;
-  try {
-    body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-  } catch {
-    return res.status(400).json({ error: 'Invalid JSON' });
-  }
+// Each endpoint handles three message Types from SNS:
+//   - SubscriptionConfirmation: GET the SubscribeURL to confirm (one-time)
+//   - Notification: parse Message field for the actual SES event
+//   - UnsubscribeConfirmation: ignored (logged only)
+//
+// We accept text/plain bodies because AWS SNS sends Content-Type: text/plain.
+// express.json() at the app level only parses application/json, so we re-parse here.
 
-  // Always log the raw event for debugging
+const snsTextParser = express.text({ type: '*/*', limit: '500kb' });
+
+function parseSnsBody(req) {
+  try {
+    return typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+  } catch {
+    return null;
+  }
+}
+
+function logSnsEvent(body, rawBody, source) {
   try {
     db.prepare(`INSERT INTO email_sns_events (id, type, payload) VALUES (?, ?, ?)`)
-      .run(uuid(), body?.Type || 'unknown', typeof req.body === 'string' ? req.body : JSON.stringify(body));
+      .run(uuid(), `${source}:${body?.Type || 'unknown'}`, typeof rawBody === 'string' ? rawBody : JSON.stringify(body));
   } catch {}
+}
 
-  // 1. Subscription confirmation — visit SubscribeURL to confirm the topic
-  if (body.Type === 'SubscriptionConfirmation' && body.SubscribeURL) {
-    // Defensive: only confirm if URL is from amazonaws.com
-    try {
-      const u = new URL(body.SubscribeURL);
-      if (!u.hostname.endsWith('amazonaws.com')) {
-        console.warn('[sns] refusing to confirm non-AWS subscribe URL:', u.hostname);
-        return res.status(400).json({ error: 'Invalid SubscribeURL host' });
-      }
-      https.get(body.SubscribeURL, () => {
-        console.log('[sns] subscription confirmed for topic:', body.TopicArn);
-      }).on('error', err => console.error('[sns] confirm error:', err.message));
-    } catch (err) {
-      console.error('[sns] bad SubscribeURL:', err.message);
+function handleSubscriptionConfirmation(body, source) {
+  try {
+    const u = new URL(body.SubscribeURL);
+    if (!u.hostname.endsWith('amazonaws.com')) {
+      console.warn(`[sns:${source}] refusing to confirm non-AWS SubscribeURL:`, u.hostname);
+      return false;
     }
+    https.get(body.SubscribeURL, () => {
+      console.log(`[sns:${source}] subscription confirmed for topic:`, body.TopicArn);
+    }).on('error', err => console.error(`[sns:${source}] confirm error:`, err.message));
+    return true;
+  } catch (err) {
+    console.error(`[sns:${source}] bad SubscribeURL:`, err.message);
+    return false;
+  }
+}
+
+// Bounces endpoint — subscribes to the existing 'bounces' SNS topic
+router.post('/sns/bounces', snsTextParser, (req, res) => {
+  const body = parseSnsBody(req);
+  if (!body) return res.status(400).json({ error: 'Invalid JSON' });
+  logSnsEvent(body, req.body, 'bounces');
+
+  if (body.Type === 'SubscriptionConfirmation' && body.SubscribeURL) {
+    handleSubscriptionConfirmation(body, 'bounces');
     return res.json({ ok: true });
   }
 
-  // 2. Notification — extract bounce or complaint
   if (body.Type === 'Notification' && body.Message) {
     let msg;
     try { msg = JSON.parse(body.Message); }
     catch { return res.json({ ok: true }); }
-
-    const messageId = msg?.mail?.messageId;
-
     if (msg.notificationType === 'Bounce') {
-      handleBounce(msg, messageId);
-    } else if (msg.notificationType === 'Complaint') {
-      handleComplaint(msg, messageId);
+      handleBounce(msg, msg?.mail?.messageId);
     }
-    // Delivery notifications can be ignored — we already track sent state
+    return res.json({ ok: true });
+  }
+
+  res.json({ ok: true });
+});
+
+// Complaints endpoint — subscribes to the existing 'complaints' SNS topic
+router.post('/sns/complaints', snsTextParser, (req, res) => {
+  const body = parseSnsBody(req);
+  if (!body) return res.status(400).json({ error: 'Invalid JSON' });
+  logSnsEvent(body, req.body, 'complaints');
+
+  if (body.Type === 'SubscriptionConfirmation' && body.SubscribeURL) {
+    handleSubscriptionConfirmation(body, 'complaints');
+    return res.json({ ok: true });
+  }
+
+  if (body.Type === 'Notification' && body.Message) {
+    let msg;
+    try { msg = JSON.parse(body.Message); }
+    catch { return res.json({ ok: true }); }
+    if (msg.notificationType === 'Complaint') {
+      handleComplaint(msg, msg?.mail?.messageId);
+    }
     return res.json({ ok: true });
   }
 
