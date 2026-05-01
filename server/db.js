@@ -323,4 +323,46 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_email_sns_events_message_id ON email_sns_events(message_id);
 `);
 
+// ── 11. PER-CAMPAIGN TRACKING RULES ──────────────────────────────────────────
+// Adds the four tracking-control columns to email_campaigns:
+//   - tracking_mode       : 'off' | 'smart' | 'all'  (default 'off' — safest)
+//   - tracking_threshold  : INT — minimum touch count for tracking in 'smart' mode
+//   - tracking_window     : INT — months to look back when counting touches (0 = all time)
+//   - track_opens / track_clicks / track_unsub : individual fine-grained toggles
+// When tracking_mode='off' the three boolean toggles are ignored (no tracking).
+// When 'smart' or 'all' they decide which signals to inject for eligible recipients.
+{
+  const cols = db.prepare('PRAGMA table_info(email_campaigns)').all().map(r => r.name);
+  const toAdd = [
+    { col: 'tracking_mode',      def: "TEXT DEFAULT 'off'" },
+    { col: 'tracking_threshold', def: 'INTEGER DEFAULT 3' },
+    { col: 'tracking_window',    def: 'INTEGER DEFAULT 6' },
+    { col: 'track_opens',        def: 'INTEGER DEFAULT 0' },
+    { col: 'track_clicks',       def: 'INTEGER DEFAULT 0' },
+    { col: 'track_unsub',        def: 'INTEGER DEFAULT 0' },
+  ];
+  for (const { col, def } of toAdd) {
+    if (!cols.includes(col)) {
+      db.exec(`ALTER TABLE email_campaigns ADD COLUMN ${col} ${def}`);
+      console.log(`[db] migration: added ${col} to email_campaigns`);
+    }
+  }
+}
+
+// ── 12. PER-LIST "ALWAYS WARM" OVERRIDE ──────────────────────────────────────
+// When set on a list, every subscriber on that list is treated as warm regardless
+// of their actual touch count. Used for e.g. "existing customers" or "newsletter
+// subscribers" lists where everyone has an established relationship with us.
+{
+  const cols = db.prepare('PRAGMA table_info(email_lists)').all().map(r => r.name);
+  if (!cols.includes('always_warm')) {
+    db.exec(`ALTER TABLE email_lists ADD COLUMN always_warm INTEGER DEFAULT 0`);
+    console.log('[db] migration: added always_warm to email_lists');
+  }
+}
+
+// Index on email_sends(subscriber_id, status, sent_at) for efficient touch-count lookups
+db.exec(`CREATE INDEX IF NOT EXISTS idx_email_sends_subscriber_status_sent_at
+         ON email_sends(subscriber_id, status, sent_at)`);
+
 export default db;

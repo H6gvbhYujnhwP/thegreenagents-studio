@@ -99,14 +99,24 @@ function appendUnsubFooter(html, { baseUrl, campaignId, subscriberId }) {
 
 // ── Main: prepare HTML for tracked send ──────────────────────────────────────
 // This is what ses.js calls before SES SendRawEmail.
-// Returns the modified HTML with open pixel + rewritten click links + unsub footer.
-export function applyTracking(html, { baseUrl, campaignId, subscriberId }) {
+// Each tracking signal (open pixel / click rewrite / unsub footer) is opt-in
+// via its own boolean flag — caller decides per-recipient which to apply.
+//
+// Note: the visible unsub footer is OFF by default at the module level
+// (SHOW_VISIBLE_UNSUB_FOOTER=false). Even with track_unsub=true here we only
+// inject the visible footer when that constant is on. The List-Unsubscribe
+// MIME header is added separately in ses.js based on the same track_unsub flag.
+export function applyTracking(html, opts) {
+  const { baseUrl, campaignId, subscriberId,
+          track_opens = false, track_clicks = false, track_unsub = false } = opts;
   if (!campaignId || !subscriberId) return html; // safety — no tracking on test sends
   let out = html || '';
-  out = appendUnsubFooter(out, { baseUrl, campaignId, subscriberId });
-  out = rewriteLinks(out, { baseUrl, campaignId, subscriberId });
-  const pixel = buildOpenPixel({ baseUrl, campaignId, subscriberId });
-  out = injectOpenPixel(out, pixel);
+  if (track_unsub)  out = appendUnsubFooter(out, { baseUrl, campaignId, subscriberId });
+  if (track_clicks) out = rewriteLinks(out, { baseUrl, campaignId, subscriberId });
+  if (track_opens) {
+    const pixel = buildOpenPixel({ baseUrl, campaignId, subscriberId });
+    out = injectOpenPixel(out, pixel);
+  }
   return out;
 }
 

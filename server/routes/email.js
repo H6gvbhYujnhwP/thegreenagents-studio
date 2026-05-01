@@ -5,6 +5,7 @@ import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { sendCampaign, getQuota, getVerifiedDomains } from '../services/ses.js';
 import { getLinkUrl, TRANSPARENT_GIF } from '../services/tracking.js';
+import { getTouchCountsBulk, shouldTrackRecipient } from '../services/touch-count.js';
 import dns from 'dns';
 import { promisify } from 'util';
 
@@ -707,24 +708,67 @@ router.get('/campaigns', (req, res) => {
 });
 
 router.post('/campaigns', (req, res) => {
-  const { email_client_id, list_id, title, subject, from_name, from_email, reply_to, html_body, plain_body, scheduled_at } = req.body;
+  const {
+    email_client_id, list_id, title, subject, from_name, from_email, reply_to,
+    html_body, plain_body, scheduled_at,
+    // Tracking — all optional; defaults are the column-level defaults (off / 3 / 6 / 0).
+    tracking_mode, tracking_threshold, tracking_window,
+    track_opens, track_clicks, track_unsub,
+  } = req.body;
   if (!email_client_id || !list_id || !title || !subject || !from_name || !from_email || !html_body) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
   const id = uuid();
-  db.prepare(`INSERT INTO email_campaigns (id,email_client_id,list_id,title,subject,from_name,from_email,reply_to,html_body,plain_body,status,scheduled_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(id, email_client_id, list_id, title, subject, from_name, from_email, reply_to || from_email, html_body, plain_body || null, scheduled_at ? 'scheduled' : 'draft', scheduled_at || null);
+  db.prepare(`INSERT INTO email_campaigns
+    (id, email_client_id, list_id, title, subject, from_name, from_email, reply_to,
+     html_body, plain_body, status, scheduled_at,
+     tracking_mode, tracking_threshold, tracking_window,
+     track_opens, track_clicks, track_unsub)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      id, email_client_id, list_id, title, subject, from_name, from_email, reply_to || from_email,
+      html_body, plain_body || null, scheduled_at ? 'scheduled' : 'draft', scheduled_at || null,
+      tracking_mode || 'off',
+      Number.isInteger(tracking_threshold) ? tracking_threshold : 3,
+      Number.isInteger(tracking_window) ? tracking_window : 6,
+      track_opens ? 1 : 0, track_clicks ? 1 : 0, track_unsub ? 1 : 0,
+    );
   res.json(db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(id));
 });
 
 router.put('/campaigns/:id', (req, res) => {
-  const { title, subject, from_name, from_email, reply_to, html_body, plain_body, scheduled_at, list_id } = req.body;
+  const {
+    title, subject, from_name, from_email, reply_to, html_body, plain_body, scheduled_at, list_id,
+    tracking_mode, tracking_threshold, tracking_window,
+    track_opens, track_clicks, track_unsub,
+  } = req.body;
   const current = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
   if (!current) return res.status(404).json({ error: 'Not found' });
   if (current.status === 'sent') return res.status(400).json({ error: 'Cannot edit a sent campaign' });
   const status = scheduled_at ? 'scheduled' : 'draft';
-  db.prepare(`UPDATE email_campaigns SET title=?,subject=?,from_name=?,from_email=?,reply_to=?,html_body=?,plain_body=?,scheduled_at=?,status=?,list_id=COALESCE(?,list_id) WHERE id=?`)
-    .run(title ?? current.title, subject ?? current.subject, from_name ?? current.from_name, from_email ?? current.from_email, reply_to ?? current.reply_to, html_body ?? current.html_body, plain_body ?? current.plain_body, scheduled_at ?? current.scheduled_at, status, list_id ?? null, req.params.id);
+  db.prepare(`UPDATE email_campaigns SET
+    title=?, subject=?, from_name=?, from_email=?, reply_to=?,
+    html_body=?, plain_body=?, scheduled_at=?, status=?,
+    list_id=COALESCE(?, list_id),
+    tracking_mode=COALESCE(?, tracking_mode),
+    tracking_threshold=COALESCE(?, tracking_threshold),
+    tracking_window=COALESCE(?, tracking_window),
+    track_opens=COALESCE(?, track_opens),
+    track_clicks=COALESCE(?, track_clicks),
+    track_unsub=COALESCE(?, track_unsub)
+    WHERE id=?`).run(
+      title ?? current.title, subject ?? current.subject,
+      from_name ?? current.from_name, from_email ?? current.from_email,
+      reply_to ?? current.reply_to, html_body ?? current.html_body,
+      plain_body ?? current.plain_body, scheduled_at ?? current.scheduled_at,
+      status, list_id ?? null,
+      tracking_mode ?? null,
+      Number.isInteger(tracking_threshold) ? tracking_threshold : null,
+      Number.isInteger(tracking_window) ? tracking_window : null,
+      track_opens === undefined ? null : (track_opens ? 1 : 0),
+      track_clicks === undefined ? null : (track_clicks ? 1 : 0),
+      track_unsub === undefined ? null : (track_unsub ? 1 : 0),
+      req.params.id,
+    );
   res.json(db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id));
 });
 
@@ -737,6 +781,76 @@ router.delete('/campaigns/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// ── TOUCH-COUNT ENDPOINTS (for the smart-tracking UI) ────────────────────────
+
+// GET /api/email/lists/:id/touch-counts?window=6
+// Returns per-subscriber touch count for a list, used in the subscriber list UI
+// to show the "1st contact / 2nd contact" badge.
+router.get('/lists/:id/touch-counts', (req, res) => {
+  const window = Number.isInteger(parseInt(req.query.window)) ? parseInt(req.query.window) : 6;
+  const subs = db.prepare("SELECT id FROM email_subscribers WHERE list_id=? AND status='subscribed'").all(req.params.id);
+  const counts = getTouchCountsBulk(subs.map(s => s.id), window);
+  res.json({
+    window_months: window,
+    counts: Object.fromEntries(counts),
+  });
+});
+
+// GET /api/email/campaigns/:id/send-preview
+// Returns the breakdown for the pre-send dialog: how many recipients fall into
+// each touch-count bucket, and how many would be tracked vs. sent clean.
+router.get('/campaigns/:id/send-preview', (req, res) => {
+  const campaign = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Not found' });
+  const list = db.prepare('SELECT * FROM email_lists WHERE id=?').get(campaign.list_id);
+  if (!list) return res.status(404).json({ error: 'Campaign list missing' });
+
+  const subs = db.prepare("SELECT id FROM email_subscribers WHERE list_id=? AND status='subscribed'").all(campaign.list_id);
+  const window    = campaign.tracking_window || 6;
+  const mode      = campaign.tracking_mode || 'off';
+  const threshold = campaign.tracking_threshold || 3;
+  const alwaysWarm = !!(list && list.always_warm);
+
+  const counts = getTouchCountsBulk(subs.map(s => s.id), window);
+
+  // Histogram: 1st, 2nd, 3rd, 4+ contact (touchCount + 1 = nth contact for this send)
+  const buckets = { '1st': 0, '2nd': 0, '3rd': 0, '4+': 0 };
+  let trackedCount = 0;
+  for (const sub of subs) {
+    const touchCount = counts.get(sub.id) || 0;
+    const nth = touchCount + 1;
+    if (nth === 1) buckets['1st']++;
+    else if (nth === 2) buckets['2nd']++;
+    else if (nth === 3) buckets['3rd']++;
+    else buckets['4+']++;
+    if (shouldTrackRecipient({ mode, threshold, touchCount, alwaysWarm })) trackedCount++;
+  }
+
+  res.json({
+    total_recipients: subs.length,
+    buckets,
+    tracking: {
+      mode, threshold, window_months: window, always_warm: alwaysWarm,
+      track_opens:  !!campaign.track_opens,
+      track_clicks: !!campaign.track_clicks,
+      track_unsub:  !!campaign.track_unsub,
+      will_track:   trackedCount,
+      will_send_clean: subs.length - trackedCount,
+    },
+    list_name: list.name,
+  });
+});
+
+// PUT /api/email/lists/:id/always-warm — toggle the list-level override
+router.put('/lists/:id/always-warm', (req, res) => {
+  const { always_warm } = req.body;
+  const list = db.prepare('SELECT * FROM email_lists WHERE id=?').get(req.params.id);
+  if (!list) return res.status(404).json({ error: 'Not found' });
+  db.prepare('UPDATE email_lists SET always_warm=? WHERE id=?')
+    .run(always_warm ? 1 : 0, req.params.id);
+  res.json({ ok: true, always_warm: !!always_warm });
+});
+
 // ── SEND ──────────────────────────────────────────────────────────────────────
 
 router.post('/campaigns/:id/send', async (req, res) => {
@@ -745,6 +859,7 @@ router.post('/campaigns/:id/send', async (req, res) => {
   if (campaign.status === 'sent') return res.status(400).json({ error: 'Already sent' });
   if (campaign.status === 'sending') return res.status(400).json({ error: 'Currently sending' });
 
+  const list = db.prepare('SELECT * FROM email_lists WHERE id=?').get(campaign.list_id);
   const subscribers = db.prepare("SELECT * FROM email_subscribers WHERE list_id=? AND status='subscribed'").all(campaign.list_id);
   if (subscribers.length === 0) return res.status(400).json({ error: 'No active subscribers in list' });
 
@@ -752,11 +867,12 @@ router.post('/campaigns/:id/send', async (req, res) => {
   // baseUrl comes from the request — on Render this is studio.thegreenagents.com.
   // PUBLIC_URL env var can override (useful for local dev where req.host is localhost).
   const baseUrl = process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
+  const alwaysWarm = !!(list && list.always_warm);
   res.json({ ok: true, subscribers: subscribers.length });
 
   try {
     const results = await sendCampaign({
-      campaign, subscribers, baseUrl,
+      campaign, subscribers, baseUrl, alwaysWarm,
       onProgress: (pct) => {
         db.prepare('UPDATE email_campaigns SET sent_count=? WHERE id=?')
           .run(Math.round(subscribers.length * pct / 100), campaign.id);

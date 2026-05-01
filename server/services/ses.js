@@ -14,6 +14,7 @@ import crypto from 'crypto';
 import db from '../db.js';
 import { v4 as uuid } from 'uuid';
 import { applyTracking } from './tracking.js';
+import { getTouchCountsBulk, shouldTrackRecipient } from './touch-count.js';
 import { SESClient, GetSendQuotaCommand, ListIdentitiesCommand, GetIdentityVerificationAttributesCommand } from '@aws-sdk/client-ses';
 
 const REGION  = process.env.AWS_SES_REGION || 'eu-north-1';
@@ -166,17 +167,28 @@ function buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, html
 }
 
 // ── Send a single email — raw SES API, no SDK middleware ─────────────────────
-// If campaignId + subscriberId + baseUrl provided → tracking is injected.
+// Tracking is per-signal opt-in via track_opens / track_clicks / track_unsub.
+// listUnsubUrl is added to MIME headers only when track_unsub is true.
 // Returns { messageId } — used by sendCampaign to map bounces/complaints back.
-export async function sendEmail({ to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody, campaignId, subscriberId, baseUrl }) {
+export async function sendEmail({
+  to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody,
+  campaignId, subscriberId, baseUrl,
+  track_opens = false, track_clicks = false, track_unsub = false,
+}) {
   let finalHtml = htmlBody;
   let listUnsubUrl = null;
 
-  // Apply own-domain tracking (open pixel + click rewrite + unsub footer).
-  // Only when we have campaign + subscriber context — test sends skip tracking.
-  if (campaignId && subscriberId && baseUrl) {
-    finalHtml = applyTracking(htmlBody, { baseUrl, campaignId, subscriberId });
-    listUnsubUrl = `${baseUrl}/api/email/unsubscribe?sid=${subscriberId}&cid=${campaignId}`;
+  // Tracking is only ever applied when we have campaign + subscriber context
+  // (rules out test sends), AND at least one signal is requested.
+  const wantsTracking = (track_opens || track_clicks || track_unsub);
+  if (campaignId && subscriberId && baseUrl && wantsTracking) {
+    finalHtml = applyTracking(htmlBody, {
+      baseUrl, campaignId, subscriberId,
+      track_opens, track_clicks, track_unsub,
+    });
+    if (track_unsub) {
+      listUnsubUrl = `${baseUrl}/api/email/unsubscribe?sid=${subscriberId}&cid=${campaignId}`;
+    }
   }
 
   const raw = buildRawEmail({
@@ -193,13 +205,28 @@ export async function sendEmail({ to, toName, fromName, fromEmail, replyTo, subj
 }
 
 // ── Send a campaign ───────────────────────────────────────────────────────────
+// Decides per-recipient whether to apply tracking based on the campaign's
+// tracking_mode + tracking_threshold + tracking_window settings, plus the
+// list's always_warm flag. See touch-count.js for the rules.
+//
 // Writes one email_sends row per subscriber AT SEND TIME, capturing the
-// SES MessageId. This is what makes SNS bounce/complaint webhooks work later —
-// the SNS payload's mail.messageId maps back to subscriber_id via this table.
-export async function sendCampaign({ campaign, subscribers, baseUrl, onProgress }) {
-  const results = { sent: 0, failed: 0, errors: [] };
+// SES MessageId — this is what makes SNS bounce/complaint webhooks work.
+export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm = false, onProgress }) {
+  const results = { sent: 0, failed: 0, errors: [], tracked: 0, untracked: 0 };
   const BATCH_SIZE = 10;
   const DELAY_MS   = 800;
+
+  // Pre-compute touch counts in one query — avoids N+1 when sending to thousands
+  const window = campaign.tracking_window ?? 6;
+  const touchCounts = getTouchCountsBulk(subscribers.map(s => s.id), window);
+
+  const mode      = campaign.tracking_mode || 'off';
+  const threshold = campaign.tracking_threshold || 3;
+  const flags = {
+    track_opens:  !!campaign.track_opens,
+    track_clicks: !!campaign.track_clicks,
+    track_unsub:  !!campaign.track_unsub,
+  };
 
   const insertSend = db.prepare(`INSERT INTO email_sends
     (id, campaign_id, subscriber_id, message_id, status, sent_at)
@@ -217,6 +244,10 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, onProgress 
         const htmlBody  = (campaign.html_body  || '').replace(/\[Name\]/gi, firstName);
         const plainBody = (campaign.plain_body || htmlToPlain(campaign.html_body || '')).replace(/\[Name\]/gi, firstName);
 
+        // Decide whether to track this specific recipient
+        const touchCount = touchCounts.get(sub.id) || 0;
+        const trackThis = shouldTrackRecipient({ mode, threshold, touchCount, alwaysWarm });
+
         const { messageId } = await sendEmail({
           to:          sub.email,
           toName:      sub.name,
@@ -229,10 +260,16 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, onProgress 
           campaignId:    campaign.id,
           subscriberId:  sub.id,
           baseUrl,
+          // If trackThis is false, all three flags collapse to false → clean send.
+          // If true, the campaign's own flags decide which signals to inject.
+          track_opens:  trackThis && flags.track_opens,
+          track_clicks: trackThis && flags.track_clicks,
+          track_unsub:  trackThis && flags.track_unsub,
         });
 
         insertSend.run(uuid(), campaign.id, sub.id, messageId);
         results.sent++;
+        if (trackThis) results.tracked++; else results.untracked++;
       } catch (err) {
         try { markFailed.run(uuid(), campaign.id, sub.id); } catch {}
         results.failed++;
