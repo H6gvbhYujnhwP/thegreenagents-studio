@@ -74,15 +74,24 @@ function rewriteLinks(html, { baseUrl, campaignId, subscriberId }) {
     });
 }
 
-// ── Append unsubscribe footer if not already present ─────────────────────────
-// Mirrors Sendy: every campaign email gets an unsubscribe link.
+// ── Append unsubscribe footer ────────────────────────────────────────────────
+// Header-only mode: we rely on the List-Unsubscribe MIME headers (RFC 8058)
+// to provide the unsubscribe path. Gmail and modern Outlook render their own
+// native "Unsubscribe" button next to the sender name when those headers are
+// present, so a visible footer is no longer added. The legal/RFC obligation
+// is satisfied by the headers alone. If you need a visible footer back for
+// B2C lists where some recipients use older clients without header support,
+// flip the flag below to true.
+const SHOW_VISIBLE_UNSUB_FOOTER = false;
+
 function appendUnsubFooter(html, { baseUrl, campaignId, subscriberId }) {
   if (!html) return html;
+  if (!SHOW_VISIBLE_UNSUB_FOOTER) return html;
   // If campaign HTML already contains an unsubscribe link, leave it alone
   if (/unsubscribe/i.test(html)) return html;
 
   const unsubUrl = `${baseUrl}/api/email/unsubscribe?sid=${subscriberId}&cid=${campaignId}`;
-  const footer = `<p style="margin-top:32px;font-size:11px;color:#999;text-align:center;border-top:1px solid #eee;padding-top:16px;">You are receiving this because you subscribed to our list. <a href="${unsubUrl}" style="color:#999;">Unsubscribe</a></p>`;
+  const footer = `<p style="margin-top:32px;font-size:11px;color:#999;text-align:center;"><a href="${unsubUrl}" style="color:#999;">Unsubscribe</a></p>`;
 
   if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${footer}</body>`);
   return html + footer;

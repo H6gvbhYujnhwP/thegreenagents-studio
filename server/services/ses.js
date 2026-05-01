@@ -138,20 +138,28 @@ function buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, html
 
   headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
 
+  // Encode bodies as base64 with hard line wraps at 76 chars (RFC 2045).
+  // Previously declared quoted-printable but didn't actually QP-encode, which
+  // caused recipient clients (or relays) to interpret literal '=' chars in
+  // tracking URLs as QP escape sequences — corrupting hrefs and styles.
+  // base64 is the safest choice for HTML containing arbitrary URLs and styles.
+  const htmlB64  = Buffer.from(htmlBody, 'utf8').toString('base64').replace(/(.{76})/g, '$1\r\n');
+  const plainB64 = Buffer.from(plain,    'utf8').toString('base64').replace(/(.{76})/g, '$1\r\n');
+
   return [
     ...headers,
     ``,
     `--${boundary}`,
     `Content-Type: text/plain; charset=UTF-8`,
-    `Content-Transfer-Encoding: quoted-printable`,
+    `Content-Transfer-Encoding: base64`,
     ``,
-    plain,
+    plainB64,
     ``,
     `--${boundary}`,
     `Content-Type: text/html; charset=UTF-8`,
-    `Content-Transfer-Encoding: quoted-printable`,
+    `Content-Transfer-Encoding: base64`,
     ``,
-    htmlBody,
+    htmlB64,
     ``,
     `--${boundary}--`,
   ].join('\r\n');
