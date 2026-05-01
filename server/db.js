@@ -275,4 +275,52 @@ db.exec(`
   }
 }
 
+// ── 10. TRACKING (open/click/bounce/spam) ─────────────────────────────────────
+// New tables + columns for own-domain tracking, mirroring Sendy's approach.
+
+// 10a. email_sends.message_id — SES MessageId, used to map SNS bounce/complaint
+//     notifications back to the right subscriber. Nothing else uses it.
+{
+  const sendCols = db.prepare('PRAGMA table_info(email_sends)').all().map(r => r.name);
+  if (!sendCols.includes('message_id')) {
+    db.exec(`ALTER TABLE email_sends ADD COLUMN message_id TEXT`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_email_sends_message_id ON email_sends(message_id)`);
+    console.log('[db] migration: added message_id to email_sends');
+  }
+  // Useful for the "did we already record this open" check on the open pixel
+  if (!sendCols.includes('open_count')) {
+    db.exec(`ALTER TABLE email_sends ADD COLUMN open_count INTEGER DEFAULT 0`);
+    console.log('[db] migration: added open_count to email_sends');
+  }
+  if (!sendCols.includes('click_count')) {
+    db.exec(`ALTER TABLE email_sends ADD COLUMN click_count INTEGER DEFAULT 0`);
+    console.log('[db] migration: added click_count to email_sends');
+  }
+}
+
+// 10b. email_campaign_links — hash → original URL, per campaign.
+//     Lets click links stay short in emails; we look up the destination on click.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS email_campaign_links (
+    hash TEXT NOT NULL,
+    campaign_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (campaign_id, hash)
+  );
+`);
+
+// 10c. email_sns_events — raw log of every SNS notification we receive.
+//     Append-only, used for debugging when a bounce/complaint didn't take effect.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS email_sns_events (
+    id TEXT PRIMARY KEY,
+    type TEXT,
+    message_id TEXT,
+    payload TEXT,
+    received_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_email_sns_events_message_id ON email_sns_events(message_id);
+`);
+
 export default db;

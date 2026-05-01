@@ -1,8 +1,10 @@
 import express from 'express';
 import { v4 as uuid } from 'uuid';
+import https from 'https';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { sendCampaign, getQuota, getVerifiedDomains } from '../services/ses.js';
+import { getLinkUrl, TRANSPARENT_GIF } from '../services/tracking.js';
 import dns from 'dns';
 import { promisify } from 'util';
 
@@ -10,10 +12,265 @@ const router  = express.Router();
 const resolve = promisify(dns.resolveTxt);
 const resolveMx = promisify(dns.resolveMx);
 
+// ── Public routes (no auth) ───────────────────────────────────────────────────
+// These are hit by recipients' email clients and by AWS SNS — never by the
+// logged-in user — so they bypass requireAuth.
+const PUBLIC_PREFIXES = ['/unsubscribe', '/track/', '/sns'];
+
 router.use((req, res, next) => {
-  if (req.path.startsWith('/unsubscribe')) return next();
+  if (PUBLIC_PREFIXES.some(p => req.path.startsWith(p))) return next();
   requireAuth(req, res, next);
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+// TRACKING ENDPOINTS (public — recipient's email client hits these)
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── Open tracking pixel ──────────────────────────────────────────────────────
+// URL: /api/email/track/open/:campaignId/:subscriberId.gif
+// The .gif extension is cosmetic — helps some spam filters trust it more.
+router.get('/track/open/:campaignId/:subscriberId.gif', (req, res) => {
+  trackOpen(req.params.campaignId, req.params.subscriberId);
+  // Always return the GIF — never let DB problems break image rendering
+  res.setHeader('Content-Type', 'image/gif');
+  res.setHeader('Content-Length', TRANSPARENT_GIF.length);
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
+  res.end(TRANSPARENT_GIF);
+});
+
+// Fallback without .gif extension (in case some client strips it)
+router.get('/track/open/:campaignId/:subscriberId', (req, res) => {
+  trackOpen(req.params.campaignId, req.params.subscriberId);
+  res.setHeader('Content-Type', 'image/gif');
+  res.setHeader('Content-Length', TRANSPARENT_GIF.length);
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.end(TRANSPARENT_GIF);
+});
+
+function trackOpen(campaignId, subscriberId) {
+  try {
+    // Find the email_sends row for this (campaign, subscriber)
+    const send = db.prepare(`SELECT id, opened_at, open_count FROM email_sends
+                             WHERE campaign_id=? AND subscriber_id=?`).get(campaignId, subscriberId);
+    if (!send) return; // unknown — could be a stale link or a forwarded email
+
+    if (!send.opened_at) {
+      // First open — bump campaign open_count
+      db.prepare(`UPDATE email_sends SET status='opened', opened_at=datetime('now'), open_count=open_count+1
+                  WHERE id=?`).run(send.id);
+      db.prepare(`UPDATE email_campaigns SET open_count=open_count+1 WHERE id=?`).run(campaignId);
+    } else {
+      // Repeat open — count it on the send row only (campaign open_count is unique opens)
+      db.prepare(`UPDATE email_sends SET open_count=open_count+1 WHERE id=?`).run(send.id);
+    }
+  } catch (err) {
+    console.error('[track/open] error:', err.message);
+  }
+}
+
+// ── Click tracking ───────────────────────────────────────────────────────────
+// URL: /api/email/track/click/:campaignId/:subscriberId/:hash
+// Records click, then 302-redirects to the original URL.
+router.get('/track/click/:campaignId/:subscriberId/:hash', (req, res) => {
+  const { campaignId, subscriberId, hash } = req.params;
+  const url = getLinkUrl(campaignId, hash);
+  if (!url) return res.status(404).send('Link not found');
+
+  try {
+    // Record the click
+    db.prepare(`INSERT INTO email_link_clicks (id, campaign_id, subscriber_id, url, clicked_at)
+                VALUES (?, ?, ?, ?, datetime('now'))`).run(uuid(), campaignId, subscriberId, url);
+
+    // Update the send row — first click marks it; subsequent clicks bump count
+    const send = db.prepare(`SELECT id, clicked_at FROM email_sends
+                             WHERE campaign_id=? AND subscriber_id=?`).get(campaignId, subscriberId);
+    if (send) {
+      if (!send.clicked_at) {
+        db.prepare(`UPDATE email_sends SET status='clicked', clicked_at=datetime('now'), click_count=click_count+1
+                    WHERE id=?`).run(send.id);
+        db.prepare(`UPDATE email_campaigns SET click_count=click_count+1 WHERE id=?`).run(campaignId);
+      } else {
+        db.prepare(`UPDATE email_sends SET click_count=click_count+1 WHERE id=?`).run(send.id);
+      }
+    }
+  } catch (err) {
+    console.error('[track/click] error:', err.message);
+    // Still redirect even if DB write fails — recipient experience matters most
+  }
+
+  res.redirect(302, url);
+});
+
+// ── SNS webhook for bounces + complaints ─────────────────────────────────────
+// AWS SES → SNS topic → POSTs JSON to this endpoint.
+// Handles three message types:
+//   - SubscriptionConfirmation: GET the SubscribeURL to confirm
+//   - Notification: parse Message field for bounce/complaint
+//   - UnsubscribeConfirmation: just log
+//
+// Note: We accept text/plain bodies because AWS SNS sends Content-Type:
+// text/plain by default. express.json() at the app level will only parse
+// application/json, so we re-parse here.
+router.post('/sns', express.text({ type: '*/*', limit: '500kb' }), (req, res) => {
+  let body;
+  try {
+    body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+  } catch {
+    return res.status(400).json({ error: 'Invalid JSON' });
+  }
+
+  // Always log the raw event for debugging
+  try {
+    db.prepare(`INSERT INTO email_sns_events (id, type, payload) VALUES (?, ?, ?)`)
+      .run(uuid(), body?.Type || 'unknown', typeof req.body === 'string' ? req.body : JSON.stringify(body));
+  } catch {}
+
+  // 1. Subscription confirmation — visit SubscribeURL to confirm the topic
+  if (body.Type === 'SubscriptionConfirmation' && body.SubscribeURL) {
+    // Defensive: only confirm if URL is from amazonaws.com
+    try {
+      const u = new URL(body.SubscribeURL);
+      if (!u.hostname.endsWith('amazonaws.com')) {
+        console.warn('[sns] refusing to confirm non-AWS subscribe URL:', u.hostname);
+        return res.status(400).json({ error: 'Invalid SubscribeURL host' });
+      }
+      https.get(body.SubscribeURL, () => {
+        console.log('[sns] subscription confirmed for topic:', body.TopicArn);
+      }).on('error', err => console.error('[sns] confirm error:', err.message));
+    } catch (err) {
+      console.error('[sns] bad SubscribeURL:', err.message);
+    }
+    return res.json({ ok: true });
+  }
+
+  // 2. Notification — extract bounce or complaint
+  if (body.Type === 'Notification' && body.Message) {
+    let msg;
+    try { msg = JSON.parse(body.Message); }
+    catch { return res.json({ ok: true }); }
+
+    const messageId = msg?.mail?.messageId;
+
+    if (msg.notificationType === 'Bounce') {
+      handleBounce(msg, messageId);
+    } else if (msg.notificationType === 'Complaint') {
+      handleComplaint(msg, messageId);
+    }
+    // Delivery notifications can be ignored — we already track sent state
+    return res.json({ ok: true });
+  }
+
+  res.json({ ok: true });
+});
+
+function handleBounce(msg, messageId) {
+  const isPermanent = msg.bounce?.bounceType === 'Permanent';
+  const recipients  = msg.bounce?.bouncedRecipients || [];
+
+  for (const r of recipients) {
+    const email = (r.emailAddress || '').toLowerCase().trim();
+    if (!email) continue;
+
+    // Look up the send row by messageId first (most reliable)
+    let send = messageId ? db.prepare(`SELECT * FROM email_sends WHERE message_id=?`).get(messageId) : null;
+
+    // Fallback — find by email + campaign via the most recent send
+    if (!send) {
+      const sub = db.prepare(`SELECT id FROM email_subscribers WHERE email=? ORDER BY created_at DESC LIMIT 1`).get(email);
+      if (sub) {
+        send = db.prepare(`SELECT * FROM email_sends WHERE subscriber_id=? ORDER BY sent_at DESC LIMIT 1`).get(sub.id);
+      }
+    }
+
+    if (send) {
+      db.prepare(`UPDATE email_sends SET status='bounced', bounced_at=datetime('now') WHERE id=?`).run(send.id);
+      db.prepare(`UPDATE email_campaigns SET bounce_count=bounce_count+1 WHERE id=?`).run(send.campaign_id);
+
+      // Permanent bounces — mark subscriber so we never email them again
+      if (isPermanent) {
+        db.prepare(`UPDATE email_subscribers SET status='bounced', bounced_at=datetime('now') WHERE id=?`)
+          .run(send.subscriber_id);
+        // Refresh subscriber count on the list
+        const sub = db.prepare(`SELECT list_id FROM email_subscribers WHERE id=?`).get(send.subscriber_id);
+        if (sub) {
+          db.prepare(`UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?`)
+            .run(sub.list_id, sub.list_id);
+        }
+      }
+    }
+  }
+}
+
+function handleComplaint(msg, messageId) {
+  const recipients = msg.complaint?.complainedRecipients || [];
+
+  for (const r of recipients) {
+    const email = (r.emailAddress || '').toLowerCase().trim();
+    if (!email) continue;
+
+    let send = messageId ? db.prepare(`SELECT * FROM email_sends WHERE message_id=?`).get(messageId) : null;
+
+    if (!send) {
+      const sub = db.prepare(`SELECT id FROM email_subscribers WHERE email=? ORDER BY created_at DESC LIMIT 1`).get(email);
+      if (sub) {
+        send = db.prepare(`SELECT * FROM email_sends WHERE subscriber_id=? ORDER BY sent_at DESC LIMIT 1`).get(sub.id);
+      }
+    }
+
+    if (send) {
+      db.prepare(`UPDATE email_campaigns SET spam_count=spam_count+1 WHERE id=?`).run(send.campaign_id);
+      // Mark subscriber as spam — Sendy does the same, never email them again
+      db.prepare(`UPDATE email_subscribers SET status='spam', spam_at=datetime('now') WHERE id=?`)
+        .run(send.subscriber_id);
+      const sub = db.prepare(`SELECT list_id FROM email_subscribers WHERE id=?`).get(send.subscriber_id);
+      if (sub) {
+        db.prepare(`UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?`)
+          .run(sub.list_id, sub.list_id);
+      }
+    }
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// UNSUBSCRIBE (public — recipient clicks footer link, or Gmail one-click POSTs)
+// ═════════════════════════════════════════════════════════════════════════════
+
+// GET = recipient clicked unsubscribe link in email
+router.get('/unsubscribe', (req, res) => {
+  const { sid, cid } = req.query;
+  doUnsub(sid, cid);
+  res.send(`<!DOCTYPE html><html><head><title>Unsubscribed</title>
+    <style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f3;}
+    .box{text-align:center;padding:40px;max-width:400px;}h1{font-size:22px;font-weight:500;color:#1a1a1a;margin-bottom:12px;}
+    p{color:#666;font-size:14px;line-height:1.6;}</style></head>
+    <body><div class="box"><h1>You've been unsubscribed</h1>
+    <p>Your email address has been removed from this mailing list.</p>
+    </div></body></html>`);
+});
+
+// POST = RFC 8058 one-click unsubscribe (Gmail/Outlook header button)
+router.post('/unsubscribe', express.urlencoded({ extended: true }), (req, res) => {
+  const sid = req.query.sid || req.body?.sid;
+  const cid = req.query.cid || req.body?.cid;
+  doUnsub(sid, cid);
+  res.json({ ok: true });
+});
+
+function doUnsub(sid, cid) {
+  if (!sid) return false;
+  const sub = db.prepare('SELECT * FROM email_subscribers WHERE id=?').get(sid);
+  if (!sub) return false;
+  db.prepare("UPDATE email_subscribers SET status='unsubscribed', unsubscribed_at=datetime('now') WHERE id=?").run(sid);
+  db.prepare("UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?")
+    .run(sub.list_id, sub.list_id);
+  if (cid) db.prepare('UPDATE email_campaigns SET unsubscribe_count=unsubscribe_count+1 WHERE id=?').run(cid);
+  return true;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ALL ROUTES BELOW REQUIRE AUTH
+// ═════════════════════════════════════════════════════════════════════════════
 
 // ── STATS ─────────────────────────────────────────────────────────────────────
 
@@ -293,7 +550,9 @@ router.post('/campaigns/:id/send', async (req, res) => {
   if (subscribers.length === 0) return res.status(400).json({ error: 'No active subscribers in list' });
 
   db.prepare("UPDATE email_campaigns SET status='sending' WHERE id=?").run(campaign.id);
-  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  // baseUrl comes from the request — on Render this is studio.thegreenagents.com.
+  // PUBLIC_URL env var can override (useful for local dev where req.host is localhost).
+  const baseUrl = process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
   res.json({ ok: true, subscribers: subscribers.length });
 
   try {
@@ -304,34 +563,14 @@ router.post('/campaigns/:id/send', async (req, res) => {
           .run(Math.round(subscribers.length * pct / 100), campaign.id);
       },
     });
-    const insertSend = db.prepare('INSERT OR IGNORE INTO email_sends (id,campaign_id,subscriber_id,status) VALUES (?,?,?,?)');
-    db.transaction(() => { for (const sub of subscribers) insertSend.run(uuid(), campaign.id, sub.id, 'sent'); })();
+    // Note: email_sends rows are now written inside sendCampaign() at send time
+    // (with message_id for SNS bounce/complaint mapping). No bulk insert here.
     db.prepare(`UPDATE email_campaigns SET status='sent', sent_at=datetime('now'), sent_count=? WHERE id=?`)
       .run(results.sent, campaign.id);
   } catch (err) {
     db.prepare("UPDATE email_campaigns SET status='failed' WHERE id=?").run(campaign.id);
     console.error('[email/send] error:', err.message);
   }
-});
-
-// ── UNSUBSCRIBE (public) ──────────────────────────────────────────────────────
-
-router.get('/unsubscribe', (req, res) => {
-  const { sid, cid } = req.query;
-  if (!sid) return res.status(400).send('Invalid unsubscribe link');
-  const sub = db.prepare('SELECT * FROM email_subscribers WHERE id=?').get(sid);
-  if (!sub) return res.status(404).send('Subscriber not found');
-  db.prepare("UPDATE email_subscribers SET status='unsubscribed', unsubscribed_at=datetime('now') WHERE id=?").run(sid);
-  db.prepare("UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?")
-    .run(sub.list_id, sub.list_id);
-  if (cid) db.prepare('UPDATE email_campaigns SET unsubscribe_count=unsubscribe_count+1 WHERE id=?').run(cid);
-  res.send(`<!DOCTYPE html><html><head><title>Unsubscribed</title>
-    <style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f3;}
-    .box{text-align:center;padding:40px;max-width:400px;}h1{font-size:22px;font-weight:500;color:#1a1a1a;margin-bottom:12px;}
-    p{color:#666;font-size:14px;line-height:1.6;}</style></head>
-    <body><div class="box"><h1>You've been unsubscribed</h1>
-    <p>Your email address has been removed from this mailing list.</p>
-    </div></body></html>`);
 });
 
 // ── DOMAIN HEALTH ─────────────────────────────────────────────────────────────
@@ -430,6 +669,8 @@ router.post('/campaigns/:id/test', async (req, res) => {
     const html = rawHtml.includes('</body>') ? rawHtml.replace('</body>', `${testFooter}</body>`) : rawHtml + testFooter;
 
     const { sendEmail } = await import('../services/ses.js');
+    // NOTE: no campaignId/subscriberId/baseUrl — test sends skip tracking
+    // injection so they don't pollute real campaign stats.
     await sendEmail({
       to:        test_email,
       toName:    'Test Recipient',

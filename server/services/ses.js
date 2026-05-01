@@ -4,10 +4,16 @@
  * This is exactly how Sendy works (class.amazonses.php) and avoids the SDK
  * middleware that attaches account-level default configuration sets,
  * which cause AWS to inject the awstrack.me tracking pixel.
+ *
+ * Tracking is injected BEFORE handing to SES, so opens/clicks point to our
+ * own domain — same approach as Sendy.
  */
 
 import https from 'https';
 import crypto from 'crypto';
+import db from '../db.js';
+import { v4 as uuid } from 'uuid';
+import { applyTracking } from './tracking.js';
 import { SESClient, GetSendQuotaCommand, ListIdentitiesCommand, GetIdentityVerificationAttributesCommand } from '@aws-sdk/client-ses';
 
 const REGION  = process.env.AWS_SES_REGION || 'eu-north-1';
@@ -84,20 +90,38 @@ function sesRequest(params) {
   });
 }
 
+// ── Extract MessageId from SES XML response ───────────────────────────────────
+function extractMessageId(xml) {
+  const m = xml && xml.match(/<MessageId>([^<]+)<\/MessageId>/);
+  return m ? m[1] : null;
+}
+
 // ── Build raw MIME email ──────────────────────────────────────────────────────
-function buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody }) {
+function buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody, listUnsubUrl }) {
   const boundary   = `b_${Date.now()}_${Math.random().toString(36).slice(2)}`;
   const toAddress  = toName ? `${toName} <${to}>` : to;
   const plain      = plainBody || htmlToPlain(htmlBody);
   const subjEnc    = `=?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`;
 
-  return [
+  const headers = [
     `From: ${fromName} <${fromEmail}>`,
     `To: ${toAddress}`,
     `Reply-To: ${replyTo || fromEmail}`,
     `Subject: ${subjEnc}`,
     `MIME-Version: 1.0`,
-    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+  ];
+
+  // List-Unsubscribe headers (RFC 2369 + RFC 8058) — Gmail/Outlook deliverability win.
+  // Only added when we have a campaign-bound unsubscribe URL.
+  if (listUnsubUrl) {
+    headers.push(`List-Unsubscribe: <${listUnsubUrl}>`);
+    headers.push(`List-Unsubscribe-Post: List-Unsubscribe=One-Click`);
+  }
+
+  headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
+
+  return [
+    ...headers,
     ``,
     `--${boundary}`,
     `Content-Type: text/plain; charset=UTF-8`,
@@ -116,19 +140,48 @@ function buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, html
 }
 
 // ── Send a single email — raw SES API, no SDK middleware ─────────────────────
-export async function sendEmail({ to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody }) {
-  const raw = buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody });
-  await sesRequest({
+// If campaignId + subscriberId + baseUrl provided → tracking is injected.
+// Returns { messageId } — used by sendCampaign to map bounces/complaints back.
+export async function sendEmail({ to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody, campaignId, subscriberId, baseUrl }) {
+  let finalHtml = htmlBody;
+  let listUnsubUrl = null;
+
+  // Apply own-domain tracking (open pixel + click rewrite + unsub footer).
+  // Only when we have campaign + subscriber context — test sends skip tracking.
+  if (campaignId && subscriberId && baseUrl) {
+    finalHtml = applyTracking(htmlBody, { baseUrl, campaignId, subscriberId });
+    listUnsubUrl = `${baseUrl}/api/email/unsubscribe?sid=${subscriberId}&cid=${campaignId}`;
+  }
+
+  const raw = buildRawEmail({
+    to, toName, fromName, fromEmail, replyTo, subject,
+    htmlBody: finalHtml, plainBody, listUnsubUrl,
+  });
+
+  const xml = await sesRequest({
     Action:            'SendRawEmail',
     'RawMessage.Data': Buffer.from(raw).toString('base64'),
   });
+
+  return { messageId: extractMessageId(xml) };
 }
 
 // ── Send a campaign ───────────────────────────────────────────────────────────
+// Writes one email_sends row per subscriber AT SEND TIME, capturing the
+// SES MessageId. This is what makes SNS bounce/complaint webhooks work later —
+// the SNS payload's mail.messageId maps back to subscriber_id via this table.
 export async function sendCampaign({ campaign, subscribers, baseUrl, onProgress }) {
   const results = { sent: 0, failed: 0, errors: [] };
   const BATCH_SIZE = 10;
   const DELAY_MS   = 800;
+
+  const insertSend = db.prepare(`INSERT INTO email_sends
+    (id, campaign_id, subscriber_id, message_id, status, sent_at)
+    VALUES (?, ?, ?, ?, 'sent', datetime('now'))`);
+
+  const markFailed = db.prepare(`INSERT INTO email_sends
+    (id, campaign_id, subscriber_id, status, sent_at)
+    VALUES (?, ?, ?, 'failed', datetime('now'))`);
 
   for (let i = 0; i < subscribers.length; i += BATCH_SIZE) {
     const batch = subscribers.slice(i, i + BATCH_SIZE);
@@ -137,9 +190,25 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, onProgress 
         const firstName = sub.name ? sub.name.trim().split(/\s+/)[0] : '';
         const htmlBody  = (campaign.html_body  || '').replace(/\[Name\]/gi, firstName);
         const plainBody = (campaign.plain_body || htmlToPlain(campaign.html_body || '')).replace(/\[Name\]/gi, firstName);
-        await sendEmail({ to: sub.email, toName: sub.name, fromName: campaign.from_name, fromEmail: campaign.from_email, replyTo: campaign.reply_to, subject: campaign.subject, htmlBody, plainBody });
+
+        const { messageId } = await sendEmail({
+          to:          sub.email,
+          toName:      sub.name,
+          fromName:    campaign.from_name,
+          fromEmail:   campaign.from_email,
+          replyTo:     campaign.reply_to,
+          subject:     campaign.subject,
+          htmlBody,
+          plainBody,
+          campaignId:    campaign.id,
+          subscriberId:  sub.id,
+          baseUrl,
+        });
+
+        insertSend.run(uuid(), campaign.id, sub.id, messageId);
         results.sent++;
       } catch (err) {
+        try { markFailed.run(uuid(), campaign.id, sub.id); } catch {}
         results.failed++;
         results.errors.push({ email: sub.email, error: err.message });
       }
