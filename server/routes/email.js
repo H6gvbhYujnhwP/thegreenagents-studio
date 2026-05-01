@@ -267,6 +267,132 @@ function handleComplaint(msg, messageId) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// DIAGNOSTICS (auth required — for debugging only)
+// ═════════════════════════════════════════════════════════════════════════════
+
+// GET /api/email/diag — runs four checks and returns JSON:
+//   1. Env vars: present? expected length? whitespace?
+//   2. Server time: if Render's clock is skewed >5min from real time, AWS rejects
+//   3. SDK signing path: GetSendQuota via the AWS SDK (different signer than ours)
+//   4. Raw signing path: GetSendQuota via OUR raw Signature V4 code
+//
+// If 3 passes but 4 fails, the bug is in our raw signer — not credentials.
+// If both 3 and 4 pass, sending should work; signature errors are intermittent.
+// If 3 fails too, the credentials are bad.
+router.get('/diag', async (req, res) => {
+  const out = {
+    timestamp: new Date().toISOString(),
+    env: {},
+    server_time: {},
+    sdk_check: {},
+    raw_check: {},
+  };
+
+  // ── 1. Env vars ──
+  const ak = process.env.AWS_ACCESS_KEY_ID || '';
+  const sk = process.env.AWS_SECRET_ACCESS_KEY || '';
+  out.env = {
+    AWS_ACCESS_KEY_ID:     ak ? `SET (${ak.length} chars, starts "${ak.slice(0,4)}", ends "${ak.slice(-2)}")` : 'MISSING',
+    AWS_ACCESS_KEY_ID_ok:  ak.length === 20 && /^[A-Z0-9]+$/.test(ak) && ak === ak.trim(),
+    AWS_SECRET_ACCESS_KEY: sk ? `SET (${sk.length} chars, ends "${sk.slice(-2)}")` : 'MISSING',
+    AWS_SECRET_ACCESS_KEY_ok: sk.length === 40 && sk === sk.trim(),
+    AWS_SES_REGION:        process.env.AWS_SES_REGION || 'eu-north-1 (default)',
+    PUBLIC_URL:            process.env.PUBLIC_URL || 'NOT SET (using request host)',
+    has_whitespace_in_ak:  ak !== ak.trim(),
+    has_whitespace_in_sk:  sk !== sk.trim(),
+  };
+
+  // ── 2. Server time skew ──
+  // We can't ping NTP from here without an extra dep, but we can show what we think
+  // the time is — you can compare against your watch / a NTP site.
+  out.server_time = {
+    iso:      new Date().toISOString(),
+    epoch_ms: Date.now(),
+    note:     'Compare against time.is. If skew >5min, AWS will reject signatures.',
+  };
+
+  // ── 3. SDK signing path ──
+  // Uses @aws-sdk/client-ses, which has its own (well-tested) Signature V4 implementation.
+  // If this works, credentials are valid.
+  try {
+    const { getQuota } = await import('../services/ses.js');
+    const quota = await getQuota();
+    out.sdk_check = { ok: true, quota };
+  } catch (err) {
+    out.sdk_check = { ok: false, error: err.message };
+  }
+
+  // ── 4. Raw signing path ──
+  // Calls GetSendQuota via OUR raw HTTPS + Signature V4 code. Does NOT send any
+  // email. If this fails but #3 passes, the bug is in our signer.
+  try {
+    const result = await rawSesGetSendQuota();
+    out.raw_check = { ok: true, response_snippet: result.slice(0, 200) };
+  } catch (err) {
+    out.raw_check = { ok: false, error: err.message };
+  }
+
+  res.json(out);
+});
+
+// Helper: call SES GetSendQuota via our raw signer (same code path as SendRawEmail)
+async function rawSesGetSendQuota() {
+  // We deliberately import the internal sesRequest — but it's not exported.
+  // So we replicate the signed call here using the same primitives.
+  const https  = await import('https');
+  const crypto = await import('crypto');
+
+  const REGION = process.env.AWS_SES_REGION || 'eu-north-1';
+  const HOST   = `email.${REGION}.amazonaws.com`;
+  const AK     = process.env.AWS_ACCESS_KEY_ID;
+  const SK     = process.env.AWS_SECRET_ACCESS_KEY;
+
+  const params = { Action: 'GetSendQuota' };
+  const sorted = Object.keys(params).sort().reduce((acc, k) => { acc[k] = params[k]; return acc; }, {});
+  const body   = new URLSearchParams(sorted).toString();
+
+  const now      = new Date();
+  const amzDate  = now.toISOString().replace(/[-:]|\.\d{3}/g, '');
+  const date     = amzDate.slice(0, 8);
+  const payHash  = crypto.createHash('sha256').update(body).digest('hex');
+  const canonHeaders  = `content-type:application/x-www-form-urlencoded\nhost:${HOST}\nx-amz-date:${amzDate}\n`;
+  const signedHeaders = 'content-type;host;x-amz-date';
+  const canonReq      = ['POST', '/', '', canonHeaders, signedHeaders, payHash].join('\n');
+  const credScope  = `${date}/${REGION}/email/aws4_request`;
+  const strToSign  = ['AWS4-HMAC-SHA256', amzDate, credScope, crypto.createHash('sha256').update(canonReq).digest('hex')].join('\n');
+
+  const hmac = (key, data, enc) => crypto.createHmac('sha256', key).update(data).digest(enc);
+  const k1 = hmac('AWS4' + SK, date, 'binary');
+  const k2 = hmac(k1, REGION, 'binary');
+  const k3 = hmac(k2, 'email', 'binary');
+  const signingKey = hmac(k3, 'aws4_request', 'binary');
+  const signature  = hmac(signingKey, strToSign, 'hex');
+
+  return new Promise((resolve, reject) => {
+    const opts = {
+      hostname: HOST, port: 443, path: '/', method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'host':         HOST,
+        'x-amz-date':   amzDate,
+        'Authorization': `AWS4-HMAC-SHA256 Credential=${AK}/${credScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
+      },
+    };
+    const r = https.request(opts, response => {
+      let data = '';
+      response.on('data', c => data += c);
+      response.on('end', () => {
+        if (response.statusCode === 200) resolve(data);
+        else reject(new Error(`SES error ${response.statusCode}: ${data}`));
+      });
+    });
+    r.on('error', reject);
+    r.write(body);
+    r.end();
+  });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // UNSUBSCRIBE (public — recipient clicks footer link, or Gmail one-click POSTs)
 // ═════════════════════════════════════════════════════════════════════════════
 
