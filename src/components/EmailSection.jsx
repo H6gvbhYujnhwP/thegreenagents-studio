@@ -37,6 +37,187 @@ function Modal({title,children,onClose,wide}){
     </div>
   </div>);
 }
+
+// ── Touch-count badge for the subscriber list ────────────────────────────────
+// 1st = grey (cold), 2nd = amber (warming), 3rd+ = teal (warm)
+function touchBadge(n){
+  if(!n||n===0) return <Badge label="1st contact" color="#444441" bg="#F1EFE8"/>;
+  if(n===1)     return <Badge label="2nd contact" color="#633806" bg="#FAEEDA"/>;
+  return        <Badge label={`${n+1}${suffix(n+1)} contact`} color="#085041" bg="#E1F5EE"/>;
+}
+function suffix(n){const s=['th','st','nd','rd'],v=n%100;return s[(v-20)%10]||s[v]||s[0];}
+
+// ── Toggle switch (matches the design mockup) ────────────────────────────────
+function Toggle({checked,onChange}){
+  return(<label style={{position:'relative',display:'inline-block',width:36,height:20,flexShrink:0,cursor:'pointer'}}>
+    <input type="checkbox" checked={checked} onChange={e=>onChange(e.target.checked)} style={{opacity:0,width:0,height:0}}/>
+    <span style={{position:'absolute',inset:0,background:checked?TEXT:'#d0d0cc',transition:'0.15s',borderRadius:20}}>
+      <span style={{position:'absolute',height:14,width:14,left:checked?19:3,bottom:3,background:'#fff',transition:'0.15s',borderRadius:'50%'}}/>
+    </span>
+  </label>);
+}
+
+// ── TrackingControls — the tracking section of the campaign editor ───────────
+function TrackingControls({form, set}){
+  const mode = form.tracking_mode || 'off';
+  const setMode = (m) => {
+    set('tracking_mode', m);
+    // Default flags by mode
+    if (m === 'off')   { set('track_opens',false); set('track_clicks',false); set('track_unsub',false); }
+    if (m === 'smart') { set('track_opens',true);  set('track_clicks',true);  set('track_unsub',true); }
+    if (m === 'all')   { set('track_opens',true);  set('track_clicks',true);  set('track_unsub',true); }
+  };
+  return(<div style={{marginTop:18,padding:18,background:'#fafaf8',borderRadius:8,border:`0.5px solid ${BORDER}`}}>
+    <div style={{fontSize:14,fontWeight:500,color:TEXT,marginBottom:4}}>Tracking & deliverability</div>
+    <div style={{fontSize:12,color:MUTED,marginBottom:14}}>Cold outreach is sensitive to tracking signals. Default is off.</div>
+
+    {/* Three mode cards */}
+    <div style={{display:'grid',gridTemplateColumns:'repeat(3, 1fr)',gap:8,marginBottom:14}}>
+      {[
+        {k:'off',   t:'Off',            d:'No pixel, no link rewriting, no headers'},
+        {k:'smart', t:'Smart',          d:'Track only repeat recipients', rec:true},
+        {k:'all',   t:'All recipients', d:'Track everyone — risky for cold'},
+      ].map(o=>{
+        const sel = mode===o.k;
+        return(<button key={o.k} type="button" onClick={()=>setMode(o.k)} style={{textAlign:'left',padding:12,background:CARD,border:sel?`2px solid ${BLUE}`:`0.5px solid ${BORDER}`,borderRadius:7,cursor:'pointer',outline:'none'}}>
+          <div style={{fontSize:13,fontWeight:500,marginBottom:2,display:'flex',alignItems:'center',gap:6}}>
+            {o.t}{o.rec&&<span style={{fontSize:10,background:'#e6f1fb',color:BLUE,padding:'1px 5px',borderRadius:4,fontWeight:400}}>recommended</span>}
+          </div>
+          <div style={{fontSize:11,color:MUTED,lineHeight:1.4}}>{o.d}</div>
+        </button>);
+      })}
+    </div>
+
+    {/* Smart-mode config */}
+    {mode==='smart' && <div style={{padding:12,background:CARD,borderRadius:7,marginBottom:14,border:`0.5px solid ${BORDER}`}}>
+      <div style={{fontSize:12,fontWeight:500,marginBottom:8,color:TEXT}}>Smart tracking rules</div>
+      <div style={{display:'flex',alignItems:'center',gap:8,fontSize:12,color:MUTED,flexWrap:'wrap'}}>
+        <span>Apply tracking from</span>
+        <select value={form.tracking_threshold||3} onChange={e=>set('tracking_threshold',parseInt(e.target.value))} style={{fontSize:12,padding:'3px 6px',border:`0.5px solid ${BORDER}`,borderRadius:5,color:TEXT,background:CARD}}>
+          {[2,3,4,5].map(n=><option key={n} value={n}>{n}{suffix(n)} contact onwards</option>)}
+        </select>
+        <span>—</span>
+        <select value={form.tracking_window||6} onChange={e=>set('tracking_window',parseInt(e.target.value))} style={{fontSize:12,padding:'3px 6px',border:`0.5px solid ${BORDER}`,borderRadius:5,color:TEXT,background:CARD}}>
+          <option value={3}>in last 3 months</option>
+          <option value={6}>in last 6 months</option>
+          <option value={12}>in last 12 months</option>
+          <option value={0}>all time</option>
+        </select>
+      </div>
+      <div style={{fontSize:11,color:MUTED,marginTop:6,lineHeight:1.5}}>A recipient is "warm" once they've received this many sent emails from any campaign. Bounced/failed sends don't count.</div>
+    </div>}
+
+    {/* Three toggles — only shown when mode is not 'off' */}
+    {mode!=='off' && <>
+      {[
+        {k:'track_opens',  t:'Track opens',              d:'Inject 1×1 pixel. Visible to spam filters as bulk-mail signal.'},
+        {k:'track_clicks', t:'Track clicks',             d:'Rewrite links through our domain. Triggers some link scanners.'},
+        {k:'track_unsub',  t:'List-Unsubscribe header',  d:'Native "Unsubscribe" button in Gmail/Outlook. Required for warm/newsletter sends.'},
+      ].map(t=>(
+        <div key={t.k} style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',padding:'10px 0',borderBottom:`0.5px solid ${BORDER}`}}>
+          <div style={{flex:1,paddingRight:16}}>
+            <div style={{fontSize:13,fontWeight:500,color:TEXT}}>{t.t}</div>
+            <div style={{fontSize:11,color:MUTED,marginTop:2}}>{t.d}</div>
+          </div>
+          <Toggle checked={!!form[t.k]} onChange={v=>set(t.k,v)}/>
+        </div>
+      ))}
+    </>}
+
+    {/* Live status */}
+    <div style={{marginTop:12,padding:'8px 12px',background:CARD,borderRadius:6,fontSize:12,color:MUTED,border:`0.5px solid ${BORDER}`}}>
+      {mode==='off' || (!form.track_opens && !form.track_clicks && !form.track_unsub)
+        ? 'Sending clean: no opens, no clicks, no headers. Bounce/complaint protection still active.'
+        : `Tracking: ${[form.track_opens&&'opens',form.track_clicks&&'clicks',form.track_unsub&&'unsub header'].filter(Boolean).join(', ')}${mode==='smart'?` — from ${form.tracking_threshold||3}${suffix(form.tracking_threshold||3)} contact onwards`:' — all recipients'}`}
+    </div>
+
+    {/* Warning */}
+    {mode==='all' && (form.track_opens||form.track_clicks) && <div style={{marginTop:10,padding:'10px 12px',background:'#fff3cd',borderLeft:`3px solid ${AMBER}`,borderRadius:6}}>
+      <div style={{fontSize:12,fontWeight:500,color:AMBER,marginBottom:2}}>Tracking on all recipients</div>
+      <div style={{fontSize:11,color:AMBER,lineHeight:1.5}}>Independent studies show inbox placement drops 15–30% on first-touch cold emails when tracking is on. Smart mode protects first-time recipients automatically.</div>
+    </div>}
+  </div>);
+}
+
+// ── SendCampaignDialog — replaces confirm() with a real breakdown ────────────
+function SendCampaignDialog({campaignId, onClose, onConfirmed}){
+  const [preview,setPreview]=useState(null);
+  const [sending,setSending]=useState(false);
+  const [err,setErr]=useState('');
+  useEffect(()=>{
+    fetch(`/api/email/campaigns/${campaignId}/send-preview`).then(r=>r.json()).then(d=>{
+      if(d.error)setErr(d.error);else setPreview(d);
+    });
+  },[campaignId]);
+
+  async function doSend(){
+    setSending(true);
+    const r=await fetch(`/api/email/campaigns/${campaignId}/send`,{method:'POST'});
+    const d=await r.json();
+    setSending(false);
+    if(d.error){setErr(d.error);return;}
+    onConfirmed();
+    onClose();
+  }
+
+  if(err) return(<Modal title="Cannot send" onClose={onClose}>
+    <div style={{color:DANGER,fontSize:13,marginBottom:14}}>{err}</div>
+    <div style={{textAlign:'right'}}><Btn onClick={onClose}>Close</Btn></div>
+  </Modal>);
+
+  if(!preview) return(<Modal title="Loading…" onClose={onClose}>
+    <div style={{textAlign:'center',padding:30,color:MUTED,fontSize:13}}>Calculating recipient breakdown…</div>
+  </Modal>);
+
+  const t=preview.tracking;
+  const showTrackingNote = (t.mode!=='off') && (t.track_opens||t.track_clicks||t.track_unsub);
+
+  return(<Modal title="Send campaign?" onClose={onClose} wide>
+    <p style={{fontSize:13,color:MUTED,margin:'0 0 16px'}}>
+      Sending to <span style={{fontWeight:500,color:TEXT}}>{preview.total_recipients.toLocaleString()} recipients</span> on list <em>{preview.list_name}</em>.
+    </p>
+
+    {/* Bucket histogram */}
+    <div style={{background:'#fafaf8',borderRadius:7,padding:14,marginBottom:14,border:`0.5px solid ${BORDER}`}}>
+      <div style={{fontSize:11,fontWeight:500,color:MUTED,textTransform:'uppercase',letterSpacing:0.5,marginBottom:10}}>Recipient breakdown by touch count</div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4, 1fr)',gap:8}}>
+        {[['1st','1st contact'],['2nd','2nd contact'],['3rd','3rd contact'],['4+','4th+ contact']].map(([k,label])=>(
+          <div key={k} style={{background:CARD,padding:10,borderRadius:6,textAlign:'center',border:`0.5px solid ${BORDER}`}}>
+            <div style={{fontSize:22,fontWeight:500,color:TEXT}}>{(preview.buckets[k]||0).toLocaleString()}</div>
+            <div style={{fontSize:11,color:MUTED,marginTop:2}}>{label}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+
+    {/* What will happen */}
+    {showTrackingNote ? (
+      <div style={{background:'#e6f1fb',borderLeft:`3px solid ${BLUE}`,borderRadius:6,padding:'10px 14px',marginBottom:14}}>
+        <div style={{fontSize:12,fontWeight:500,color:BLUE,marginBottom:6}}>
+          {t.mode==='smart'?`Smart tracking — ${t.threshold}${suffix(t.threshold)} contact onwards (last ${t.window_months===0?'all time':`${t.window_months} months`})`:'Tracking all recipients'}
+        </div>
+        <div style={{fontSize:12,color:BLUE,lineHeight:1.6}}>
+          {t.will_track.toLocaleString()} recipient{t.will_track===1?'':'s'} will receive <b>tracked</b> email{t.will_track===1?'':'s'}<br/>
+          {t.will_send_clean.toLocaleString()} recipient{t.will_send_clean===1?'':'s'} will receive <b>clean</b> email{t.will_send_clean===1?'':'s'}
+        </div>
+      </div>
+    ) : (
+      <div style={{background:'#f0f0ed',borderRadius:6,padding:'10px 14px',marginBottom:14,fontSize:12,color:MUTED}}>
+        Sending clean — no tracking applied to any recipient. Bounce/complaint protection via SNS still active.
+      </div>
+    )}
+
+    {t.always_warm && <div style={{fontSize:11,color:MUTED,marginBottom:14,paddingLeft:10,borderLeft:`2px solid ${BORDER}`}}>
+      List <em>{preview.list_name}</em> is marked <b>always warm</b> — tracking applies to every recipient regardless of touch count.
+    </div>}
+
+    <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+      <Btn onClick={onClose} disabled={sending}>Cancel</Btn>
+      <Btn variant="primary" onClick={doSend} disabled={sending}>{sending?'Sending…':`Send ${preview.total_recipients.toLocaleString()} email${preview.total_recipients===1?'':'s'}`}</Btn>
+    </div>
+  </Modal>);
+}
+
 const TH=({children,w})=><th style={{textAlign:'left',padding:'8px 14px',fontSize:11,fontWeight:500,color:MUTED,background:BG,borderBottom:`0.5px solid ${BORDER}`,whiteSpace:'nowrap',width:w}}>{children}</th>;
 const TD=({children,muted,center})=><td style={{padding:'9px 14px',fontSize:12,color:muted?MUTED:TEXT,textAlign:center?'center':'left',borderBottom:`0.5px solid ${BORDER}`,verticalAlign:'middle'}}>{children}</td>;
 
@@ -481,6 +662,13 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
     title:initial?.title||'',subject:initial?.subject||'',
     from_name:initial?.from_name||'',from_email:initial?.from_email||'',
     reply_to:initial?.reply_to||'',html_body:initial?.html_body||'',
+    // Tracking fields. Default to safest (off) for new campaigns; preserve on edit.
+    tracking_mode:      initial?.tracking_mode      ?? 'off',
+    tracking_threshold: initial?.tracking_threshold ?? 3,
+    tracking_window:    initial?.tracking_window    ?? 6,
+    track_opens:  !!initial?.track_opens,
+    track_clicks: !!initial?.track_clicks,
+    track_unsub:  !!initial?.track_unsub,
   });
   const [saving,setSaving]=useState(false);
   const [err,setErr]=useState('');
@@ -518,8 +706,9 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
       <label style={{ display: 'block', fontSize: 12, color: MUTED, marginBottom: 4 }}>Email body *</label>
       <RichTextEditor value={form.html_body} onChange={v => set('html_body', v)} />
     </div>
-    {err&&<div style={{color:DANGER,fontSize:13,marginBottom:10}}>{err}</div>}
-    <div style={{display:'flex',justifyContent:'flex-end',gap:8}}><Btn onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={save} disabled={saving}>{saving?'Saving…':editing?'Save changes':'Create campaign'}</Btn></div>
+    <TrackingControls form={form} set={set}/>
+    {err&&<div style={{color:DANGER,fontSize:13,marginTop:14,marginBottom:10}}>{err}</div>}
+    <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:18}}><Btn onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={save} disabled={saving}>{saving?'Saving…':editing?'Save changes':'Create campaign'}</Btn></div>
   </Modal>);
 }
 
@@ -717,6 +906,8 @@ function CampaignReport({campaign,lists,onBack}){
 // ── Subscriber view ───────────────────────────────────────────────────────────
 function SubscriberView({list,onBack,onRefresh}){
   const [subs,setSubs]=useState([]);
+  const [touches,setTouches]=useState({});  // subscriber_id → touch count
+  const [alwaysWarm,setAlwaysWarm]=useState(!!list.always_warm);
   const [loading,setLoading]=useState(true);
   const [filter,setFilter]=useState('all');
   const [search,setSearch]=useState('');
@@ -724,7 +915,21 @@ function SubscriberView({list,onBack,onRefresh}){
   const [modal,setModal]=useState(null);
   const PER_PAGE=50;
   useEffect(()=>{load();},[]);
-  async function load(){setLoading(true);const r=await fetch(`/api/email/lists/${list.id}/subscribers`);setSubs(await r.json());setLoading(false);}
+  async function load(){
+    setLoading(true);
+    const r=await fetch(`/api/email/lists/${list.id}/subscribers`);
+    setSubs(await r.json());
+    // Fetch touch counts in parallel — used for the contact-count badge.
+    // 6-month window matches the campaign default; the badge is informational.
+    fetch(`/api/email/lists/${list.id}/touch-counts?window=6`).then(r=>r.json()).then(d=>{
+      setTouches(d.counts||{});
+    }).catch(()=>{});
+    setLoading(false);
+  }
+  async function toggleAlwaysWarm(v){
+    setAlwaysWarm(v);
+    await fetch(`/api/email/lists/${list.id}/always-warm`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({always_warm:v})});
+  }
   async function unsub(id){await fetch(`/api/email/lists/${list.id}/subscribers/${id}`,{method:'DELETE'});load();onRefresh();}
   function exportCSV(){
     const rows=filtered.map(s=>`"${s.name||''}","${s.email}","${s.status}","${s.created_at||''}"`);
@@ -746,6 +951,15 @@ function SubscriberView({list,onBack,onRefresh}){
         <Btn small variant="primary" onClick={()=>setModal('add')}>+ Add subscriber</Btn>
       </div>
     </div>
+
+    {/* Always-warm toggle row */}
+    <div style={{padding:'10px 20px',background:'#fafaf8',borderBottom:`0.5px solid ${BORDER}`,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+      <div>
+        <div style={{fontSize:13,fontWeight:500,color:TEXT}}>Treat list as always warm</div>
+        <div style={{fontSize:11,color:MUTED,marginTop:2}}>Override touch-count rules. Tracking applies to every recipient on this list regardless of campaign settings.</div>
+      </div>
+      <Toggle checked={alwaysWarm} onChange={toggleAlwaysWarm}/>
+    </div>
     <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',background:CARD,borderBottom:`0.5px solid ${BORDER}`}}>
       {[{n:counts.subscribed,l:'Active subscribers',c:GREEN},{n:counts.bounced,l:`Bounced · ${counts.all?((counts.bounced/counts.all)*100).toFixed(1):0}%`,c:DANGER},{n:counts.unsubscribed,l:`Unsubscribed · ${counts.all?((counts.unsubscribed/counts.all)*100).toFixed(1):0}%`,c:AMBER},{n:counts.spam,l:'Marked as spam',c:MUTED}].map((s,i)=>(
         <div key={i} style={{padding:'12px 20px',borderRight:i<3?`0.5px solid ${BORDER}`:'none'}}>
@@ -762,15 +976,16 @@ function SubscriberView({list,onBack,onRefresh}){
     </div>
     <div style={{flex:1,overflow:'auto',background:BG}}>
       <table style={{width:'100%',borderCollapse:'collapse',background:CARD}}>
-        <thead><tr><TH>Name</TH><TH>Email</TH><TH>Status</TH><TH>Added</TH><TH>Actions</TH></tr></thead>
+        <thead><tr><TH>Name</TH><TH>Email</TH><TH>Status</TH><TH>Contact</TH><TH>Added</TH><TH>Actions</TH></tr></thead>
         <tbody>
-          {loading?<tr><td colSpan={5} style={{textAlign:'center',padding:40,color:MUTED,fontSize:13}}>Loading…</td></tr>
-          :paginated.length===0?<tr><td colSpan={5} style={{textAlign:'center',padding:40,color:MUTED,fontSize:13}}>No subscribers found</td></tr>
+          {loading?<tr><td colSpan={6} style={{textAlign:'center',padding:40,color:MUTED,fontSize:13}}>Loading…</td></tr>
+          :paginated.length===0?<tr><td colSpan={6} style={{textAlign:'center',padding:40,color:MUTED,fontSize:13}}>No subscribers found</td></tr>
           :paginated.map(s=>(
             <tr key={s.id}>
               <TD>{s.name||<span style={{color:MUTED}}>—</span>}</TD>
               <TD muted>{s.email}</TD>
               <TD>{subBadge(s.status)}</TD>
+              <TD>{touchBadge(touches[s.id]||0)}</TD>
               <TD muted>{s.created_at?new Date(s.created_at).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}):'—'}</TD>
               <TD>{s.status==='subscribed'&&<button onClick={()=>{if(confirm(`Unsubscribe ${s.email}?`))unsub(s.id);}} style={{background:'none',border:'none',color:DANGER,fontSize:11,cursor:'pointer',padding:0}}>Unsubscribe</button>}
               {(s.status==='bounced'||s.status==='spam')&&<button onClick={()=>{if(confirm(`Remove ${s.email}?`))unsub(s.id);}} style={{background:'none',border:'none',color:DANGER,fontSize:11,cursor:'pointer',padding:0}}>Remove</button>}</TD>
@@ -854,6 +1069,7 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
   }
   const [testStatus,setTestStatus]=useState({});
   const [sendStatus,setSendStatus]=useState({});
+  const [sendDialogId,setSendDialogId]=useState(null);
 
   useEffect(()=>{load();},[emailClient.id]);
   useEffect(()=>{
@@ -881,12 +1097,12 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
     setTimeout(()=>setTestStatus(s=>({...s,[id]:null})),3000);
   }
 
-  async function sendNow(id){
-    if(!confirm('Send this campaign now to all active subscribers?'))return;
+  // Send button now opens the breakdown dialog instead of a bare confirm()
+  function sendNow(id){
+    setSendDialogId(id);
+  }
+  function onSendConfirmed(id){
     setSendStatus(s=>({...s,[id]:'starting'}));
-    const r=await fetch(`/api/email/campaigns/${id}/send`,{method:'POST'});
-    const d=await r.json();
-    setSendStatus(s=>({...s,[id]:d.ok?'ok':'error'}));
     load();
   }
 
@@ -1002,6 +1218,7 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
     {modal==='new-campaign'&&<CampaignModal emailClient={emailClient} lists={getLists()} onClose={()=>setModal(null)} onSaved={()=>{load();onRefresh();}}/>}
     {modal==='edit-campaign'&&<CampaignModal emailClient={emailClient} lists={getLists()} initial={modalData} onClose={()=>setModal(null)} onSaved={()=>{load();onRefresh();}}/>}
     {modal==='drip'&&<DripModal campaign={modalData} totalSubs={lists.find(l=>l.id===modalData.list_id)?.subscriber_count||0} onClose={()=>setModal(null)} onSaved={load}/>}
+    {sendDialogId&&<SendCampaignDialog campaignId={sendDialogId} onClose={()=>setSendDialogId(null)} onConfirmed={()=>onSendConfirmed(sendDialogId)}/>}
   </div>);
 }
 
