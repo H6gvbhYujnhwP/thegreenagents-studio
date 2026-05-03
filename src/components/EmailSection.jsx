@@ -1387,10 +1387,13 @@ export default function EmailSection({initialTab='customers'}){
   const [modalData,setModalData]=useState({});
   const [domains,setDomains]=useState([]);
   const [domainsLoading,setDomainsLoading]=useState(false);
-  const isDomainView=initialTab==='domains';
+  const isDomainView   = initialTab==='domains';
+  const isMailboxesView= initialTab==='mailboxes';
 
   useEffect(()=>{
-    if(isDomainView){loadDomains();}else{loadAll();}
+    if(isDomainView){loadDomains();}
+    else if(isMailboxesView){/* MailboxesSection loads its own data */}
+    else{loadAll();}
   },[initialTab]);
 
   async function loadDomains(){
@@ -1417,6 +1420,8 @@ export default function EmailSection({initialTab='customers'}){
 
   const filtered=clients.filter(c=>c.name.toLowerCase().includes(search.toLowerCase()));
   const selectedClient=clients.find(c=>c.id===selected);
+
+  if(isMailboxesView)return <MailboxesSection/>;
 
   if(isDomainView)return(
     <div style={{flex:1,display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
@@ -1469,4 +1474,406 @@ export default function EmailSection({initialTab='customers'}){
       {modal==='edit-client'&&<ClientModal initial={modalData} onClose={()=>setModal(null)} onSaved={loadAll}/>}
     </div>
   );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MAILBOXES — Phase 3 inbox monitoring & reply triage (Variant C: split layout)
+// ════════════════════════════════════════════════════════════════════════════
+
+// Date helper used in several mailbox views: "14 min ago", "2 h ago", "yesterday"
+function relTime(iso){
+  if(!iso) return '—';
+  const d=new Date(iso); const now=Date.now();
+  const sec=Math.round((now-d.getTime())/1000);
+  if (sec<60)        return 'just now';
+  if (sec<3600)      return `${Math.round(sec/60)}m ago`;
+  if (sec<86400)     return `${Math.round(sec/3600)}h ago`;
+  if (sec<86400*7)   return `${Math.round(sec/86400)}d ago`;
+  return d.toLocaleDateString('en-GB',{day:'numeric',month:'short'});
+}
+
+// Classification badge — same colours as the design mockup
+function classifyBadge(reply){
+  if(reply.auto_unsubscribed) return <Badge label="Auto-unsubscribed" color="#633806" bg="#FAEEDA"/>;
+  switch(reply.classification){
+    case 'positive':      return <Badge label="New prospect"     color="#0C447C" bg="#E6F1FB"/>;
+    case 'hard_negative': return <Badge label="Negative"         color="#793F1F" bg="#FAECE7"/>;
+    case 'soft_negative': return <Badge label="Soft negative"    color="#793F1F" bg="#FAECE7"/>;
+    case 'auto_reply':    return <Badge label="Out of office"    color="#5F5E5A" bg="#F1EFE8"/>;
+    case 'forwarding':    return <Badge label="Forwarded"        color="#3C3489" bg="#EEEDFE"/>;
+    case 'neutral':       return <Badge label="Neutral"          color="#5F5E5A" bg="#F1EFE8"/>;
+    default:              return <Badge label="Unclassified"     color="#5F5E5A" bg="#F1EFE8"/>;
+  }
+}
+
+// ── Top-level Mailboxes section ───────────────────────────────────────────────
+function MailboxesSection(){
+  const [inboxes,setInboxes]=useState([]);
+  const [selectedId,setSelectedId]=useState(null);
+  const [loading,setLoading]=useState(true);
+  const [modal,setModal]=useState(null);
+
+  useEffect(()=>{ loadInboxes(); const t=setInterval(loadInboxes,30_000); return()=>clearInterval(t); },[]);
+
+  async function loadInboxes(){
+    const r=await fetch('/api/email/mailboxes');
+    if(!r.ok){setLoading(false);return;}
+    const d=await r.json();
+    setInboxes(Array.isArray(d)?d:[]);
+    setLoading(false);
+    // If nothing selected and we have inboxes, auto-select first one
+    if(!selectedId && Array.isArray(d) && d.length>0) setSelectedId(d[0].id);
+  }
+
+  const selected=inboxes.find(i=>i.id===selectedId);
+  const totalProspects=inboxes.reduce((s,i)=>s+(i.new_prospect_count||0),0);
+  const totalUnsub    =inboxes.reduce((s,i)=>s+(i.auto_unsub_count||0),0);
+  const totalReplies  =inboxes.reduce((s,i)=>s+(i.replies_30d||0),0);
+
+  return(<div style={{flex:1,display:'flex',height:'100vh',overflow:'hidden'}}>
+
+    {/* Left rail — list of all mailboxes */}
+    <div style={{width:260,background:CARD,borderRight:`0.5px solid ${BORDER}`,display:'flex',flexDirection:'column',flexShrink:0}}>
+      <div style={{padding:'14px 14px 10px',borderBottom:`0.5px solid ${BORDER}`}}>
+        <div style={{fontSize:13,fontWeight:500,color:TEXT}}>Mailboxes</div>
+        <div style={{fontSize:11,color:MUTED,marginTop:2}}>{inboxes.length} connected · {totalProspects} new prospect{totalProspects===1?'':'s'}</div>
+      </div>
+
+      {/* Aggregate stats strip */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3, 1fr)',gap:6,padding:10,borderBottom:`0.5px solid ${BORDER}`}}>
+        <div style={{background:BG,padding:'6px 8px',borderRadius:5,textAlign:'center'}}>
+          <div style={{fontSize:16,fontWeight:500,color:totalProspects>0?BLUE:MUTED}}>{totalProspects}</div>
+          <div style={{fontSize:9,color:MUTED,textTransform:'uppercase',letterSpacing:0.4}}>Prospects</div>
+        </div>
+        <div style={{background:BG,padding:'6px 8px',borderRadius:5,textAlign:'center'}}>
+          <div style={{fontSize:16,fontWeight:500,color:totalUnsub>0?'#633806':MUTED}}>{totalUnsub}</div>
+          <div style={{fontSize:9,color:MUTED,textTransform:'uppercase',letterSpacing:0.4}}>Unsub</div>
+        </div>
+        <div style={{background:BG,padding:'6px 8px',borderRadius:5,textAlign:'center'}}>
+          <div style={{fontSize:16,fontWeight:500,color:TEXT}}>{totalReplies}</div>
+          <div style={{fontSize:9,color:MUTED,textTransform:'uppercase',letterSpacing:0.4}}>30d</div>
+        </div>
+      </div>
+
+      {/* Mailbox list */}
+      <div style={{flex:1,overflowY:'auto'}}>
+        {loading?<div style={{color:MUTED,textAlign:'center',padding:32,fontSize:12}}>Loading…</div>
+        :inboxes.length===0?<div style={{color:MUTED,textAlign:'center',padding:32,fontSize:12}}>No mailboxes connected yet</div>
+        :inboxes.map(ib=>{
+          const isSelected=ib.id===selectedId;
+          const hasError=!!ib.last_error;
+          return(<div key={ib.id} onClick={()=>setSelectedId(ib.id)} style={{
+            padding:'10px 12px',cursor:'pointer',
+            background:isSelected?`${GREEN}12`:'transparent',
+            borderLeft:isSelected?`3px solid ${GREEN}`:'3px solid transparent',
+            borderBottom:`0.5px solid ${BORDER}`,
+            display:'flex',alignItems:'center',gap:8,
+          }}>
+            {/* Status dot */}
+            <span style={{width:6,height:6,borderRadius:'50%',background:hasError?DANGER:ib.enabled?GREEN:MUTED,flexShrink:0}}/>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:12,color:TEXT,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',fontWeight:isSelected?500:400}}>{ib.email_address}</div>
+              {hasError?
+                <div style={{fontSize:10,color:DANGER,marginTop:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{ib.last_error}</div>
+                :
+                <div style={{fontSize:10,color:MUTED,marginTop:1}}>{(ib.replies_30d||0).toLocaleString()} replies · {relTime(ib.last_polled_at)}</div>
+              }
+            </div>
+            {(ib.new_prospect_count||0)>0 && <span style={{background:'#E6F1FB',color:'#0C447C',fontSize:10,fontWeight:500,padding:'1px 6px',borderRadius:8,minWidth:14,textAlign:'center',lineHeight:1.5}}>{ib.new_prospect_count}</span>}
+          </div>);
+        })}
+      </div>
+
+      <div style={{padding:10,borderTop:`0.5px solid ${BORDER}`}}>
+        <Btn variant="primary" style={{width:'100%',justifyContent:'center'}} onClick={()=>setModal('connect')}>+ Connect mailbox</Btn>
+      </div>
+    </div>
+
+    {/* Right side — focused inbox detail */}
+    {selected ? <MailboxDetail key={selected.id} inbox={selected} onRefresh={loadInboxes}/>
+      : <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',background:BG,flexDirection:'column',gap:12}}>
+          <div style={{fontSize:14,color:MUTED}}>{inboxes.length===0?'Connect your first mailbox':'Select a mailbox'}</div>
+          {inboxes.length===0&&<Btn variant="primary" onClick={()=>setModal('connect')}>Connect mailbox</Btn>}
+        </div>}
+
+    {modal==='connect'&&<ConnectMailboxModal onClose={()=>setModal(null)} onSaved={()=>{setModal(null);loadInboxes();}}/>}
+  </div>);
+}
+
+// ── Detail pane for one inbox: tabs + list of replies ─────────────────────────
+function MailboxDetail({inbox, onRefresh}){
+  const [bucket,setBucket]=useState('all');
+  const [replies,setReplies]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [openReplyId,setOpenReplyId]=useState(null);
+  const [polling,setPolling]=useState(false);
+
+  useEffect(()=>{loadReplies();},[inbox.id, bucket]);
+  async function loadReplies(){
+    setLoading(true);
+    const r=await fetch(`/api/email/mailboxes/${inbox.id}/replies?bucket=${bucket}&limit=200`);
+    setReplies(r.ok?await r.json():[]);
+    setLoading(false);
+  }
+  async function checkNow(){
+    setPolling(true);
+    const r=await fetch(`/api/email/mailboxes/${inbox.id}/poll`,{method:'POST'});
+    const d=await r.json();
+    setPolling(false);
+    if(d.ok){loadReplies();onRefresh();}
+    else alert(d.error||'Poll failed');
+  }
+
+  return(<div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0,overflow:'hidden'}}>
+
+    {/* Header */}
+    <div style={{padding:'14px 20px',borderBottom:`0.5px solid ${BORDER}`,background:CARD,display:'flex',alignItems:'baseline',gap:12}}>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontSize:15,fontWeight:500,color:TEXT,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{inbox.email_address}</div>
+        <div style={{fontSize:11,color:MUTED,marginTop:2}}>
+          {inbox.last_error
+            ? <span style={{color:DANGER}}>{inbox.last_error}</span>
+            : <>Connected · last polled {relTime(inbox.last_polled_at)}</>}
+        </div>
+      </div>
+      <Btn small onClick={checkNow} disabled={polling}>{polling?'Checking…':'Check now'}</Btn>
+    </div>
+
+    {/* KPI strip */}
+    <div style={{padding:'12px 20px',background:CARD,borderBottom:`0.5px solid ${BORDER}`,display:'grid',gridTemplateColumns:'repeat(3, 1fr)',gap:10}}>
+      <div style={{padding:'8px 12px',background:BG,borderRadius:7,border:`0.5px solid ${BORDER}`}}>
+        <div style={{fontSize:20,fontWeight:500,color:(inbox.new_prospect_count||0)>0?BLUE:TEXT}}>{(inbox.new_prospect_count||0).toLocaleString()}</div>
+        <div style={{fontSize:11,color:MUTED}}>New prospects</div>
+      </div>
+      <div style={{padding:'8px 12px',background:BG,borderRadius:7,border:`0.5px solid ${BORDER}`}}>
+        <div style={{fontSize:20,fontWeight:500,color:(inbox.auto_unsub_count||0)>0?'#633806':TEXT}}>{(inbox.auto_unsub_count||0).toLocaleString()}</div>
+        <div style={{fontSize:11,color:MUTED}}>Auto-unsubscribed</div>
+      </div>
+      <div style={{padding:'8px 12px',background:BG,borderRadius:7,border:`0.5px solid ${BORDER}`}}>
+        <div style={{fontSize:20,fontWeight:500,color:TEXT}}>{(inbox.replies_30d||0).toLocaleString()}</div>
+        <div style={{fontSize:11,color:MUTED}}>Replies (30d)</div>
+      </div>
+    </div>
+
+    {/* Sub-tabs */}
+    <div style={{display:'flex',gap:18,padding:'0 20px',borderBottom:`0.5px solid ${BORDER}`,background:CARD,flexShrink:0}}>
+      {[
+        {k:'all',         l:'All replies'},
+        {k:'prospects',   l:'New prospects', count:inbox.new_prospect_count, color:BLUE},
+        {k:'auto_unsubscribed', l:'Auto-unsubscribed', count:inbox.auto_unsub_count, color:'#633806'},
+        {k:'out_of_office',l:'Out of office'},
+      ].map(t=>(
+        <button key={t.k} onClick={()=>setBucket(t.k)} style={{
+          background:'transparent',border:'none',padding:'10px 0',marginBottom:-1,
+          fontSize:13,color:bucket===t.k?TEXT:MUTED,fontWeight:bucket===t.k?500:400,
+          borderBottom:bucket===t.k?`2px solid ${TEXT}`:'2px solid transparent',
+          cursor:'pointer',display:'inline-flex',alignItems:'center',gap:6,
+        }}>
+          {t.l}
+          {(t.count||0)>0 && <span style={{background:t.color==='#633806'?'#FAEEDA':t.color===BLUE?'#E6F1FB':'#F1EFE8',color:t.color||MUTED,fontSize:10,padding:'1px 6px',borderRadius:8,fontWeight:500}}>{t.count}</span>}
+        </button>
+      ))}
+    </div>
+
+    {/* Reply list */}
+    <div style={{flex:1,overflowY:'auto',background:BG}}>
+      {loading?<div style={{color:MUTED,textAlign:'center',padding:40,fontSize:13}}>Loading…</div>
+      :replies.length===0?<div style={{color:MUTED,textAlign:'center',padding:40,fontSize:13}}>No replies in this view</div>
+      :replies.map(r=>(
+        <div key={r.id} onClick={()=>setOpenReplyId(r.id)} style={{
+          display:'grid',gridTemplateColumns:'24px minmax(0, 1fr) auto auto',gap:12,
+          padding:'12px 20px',borderBottom:`0.5px solid ${BORDER}`,cursor:'pointer',
+          background:CARD,opacity:r.classification==='auto_reply'?0.65:1,
+          alignItems:'center',
+        }} onMouseEnter={e=>e.currentTarget.style.background=BG} onMouseLeave={e=>e.currentTarget.style.background=CARD}>
+          <span style={{color:r.classification==='positive'?BLUE:'transparent',fontSize:14,textAlign:'center'}}>★</span>
+          <div style={{minWidth:0}}>
+            <div style={{fontSize:11,color:MUTED,marginBottom:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+              {r.from_name?`${r.from_name} <${r.from_address}>`:r.from_address}
+            </div>
+            <div style={{fontSize:13,color:TEXT,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+              {r.subject||'(no subject)'}
+            </div>
+          </div>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            {classifyBadge(r)}
+          </div>
+          <span style={{fontSize:11,color:MUTED,whiteSpace:'nowrap'}}>{relTime(r.received_at)}</span>
+        </div>
+      ))}
+    </div>
+
+    {openReplyId&&<ReplyDetailModal replyId={openReplyId} onClose={()=>setOpenReplyId(null)} onAction={()=>{loadReplies();onRefresh();}}/>}
+  </div>);
+}
+
+// ── Reply detail modal — opens when you click a reply row ─────────────────────
+function ReplyDetailModal({replyId, onClose, onAction}){
+  const [reply,setReply]=useState(null);
+  const [busy,setBusy]=useState(false);
+
+  useEffect(()=>{
+    fetch(`/api/email/replies/${replyId}`).then(r=>r.json()).then(setReply);
+  },[replyId]);
+
+  async function action(name, opts={}){
+    setBusy(true);
+    const r=await fetch(`/api/email/replies/${replyId}/${name}`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(opts),
+    });
+    const d=await r.json();
+    setBusy(false);
+    if(d.error){alert(d.error);return;}
+    onAction();
+    onClose();
+  }
+
+  if(!reply) return(<Modal title="Loading…" onClose={onClose}>
+    <div style={{textAlign:'center',padding:30,color:MUTED,fontSize:13}}>Fetching reply…</div>
+  </Modal>);
+
+  return(<Modal title="Reply detail" onClose={onClose} wide>
+    {/* Header: sender */}
+    <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:12,gap:8,flexWrap:'wrap'}}>
+      <div style={{minWidth:0}}>
+        <div style={{fontSize:15,fontWeight:500,color:TEXT}}>{reply.from_name||reply.from_address}</div>
+        <div style={{fontSize:12,color:MUTED}}>{reply.from_address} · {relTime(reply.received_at)}</div>
+      </div>
+      {classifyBadge(reply)}
+    </div>
+
+    {/* Subject */}
+    <div style={{fontSize:14,color:TEXT,marginBottom:12,fontWeight:500}}>{reply.subject||'(no subject)'}</div>
+
+    {/* Classification reasoning */}
+    {reply.classification_reason && (
+      <div style={{background:'#E6F1FB',borderLeft:`3px solid ${BLUE}`,borderRadius:6,padding:'8px 12px',marginBottom:12,fontSize:12,color:'#0C447C',lineHeight:1.5}}>
+        <b style={{fontWeight:500}}>Why classified as {reply.classification?.replace('_',' ')||'unknown'}:</b> {reply.classification_reason}
+        {reply.classification_confidence && <> · confidence {Math.round(reply.classification_confidence*100)}%</>}
+      </div>
+    )}
+
+    {/* Original campaign context */}
+    {reply.campaign_title && (
+      <div style={{background:BG,padding:'8px 12px',borderRadius:6,marginBottom:12,fontSize:12,color:MUTED,border:`0.5px solid ${BORDER}`}}>
+        In response to <b style={{color:TEXT,fontWeight:500}}>"{reply.campaign_subject}"</b> — campaign <em>{reply.campaign_title}</em>
+        {reply.campaign_sent_at && <> · sent {new Date(reply.campaign_sent_at).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</>}
+      </div>
+    )}
+    {!reply.matched_campaign_id && (
+      <div style={{background:'#fff3cd',borderLeft:`3px solid ${AMBER}`,borderRadius:6,padding:'8px 12px',marginBottom:12,fontSize:12,color:AMBER,lineHeight:1.5}}>
+        Could not match this reply to a specific campaign. The recipient's email client may have stripped the threading headers.
+      </div>
+    )}
+
+    {/* Body */}
+    <div style={{borderLeft:`2px solid ${BORDER}`,padding:'4px 0 4px 14px',marginBottom:14,maxHeight:300,overflowY:'auto',fontSize:13,color:TEXT,lineHeight:1.6,whiteSpace:'pre-wrap'}}>
+      {reply.body_text || <em style={{color:MUTED}}>(no plain text body — message was HTML-only)</em>}
+    </div>
+
+    {/* Actions */}
+    <div style={{display:'flex',gap:8,flexWrap:'wrap',justifyContent:'flex-end',paddingTop:12,borderTop:`0.5px solid ${BORDER}`}}>
+      {reply.classification==='positive' && !reply.handled_at && (
+        <Btn variant="primary" onClick={()=>action('handle')} disabled={busy}>Mark as handled</Btn>
+      )}
+      {!reply.auto_unsubscribed && (
+        <Btn variant="danger" onClick={()=>{
+          if(confirm(`Unsubscribe ${reply.from_address} from all lists in this client?`)) action('manual-unsubscribe');
+        }} disabled={busy}>Unsubscribe</Btn>
+      )}
+      <ReclassifyDropdown disabled={busy} current={reply.classification} onChoose={c=>action('reclassify',{classification:c})}/>
+      <Btn onClick={onClose} disabled={busy}>Close</Btn>
+    </div>
+  </Modal>);
+}
+
+// Inline dropdown for reclassifying
+function ReclassifyDropdown({current, onChoose, disabled}){
+  const [open,setOpen]=useState(false);
+  const opts=[
+    {k:'positive',     l:'New prospect'},
+    {k:'soft_negative',l:'Soft negative'},
+    {k:'hard_negative',l:'Hard negative'},
+    {k:'auto_reply',   l:'Out of office'},
+    {k:'forwarding',   l:'Forwarded'},
+    {k:'neutral',      l:'Neutral'},
+  ];
+  return(<div style={{position:'relative'}}>
+    <Btn onClick={()=>setOpen(!open)} disabled={disabled}>Reclassify ▾</Btn>
+    {open && <div style={{position:'absolute',right:0,bottom:'100%',marginBottom:4,background:CARD,border:`0.5px solid ${BORDER}`,borderRadius:7,padding:4,minWidth:160,zIndex:10,boxShadow:'0 4px 12px rgba(0,0,0,0.08)'}}>
+      {opts.map(o=>(
+        <button key={o.k} onClick={()=>{setOpen(false);onChoose(o.k);}} style={{
+          display:'block',width:'100%',textAlign:'left',padding:'6px 10px',
+          background:o.k===current?BG:'transparent',border:'none',borderRadius:5,
+          fontSize:12,color:TEXT,cursor:'pointer',fontFamily:'inherit',
+        }}>{o.l}{o.k===current&&' ✓'}</button>
+      ))}
+    </div>}
+  </div>);
+}
+
+// ── Connect-mailbox modal ─────────────────────────────────────────────────────
+function ConnectMailboxModal({onClose, onSaved}){
+  const [clients,setClients]=useState([]);
+  const [form,setForm]=useState({email_client_id:'', email:'', app_password:''});
+  const [testing,setTesting]=useState(false);
+  const [tested,setTested]=useState(false);
+  const [saving,setSaving]=useState(false);
+  const [err,setErr]=useState('');
+  const set=(k,v)=>{setForm(f=>({...f,[k]:v}));setTested(false);};
+  useEffect(()=>{
+    fetch('/api/email/clients').then(r=>r.json()).then(d=>setClients(Array.isArray(d)?d:[]));
+  },[]);
+
+  async function testConnection(){
+    setErr(''); setTesting(true);
+    const r=await fetch('/api/email/mailboxes/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:form.email,app_password:form.app_password})});
+    const d=await r.json();
+    setTesting(false);
+    if(d.ok){setTested(true);} else {setErr(d.error||'Connection test failed');}
+  }
+  async function save(){
+    if(!form.email_client_id||!form.email||!form.app_password){setErr('All fields required');return;}
+    setErr(''); setSaving(true);
+    const r=await fetch('/api/email/mailboxes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(form)});
+    const d=await r.json();
+    setSaving(false);
+    if(d.error){setErr(d.error);return;}
+    onSaved();
+  }
+
+  return(<Modal title="Connect a Gmail mailbox" onClose={onClose} wide>
+    <p style={{fontSize:13,color:MUTED,margin:'0 0 16px',lineHeight:1.5}}>
+      Connects via IMAP using a Google app password. The password is encrypted at rest. Replies are polled every 3 minutes.
+    </p>
+
+    <div style={{marginBottom:14}}>
+      <label style={{display:'block',fontSize:12,color:MUTED,marginBottom:4}}>Customer / domain *</label>
+      <select value={form.email_client_id} onChange={e=>set('email_client_id',e.target.value)} style={{width:'100%',padding:'8px 12px',border:`0.5px solid ${BORDER}`,borderRadius:7,fontSize:13,color:TEXT,background:CARD}}>
+        <option value="">— select customer —</option>
+        {clients.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+      </select>
+    </div>
+
+    <Input label="Mailbox email *" value={form.email} onChange={v=>set('email',v)} placeholder="hello@yourcompany.com"/>
+
+    <div style={{marginBottom:14}}>
+      <label style={{display:'block',fontSize:12,color:MUTED,marginBottom:4}}>App password * <span style={{color:MUTED,fontSize:11}}>(16 chars, spaces are fine)</span></label>
+      <input type="password" value={form.app_password} onChange={e=>set('app_password',e.target.value)} placeholder="zjua bpuh oxik cwqm" style={{width:'100%',padding:'8px 12px',border:`0.5px solid ${BORDER}`,borderRadius:7,fontSize:13,color:TEXT,background:CARD,boxSizing:'border-box',fontFamily:'monospace'}}/>
+      <div style={{fontSize:11,color:MUTED,marginTop:4,lineHeight:1.5}}>
+        Generate at <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener" style={{color:BLUE}}>myaccount.google.com/apppasswords</a> — requires 2FA enabled on the account.
+      </div>
+    </div>
+
+    {err && <div style={{color:DANGER,fontSize:12,marginBottom:10,padding:'8px 12px',background:'#fdecea',borderRadius:6}}>{err}</div>}
+    {tested && <div style={{color:GREEN,fontSize:12,marginBottom:10,padding:'8px 12px',background:`${GREEN}15`,borderRadius:6}}>✓ Connection works. Click Save to add this mailbox.</div>}
+
+    <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:14}}>
+      <Btn onClick={onClose} disabled={saving||testing}>Cancel</Btn>
+      <Btn onClick={testConnection} disabled={testing||!form.email||!form.app_password||saving}>{testing?'Testing…':'Test connection'}</Btn>
+      <Btn variant="primary" onClick={save} disabled={!tested||saving||testing}>{saving?'Saving…':'Save mailbox'}</Btn>
+    </div>
+  </Modal>);
 }

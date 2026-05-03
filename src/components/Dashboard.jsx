@@ -40,11 +40,14 @@ export default function Dashboard({ onLogout }) {
   }
 
   // ── Email Campaigns views ──────────────────────────────────────────────────
-  if (view === 'email-customers' || view === 'email-domain-health') {
+  if (view === 'email-customers' || view === 'email-domain-health' || view === 'email-mailboxes') {
+    const initialTab = view === 'email-domain-health' ? 'domains'
+                     : view === 'email-mailboxes'     ? 'mailboxes'
+                     : 'customers';
     return (
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
         <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
-        <EmailSection initialTab={view === 'email-domain-health' ? 'domains' : 'customers'} />
+        <EmailSection initialTab={initialTab} />
       </div>
     );
   }
