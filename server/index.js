@@ -6,6 +6,8 @@ import authRoutes     from './routes/auth.js';
 import clientRoutes   from './routes/clients.js';
 import campaignRoutes from './routes/campaigns.js';
 import emailRoutes    from './routes/email.js';
+import { startPoller } from './services/imap-poller.js';
+import { selfTest as cryptoSelfTest } from './services/crypto-vault.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app  = express();
@@ -33,5 +35,11 @@ app.listen(PORT, () => {
   console.log(`[env] AWS_SECRET_ACCESS_KEY: ${process.env.AWS_SECRET_ACCESS_KEY                         ? 'SET ✓' : 'MISSING ✗'}`);
   console.log(`[env] AWS_SES_REGION:        ${process.env.AWS_SES_REGION || 'eu-north-1 (default)'}`);
   console.log(`[env] SES_CONFIGURATION_SET: ${process.env.SES_CONFIGURATION_SET || 'NOT SET (account default config set will apply)'}`);
+  const ct = cryptoSelfTest();
+  console.log(`[env] MAILBOX_ENCRYPTION_KEY: ${ct.ok ? 'SET ✓ (verified)' : `MISSING/INVALID — ${ct.reason}`}`);
   console.log(`[env] DB_PATH:               ${process.env.DB_PATH || '(default)'}`);
+
+  // Start the IMAP poller — only if encryption is configured
+  if (ct.ok) startPoller();
+  else console.log('[poller] not started — set MAILBOX_ENCRYPTION_KEY to enable inbox monitoring');
 });

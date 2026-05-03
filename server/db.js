@@ -365,4 +365,77 @@ db.exec(`
 db.exec(`CREATE INDEX IF NOT EXISTS idx_email_sends_subscriber_status_sent_at
          ON email_sends(subscriber_id, status, sent_at)`);
 
+// ── 13. INBOX MONITORING TABLES (replies, prospects, auto-unsubscribe) ───────
+// One row per connected Gmail/Workspace mailbox. The app password is encrypted
+// at rest with a master key from MAILBOX_ENCRYPTION_KEY env var.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS email_inboxes (
+    id TEXT PRIMARY KEY,
+    email_client_id TEXT NOT NULL,
+    email_address TEXT NOT NULL UNIQUE,
+    app_password_encrypted TEXT NOT NULL,
+    imap_host TEXT NOT NULL DEFAULT 'imap.gmail.com',
+    imap_port INTEGER NOT NULL DEFAULT 993,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    connected_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_polled_at TEXT,
+    last_error TEXT,
+    last_uid INTEGER DEFAULT 0,
+    FOREIGN KEY (email_client_id) REFERENCES email_clients(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_email_inboxes_enabled ON email_inboxes(enabled);
+`);
+
+// One row per reply received. The reply is matched to a subscriber/campaign
+// via the In-Reply-To and References headers, when possible. Some replies
+// (e.g. from someone forwarded to) won't match — they're still stored.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS email_replies (
+    id TEXT PRIMARY KEY,
+    inbox_id TEXT NOT NULL,
+    email_client_id TEXT NOT NULL,
+    message_id TEXT,
+    in_reply_to TEXT,
+    references_header TEXT,
+    from_address TEXT NOT NULL,
+    from_name TEXT,
+    subject TEXT,
+    body_text TEXT,
+    body_html TEXT,
+    received_at TEXT NOT NULL,
+    matched_subscriber_id TEXT,
+    matched_campaign_id TEXT,
+    classification TEXT,         /* 'positive' | 'hard_negative' | 'soft_negative' | 'auto_reply' | 'forwarding' | 'neutral' | NULL */
+    classification_confidence REAL,
+    classification_reason TEXT,
+    auto_unsubscribed INTEGER NOT NULL DEFAULT 0,
+    handled_at TEXT,
+    handled_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (inbox_id) REFERENCES email_inboxes(id),
+    FOREIGN KEY (email_client_id) REFERENCES email_clients(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_email_replies_inbox_received ON email_replies(inbox_id, received_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_email_replies_unhandled ON email_replies(email_client_id, classification, handled_at);
+  CREATE INDEX IF NOT EXISTS idx_email_replies_message_id ON email_replies(message_id);
+`);
+
+// Append-only audit log. Records every consequential action: auto-unsubscribes,
+// manual reclassifications, manual unsubscribes, mailbox connect/disconnect.
+// Used so you can answer "why did this person get unsubscribed?" months later.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS email_audit_log (
+    id TEXT PRIMARY KEY,
+    actor TEXT,                  /* 'system' for auto, or user identifier for manual */
+    action TEXT NOT NULL,        /* 'auto_unsubscribe' | 'manual_unsubscribe' | 'mark_handled' | 'reclassify' | 'connect_mailbox' | etc. */
+    target_type TEXT,            /* 'subscriber' | 'reply' | 'mailbox' */
+    target_id TEXT,
+    reply_id TEXT,
+    metadata TEXT,               /* JSON blob for extra context */
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_email_audit_log_target ON email_audit_log(target_type, target_id);
+  CREATE INDEX IF NOT EXISTS idx_email_audit_log_created ON email_audit_log(created_at DESC);
+`);
+
 export default db;

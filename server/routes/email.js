@@ -6,6 +6,8 @@ import { requireAuth } from '../middleware/auth.js';
 import { sendCampaign, getQuota, getVerifiedDomains } from '../services/ses.js';
 import { getLinkUrl, TRANSPARENT_GIF } from '../services/tracking.js';
 import { getTouchCountsBulk, shouldTrackRecipient } from '../services/touch-count.js';
+import { encrypt, selfTest as cryptoSelfTest } from '../services/crypto-vault.js';
+import { testImapCredentials, pollSingleInbox } from '../services/imap-poller.js';
 import dns from 'dns';
 import { promisify } from 'util';
 
@@ -1106,4 +1108,228 @@ router.get('/campaigns/:id/export/:type', (req, res) => {
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename="${type}-${req.params.id}.csv"`);
   res.send(csv);
+});
+
+// ── MAILBOXES (Phase 3.1) ─────────────────────────────────────────────────────
+// IMAP-based reply monitoring for connected Gmail/Workspace inboxes.
+// Each mailbox belongs to one email_client. App passwords are encrypted at rest.
+
+// GET /api/email/mailboxes — list all connected inboxes (optionally filtered by email_client_id)
+router.get('/mailboxes', (req, res) => {
+  const { email_client_id } = req.query;
+  const sql = email_client_id
+    ? `SELECT i.*,
+         (SELECT COUNT(*) FROM email_replies r WHERE r.inbox_id=i.id AND r.classification='positive' AND r.handled_at IS NULL) as new_prospect_count,
+         (SELECT COUNT(*) FROM email_replies r WHERE r.inbox_id=i.id AND r.auto_unsubscribed=1) as auto_unsub_count,
+         (SELECT COUNT(*) FROM email_replies r WHERE r.inbox_id=i.id AND r.received_at >= datetime('now','-30 days')) as replies_30d
+       FROM email_inboxes i WHERE i.email_client_id=? ORDER BY i.email_address ASC`
+    : `SELECT i.*,
+         (SELECT COUNT(*) FROM email_replies r WHERE r.inbox_id=i.id AND r.classification='positive' AND r.handled_at IS NULL) as new_prospect_count,
+         (SELECT COUNT(*) FROM email_replies r WHERE r.inbox_id=i.id AND r.auto_unsubscribed=1) as auto_unsub_count,
+         (SELECT COUNT(*) FROM email_replies r WHERE r.inbox_id=i.id AND r.received_at >= datetime('now','-30 days')) as replies_30d
+       FROM email_inboxes i ORDER BY i.email_address ASC`;
+  const rows = email_client_id ? db.prepare(sql).all(email_client_id) : db.prepare(sql).all();
+  // Strip the encrypted password from the response — frontend never needs it
+  for (const r of rows) delete r.app_password_encrypted;
+  res.json(rows);
+});
+
+// GET /api/email/mailboxes/badge-count — total new-prospect count across all inboxes
+// Drives the sidebar badge on the Mailboxes menu item
+router.get('/mailboxes/badge-count', (req, res) => {
+  const row = db.prepare(`
+    SELECT COUNT(*) as c FROM email_replies
+    WHERE classification='positive' AND handled_at IS NULL
+  `).get();
+  res.json({ new_prospects: row?.c || 0 });
+});
+
+// POST /api/email/mailboxes/test — verify IMAP credentials before saving
+router.post('/mailboxes/test', async (req, res) => {
+  const { email, app_password } = req.body;
+  if (!email || !app_password) return res.status(400).json({ error: 'email and app_password required' });
+  // Strip whitespace — Google's app password format includes spaces but Gmail accepts either
+  const pw = app_password.replace(/\s+/g, '');
+  const result = await testImapCredentials({ email, appPassword: pw });
+  res.json(result);
+});
+
+// POST /api/email/mailboxes — connect a new mailbox (encrypts and stores the password)
+router.post('/mailboxes', async (req, res) => {
+  const { email_client_id, email, app_password } = req.body;
+  if (!email_client_id || !email || !app_password) {
+    return res.status(400).json({ error: 'email_client_id, email and app_password required' });
+  }
+  // Verify encryption is configured before we save
+  const ct = cryptoSelfTest();
+  if (!ct.ok) return res.status(500).json({ error: `Server misconfigured: ${ct.reason}` });
+
+  const pw = app_password.replace(/\s+/g, '');
+
+  // Test connection first — don't save broken credentials
+  const test = await testImapCredentials({ email, appPassword: pw });
+  if (!test.ok) return res.status(400).json({ error: `IMAP test failed: ${test.error}` });
+
+  try {
+    const id = uuid();
+    db.prepare(`INSERT INTO email_inboxes (id, email_client_id, email_address, app_password_encrypted)
+                VALUES (?, ?, ?, ?)`).run(id, email_client_id, email.toLowerCase().trim(), encrypt(pw));
+    db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, metadata)
+                VALUES (?, 'system', 'connect_mailbox', 'mailbox', ?, ?)`)
+      .run(uuid(), id, JSON.stringify({ email, email_client_id }));
+    res.json({ ok: true, id });
+  } catch (err) {
+    if (err.message.includes('UNIQUE')) return res.status(409).json({ error: 'Mailbox already connected' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/email/mailboxes/:id — update enabled flag, or rotate the app password
+router.put('/mailboxes/:id', async (req, res) => {
+  const ib = db.prepare('SELECT * FROM email_inboxes WHERE id=?').get(req.params.id);
+  if (!ib) return res.status(404).json({ error: 'Not found' });
+  const { enabled, app_password } = req.body;
+  if (typeof enabled === 'boolean') {
+    db.prepare('UPDATE email_inboxes SET enabled=? WHERE id=?').run(enabled ? 1 : 0, req.params.id);
+  }
+  if (app_password) {
+    const pw = app_password.replace(/\s+/g, '');
+    const test = await testImapCredentials({ email: ib.email_address, appPassword: pw });
+    if (!test.ok) return res.status(400).json({ error: `IMAP test failed: ${test.error}` });
+    db.prepare('UPDATE email_inboxes SET app_password_encrypted=?, last_error=NULL WHERE id=?').run(encrypt(pw), req.params.id);
+  }
+  res.json({ ok: true });
+});
+
+// DELETE /api/email/mailboxes/:id — disconnect (keeps reply history)
+router.delete('/mailboxes/:id', (req, res) => {
+  // Replies stay (linked by inbox_id) so historical reports remain. Audit logged.
+  db.prepare('UPDATE email_inboxes SET enabled=0 WHERE id=?').run(req.params.id);
+  db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id)
+              VALUES (?, 'system', 'disconnect_mailbox', 'mailbox', ?)`)
+    .run(uuid(), req.params.id);
+  res.json({ ok: true });
+});
+
+// POST /api/email/mailboxes/:id/poll — trigger an immediate poll (for "Check now" button)
+router.post('/mailboxes/:id/poll', async (req, res) => {
+  const result = await pollSingleInbox(req.params.id);
+  res.json(result);
+});
+
+// GET /api/email/mailboxes/:id/replies — list replies for one inbox
+// query params: ?bucket=all|prospects|auto_unsubscribed|out_of_office&limit=50
+router.get('/mailboxes/:id/replies', (req, res) => {
+  const ib = db.prepare('SELECT id FROM email_inboxes WHERE id=?').get(req.params.id);
+  if (!ib) return res.status(404).json({ error: 'Not found' });
+
+  const bucket = req.query.bucket || 'all';
+  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+
+  let where = 'inbox_id = ?';
+  const args = [req.params.id];
+  if (bucket === 'prospects') {
+    where += " AND classification = 'positive' AND handled_at IS NULL";
+  } else if (bucket === 'auto_unsubscribed') {
+    where += ' AND auto_unsubscribed = 1';
+  } else if (bucket === 'out_of_office') {
+    where += " AND classification = 'auto_reply'";
+  }
+
+  const rows = db.prepare(`
+    SELECT r.*, s.name as subscriber_name, c.title as campaign_title
+    FROM email_replies r
+    LEFT JOIN email_subscribers s ON s.id = r.matched_subscriber_id
+    LEFT JOIN email_campaigns c ON c.id = r.matched_campaign_id
+    WHERE ${where}
+    ORDER BY r.received_at DESC
+    LIMIT ?
+  `).all(...args, limit);
+
+  // Trim huge body fields for the list view — full bodies fetched on detail
+  for (const r of rows) {
+    if (r.body_text && r.body_text.length > 500) r.body_text = r.body_text.slice(0, 500) + '…';
+    delete r.body_html;
+  }
+  res.json(rows);
+});
+
+// GET /api/email/replies/:id — full detail for one reply
+router.get('/replies/:id', (req, res) => {
+  const r = db.prepare(`
+    SELECT r.*, s.name as subscriber_name, s.email as subscriber_email,
+           c.title as campaign_title, c.subject as campaign_subject, c.sent_at as campaign_sent_at,
+           i.email_address as inbox_email
+    FROM email_replies r
+    LEFT JOIN email_subscribers s ON s.id = r.matched_subscriber_id
+    LEFT JOIN email_campaigns c ON c.id = r.matched_campaign_id
+    LEFT JOIN email_inboxes i ON i.id = r.inbox_id
+    WHERE r.id = ?
+  `).get(req.params.id);
+  if (!r) return res.status(404).json({ error: 'Not found' });
+  res.json(r);
+});
+
+// POST /api/email/replies/:id/handle — mark a prospect as handled (clears badge)
+router.post('/replies/:id/handle', (req, res) => {
+  const r = db.prepare('SELECT * FROM email_replies WHERE id=?').get(req.params.id);
+  if (!r) return res.status(404).json({ error: 'Not found' });
+  db.prepare(`UPDATE email_replies SET handled_at=datetime('now'), handled_by='user' WHERE id=?`).run(req.params.id);
+  db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, reply_id)
+              VALUES (?, 'user', 'mark_handled', 'reply', ?, ?)`)
+    .run(uuid(), req.params.id, req.params.id);
+  res.json({ ok: true });
+});
+
+// POST /api/email/replies/:id/reclassify — change classification (manual override)
+router.post('/replies/:id/reclassify', (req, res) => {
+  const { classification } = req.body;
+  const valid = ['positive', 'hard_negative', 'soft_negative', 'auto_reply', 'forwarding', 'neutral'];
+  if (!valid.includes(classification)) return res.status(400).json({ error: 'invalid classification' });
+  const r = db.prepare('SELECT * FROM email_replies WHERE id=?').get(req.params.id);
+  if (!r) return res.status(404).json({ error: 'Not found' });
+  db.prepare('UPDATE email_replies SET classification=?, classification_reason=? WHERE id=?')
+    .run(classification, 'manual override', req.params.id);
+  db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, reply_id, metadata)
+              VALUES (?, 'user', 'reclassify', 'reply', ?, ?, ?)`)
+    .run(uuid(), req.params.id, req.params.id, JSON.stringify({ from: r.classification, to: classification }));
+  res.json({ ok: true });
+});
+
+// POST /api/email/replies/:id/manual-unsubscribe — operator unsubscribes the sender
+// from all lists belonging to this email_client
+router.post('/replies/:id/manual-unsubscribe', (req, res) => {
+  const r = db.prepare('SELECT * FROM email_replies WHERE id=?').get(req.params.id);
+  if (!r) return res.status(404).json({ error: 'Not found' });
+
+  const email = r.from_address;
+  // Find all subscribers with this email across all lists belonging to this email_client
+  const subs = db.prepare(`
+    SELECT s.* FROM email_subscribers s
+    JOIN email_lists l ON s.list_id = l.id
+    WHERE LOWER(s.email) = ? AND l.email_client_id = ? AND s.status = 'subscribed'
+  `).all(email, r.email_client_id);
+
+  for (const s of subs) {
+    db.prepare("UPDATE email_subscribers SET status='unsubscribed', unsubscribed_at=datetime('now') WHERE id=?").run(s.id);
+    db.prepare(`UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?`)
+      .run(s.list_id, s.list_id);
+  }
+  db.prepare('UPDATE email_replies SET auto_unsubscribed=1 WHERE id=?').run(req.params.id);
+  db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, reply_id, metadata)
+              VALUES (?, 'user', 'manual_unsubscribe', 'subscriber', ?, ?, ?)`)
+    .run(uuid(), email, req.params.id, JSON.stringify({ email_client_id: r.email_client_id, lists_affected: subs.length }));
+  res.json({ ok: true, lists_affected: subs.length });
+});
+
+// GET /api/email/audit-log — recent actions, optionally filtered
+router.get('/audit-log', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+  const rows = db.prepare(`SELECT * FROM email_audit_log ORDER BY created_at DESC LIMIT ?`).all(limit);
+  for (const r of rows) {
+    if (r.metadata) {
+      try { r.metadata = JSON.parse(r.metadata); } catch {}
+    }
+  }
+  res.json(rows);
 });
