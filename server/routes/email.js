@@ -837,6 +837,16 @@ router.get('/campaigns/:id/send-preview', (req, res) => {
       will_track:   trackedCount,
       will_send_clean: subs.length - trackedCount,
     },
+    schedule: {
+      status:        campaign.status,            // 'draft' | 'scheduled' | 'sending' | 'paused'
+      scheduled_at:  campaign.scheduled_at,      // ISO date string if scheduled
+      daily_limit:   campaign.daily_limit,       // drip batch size
+      drip_start_at: campaign.drip_start_at,
+      drip_sent:     campaign.drip_sent,
+      send_order:    campaign.send_order,
+      is_drip:       !!campaign.daily_limit && campaign.daily_limit > 0,
+      is_scheduled:  !!campaign.scheduled_at && campaign.status === 'scheduled',
+    },
     list_name: list.name,
   });
 });
@@ -880,8 +890,15 @@ router.post('/campaigns/:id/send', async (req, res) => {
     });
     // Note: email_sends rows are now written inside sendCampaign() at send time
     // (with message_id for SNS bounce/complaint mapping). No bulk insert here.
-    db.prepare(`UPDATE email_campaigns SET status='sent', sent_at=datetime('now'), sent_count=? WHERE id=?`)
-      .run(results.sent, campaign.id);
+    // Re-read status before marking sent — user may have cancelled mid-send.
+    const finalStatus = db.prepare('SELECT status FROM email_campaigns WHERE id=?').get(campaign.id);
+    if (finalStatus && finalStatus.status === 'cancelled') {
+      // Preserve the cancelled status; just record the partial sent count
+      db.prepare(`UPDATE email_campaigns SET sent_count=? WHERE id=?`).run(results.sent, campaign.id);
+    } else {
+      db.prepare(`UPDATE email_campaigns SET status='sent', sent_at=datetime('now'), sent_count=? WHERE id=?`)
+        .run(results.sent, campaign.id);
+    }
   } catch (err) {
     db.prepare("UPDATE email_campaigns SET status='failed' WHERE id=?").run(campaign.id);
     console.error('[email/send] error:', err.message);
@@ -967,6 +984,19 @@ router.post('/campaigns/:id/pause', (req, res) => {
   const newStatus = c.status === 'paused' ? 'sending' : 'paused';
   db.prepare('UPDATE email_campaigns SET status=? WHERE id=?').run(newStatus, req.params.id);
   res.json({ ok: true, status: newStatus });
+});
+
+// Cancel — stop further sends but keep stats. Distinct from delete which removes
+// all data. Once a campaign is cancelled, you can still view the report for the
+// portion that already sent.
+router.post('/campaigns/:id/cancel', (req, res) => {
+  const c = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  if (!['sending', 'paused', 'scheduled'].includes(c.status)) {
+    return res.status(400).json({ error: `Cannot cancel a ${c.status} campaign` });
+  }
+  db.prepare(`UPDATE email_campaigns SET status='cancelled' WHERE id=?`).run(req.params.id);
+  res.json({ ok: true, status: 'cancelled' });
 });
 
 // ── TEST SEND ─────────────────────────────────────────────────────────────────

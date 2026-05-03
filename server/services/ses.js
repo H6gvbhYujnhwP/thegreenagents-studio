@@ -236,7 +236,27 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm 
     (id, campaign_id, subscriber_id, status, sent_at)
     VALUES (?, ?, ?, 'failed', datetime('now'))`);
 
+  // Status checker — runs between batches. Returns one of:
+  //   'continue' → keep sending
+  //   'pause'    → wait until status flips back to 'sending'
+  //   'stop'     → exit the send loop entirely
+  // Used so the user can pause or cancel a campaign mid-send.
+  const checkStatus = db.prepare("SELECT status FROM email_campaigns WHERE id=?");
+  async function statusGate() {
+    while (true) {
+      const row = checkStatus.get(campaign.id);
+      if (!row) return 'stop';                       // campaign deleted
+      if (row.status === 'cancelled') return 'stop'; // user cancelled
+      if (row.status === 'paused')   { await sleep(5000); continue; }  // wait, then re-check
+      return 'continue';
+    }
+  }
+
   for (let i = 0; i < subscribers.length; i += BATCH_SIZE) {
+    // Check pause/cancel before each batch
+    const gate = await statusGate();
+    if (gate === 'stop') break;
+
     const batch = subscribers.slice(i, i + BATCH_SIZE);
     await Promise.all(batch.map(async sub => {
       try {

@@ -15,7 +15,7 @@ function Input({label,value,onChange,placeholder,type='text',required,rows,style
 }
 function Badge({label,color=GREEN,bg}){return <span style={{fontSize:11,padding:'2px 8px',borderRadius:20,fontWeight:500,background:bg||`${color}18`,color,whiteSpace:'nowrap'}}>{label}</span>;}
 function statusBadge(s){
-  const m={draft:{l:'Draft',c:MUTED,b:'#f0f0ed'},scheduled:{l:'Scheduled',c:AMBER,b:'#fff3cd'},sending:{l:'Sending',c:GREEN,b:`${GREEN}15`},paused:{l:'Paused',c:AMBER,b:'#fff3cd'},sent:{l:'Sent',c:BLUE,b:'#e6f1fb'},failed:{l:'Failed',c:DANGER,b:'#fdecea'}};
+  const m={draft:{l:'Draft',c:MUTED,b:'#f0f0ed'},scheduled:{l:'Scheduled',c:AMBER,b:'#fff3cd'},sending:{l:'Sending',c:GREEN,b:`${GREEN}15`},paused:{l:'Paused',c:AMBER,b:'#fff3cd'},sent:{l:'Sent',c:BLUE,b:'#e6f1fb'},failed:{l:'Failed',c:DANGER,b:'#fdecea'},cancelled:{l:'Cancelled',c:MUTED,b:'#f0f0ed'}};
   const x=m[s]||{l:s,c:MUTED,b:'#f0f0ed'};
   return <Badge label={x.l} color={x.c} bg={x.b}/>;
 }
@@ -46,6 +46,16 @@ function touchBadge(n){
   return        <Badge label={`${n+1}${suffix(n+1)} contact`} color="#085041" bg="#E1F5EE"/>;
 }
 function suffix(n){const s=['th','st','nd','rd'],v=n%100;return s[(v-20)%10]||s[v]||s[0];}
+
+// ── Tracking-mode badge for the campaign queue ───────────────────────────────
+// Shows at-a-glance which campaigns track recipients vs send clean
+function trackingBadge(c){
+  const mode = c.tracking_mode || 'off';
+  if (mode === 'off')   return <Badge label="clean" color={MUTED} bg="#f0f0ed"/>;
+  if (mode === 'smart') return <Badge label="smart" color={BLUE} bg="#e6f1fb"/>;
+  if (mode === 'all')   return <Badge label="tracked" color={AMBER} bg="#fff3cd"/>;
+  return null;
+}
 
 // ── Toggle switch (matches the design mockup) ────────────────────────────────
 function Toggle({checked,onChange}){
@@ -170,12 +180,39 @@ function SendCampaignDialog({campaignId, onClose, onConfirmed}){
   </Modal>);
 
   const t=preview.tracking;
+  const sched=preview.schedule||{};
   const showTrackingNote = (t.mode!=='off') && (t.track_opens||t.track_clicks||t.track_unsub);
+
+  // Friendly label for the existing schedule, if any
+  function scheduleLabel(){
+    if (sched.is_drip) {
+      const startDate = sched.drip_start_at ? new Date(sched.drip_start_at).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}) : 'unscheduled';
+      const sentSoFar = sched.drip_sent || 0;
+      const order = sched.send_order==='random'?'random order':'top of list first';
+      return `Drip campaign — ${sched.daily_limit.toLocaleString()}/day, ${order}, started ${startDate}. ${sentSoFar.toLocaleString()} already sent.`;
+    }
+    if (sched.is_scheduled) {
+      const when = new Date(sched.scheduled_at).toLocaleString('en-GB',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+      return `Scheduled to send at ${when}.`;
+    }
+    return null;
+  }
+  const schedMsg = scheduleLabel();
+  const isOverridingSchedule = !!schedMsg; // sending now would skip the schedule
 
   return(<Modal title="Send campaign?" onClose={onClose} wide>
     <p style={{fontSize:13,color:MUTED,margin:'0 0 16px'}}>
       Sending to <span style={{fontWeight:500,color:TEXT}}>{preview.total_recipients.toLocaleString()} recipients</span> on list <em>{preview.list_name}</em>.
     </p>
+
+    {/* Schedule context — shown when this campaign already has a schedule/drip */}
+    {isOverridingSchedule && (
+      <div style={{background:'#fff3cd',borderLeft:`3px solid ${AMBER}`,borderRadius:6,padding:'10px 14px',marginBottom:14}}>
+        <div style={{fontSize:12,fontWeight:500,color:AMBER,marginBottom:4}}>This campaign already has a schedule</div>
+        <div style={{fontSize:12,color:AMBER,lineHeight:1.5}}>{schedMsg}</div>
+        <div style={{fontSize:11,color:AMBER,marginTop:6,opacity:0.85}}>Sending now will fire the rest of the campaign immediately, ignoring the schedule. To keep the schedule, click Cancel and use the Schedule controls instead.</div>
+      </div>
+    )}
 
     {/* Bucket histogram */}
     <div style={{background:'#fafaf8',borderRadius:7,padding:14,marginBottom:14,border:`0.5px solid ${BORDER}`}}>
@@ -213,7 +250,7 @@ function SendCampaignDialog({campaignId, onClose, onConfirmed}){
 
     <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
       <Btn onClick={onClose} disabled={sending}>Cancel</Btn>
-      <Btn variant="primary" onClick={doSend} disabled={sending}>{sending?'Sending…':`Send ${preview.total_recipients.toLocaleString()} email${preview.total_recipients===1?'':'s'}`}</Btn>
+      <Btn variant={isOverridingSchedule?'amber':'primary'} onClick={doSend} disabled={sending}>{sending?'Sending…':isOverridingSchedule?`Override schedule and send ${preview.total_recipients.toLocaleString()} now`:`Send ${preview.total_recipients.toLocaleString()} email${preview.total_recipients===1?'':'s'}`}</Btn>
     </div>
   </Modal>);
 }
@@ -1083,7 +1120,7 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
     const r=await fetch(`/api/email/campaigns?email_client_id=${emailClient.id}`);
     const d=await r.json();
     // Sort: sending first, then scheduled, then draft, then sent
-    const order={sending:0,paused:1,scheduled:2,draft:3,sent:4,failed:5};
+    const order={sending:0,paused:1,scheduled:2,draft:3,sent:4,cancelled:5,failed:6};
     setCampaigns(Array.isArray(d)?d.sort((a,b)=>(order[a.status]||9)-(order[b.status]||9)):[]);
     setLoading(false);
   }
@@ -1115,6 +1152,16 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
     if(!confirm('Delete this campaign?'))return;
     await fetch(`/api/email/campaigns/${id}`,{method:'DELETE'});
     load();onRefresh();
+  }
+
+  // Cancel — for sending/paused/scheduled campaigns. Stops further sends but
+  // preserves stats. Distinct from delete which removes everything including reports.
+  async function cancelCampaign(id){
+    if(!confirm('Stop this campaign? Already-sent emails are kept for reporting. The remainder will not be sent.'))return;
+    const r=await fetch(`/api/email/campaigns/${id}/cancel`,{method:'POST'});
+    const d=await r.json();
+    if(d.error){alert(d.error);return;}
+    load();
   }
 
   const getLists=()=>lists;
@@ -1164,7 +1211,11 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
                   <tr key={c.id} style={{background:c.status==='sending'?`${GREEN}08`:c.status==='paused'?'#fff3cd18':'transparent'}}>
                     <TD muted>{i+1}</TD>
                     <TD>
-                      <div style={{fontWeight:500,color:TEXT,cursor:'pointer'}} onClick={isSent?()=>onViewReport(c):undefined}>{c.title}{isSent&&<span style={{fontSize:10,color:BLUE,marginLeft:6}}>View report →</span>}</div>
+                      <div style={{fontWeight:500,color:TEXT,cursor:'pointer',display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}} onClick={isSent?()=>onViewReport(c):undefined}>
+                        <span>{c.title}</span>
+                        {trackingBadge(c)}
+                        {isSent&&<span style={{fontSize:10,color:BLUE}}>View report →</span>}
+                      </div>
                       <div style={{fontSize:11,color:MUTED,marginTop:1}}>{c.subject}</div>
                     </TD>
                     <TD>{statusBadge(c.status)}</TD>
@@ -1196,10 +1247,14 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
                         </>}
                         {isSending&&<>
                           <Btn small variant="amber" onClick={()=>togglePause(c.id)}>{c.status==='paused'?'Resume':'Pause'}</Btn>
-                          <Btn small variant="danger" onClick={()=>deleteCampaign(c.id)}>Cancel</Btn>
+                          <Btn small variant="danger" onClick={()=>cancelCampaign(c.id)}>Cancel</Btn>
                         </>}
                         {isSent&&<Btn small onClick={()=>onViewReport(c)}>View report</Btn>}
-                        {!isSending&&<Btn small variant="danger" onClick={()=>deleteCampaign(c.id)}>Delete</Btn>}
+                        {c.status==='cancelled'&&<>
+                          <Btn small onClick={()=>onViewReport(c)}>View partial report</Btn>
+                          <Btn small variant="danger" onClick={()=>deleteCampaign(c.id)}>Delete</Btn>
+                        </>}
+                        {!isSending&&c.status!=='cancelled'&&<Btn small variant="danger" onClick={()=>deleteCampaign(c.id)}>Delete</Btn>}
                         {(c.status==='draft'||c.status==='scheduled')&&<>
                           <Btn small variant="blue" onClick={()=>sendTest(c.id)}>{testStatus[c.id]==='sending'?'Sending…':testStatus[c.id]==='sent'?'✓ Sent!':testStatus[c.id]==='error'?'Error':'Test'}</Btn>
                         </>}
