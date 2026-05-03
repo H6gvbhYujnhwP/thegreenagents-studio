@@ -830,25 +830,48 @@ function CampaignReport({campaign,lists,onBack}){
   const notOpened=sent>0?sent-opens:0;
   const pct=(n,d)=>d>0?((n/d)*100).toFixed(2)+'%':'0%';
 
+  // What signals were tracked? Drives which panels to render.
+  // Bounce/spam tracking is via SNS at the AWS account level, NOT the campaign,
+  // so those numbers are always meaningful and always shown.
+  const tracksOpens  = !!c.track_opens  && (c.tracking_mode||'off')!=='off';
+  const tracksClicks = !!c.track_clicks && (c.tracking_mode||'off')!=='off';
+  const tracksUnsub  = !!c.track_unsub  && (c.tracking_mode||'off')!=='off';
+  const noEngagementTracked = !tracksOpens && !tracksClicks && !tracksUnsub;
+
   return(<div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0,overflow:'auto',background:BG,padding:20}}>
     <button onClick={onBack} style={{background:'none',border:'none',cursor:'pointer',color:MUTED,fontSize:12,padding:0,display:'flex',alignItems:'center',gap:4,marginBottom:12}}>← Back to campaigns</button>
-    <div style={{fontSize:16,fontWeight:500,color:TEXT,marginBottom:3}}>{c.title} — Report</div>
+    <div style={{fontSize:16,fontWeight:500,color:TEXT,marginBottom:3,display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+      <span>{c.title} — Report</span>
+      {trackingBadge(c)}
+    </div>
     <div style={{fontSize:12,color:MUTED,marginBottom:16}}>
       Sent {c.sent_at?new Date(c.sent_at).toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'—'} &nbsp;·&nbsp; From: {c.from_name} &lt;{c.from_email}&gt; &nbsp;·&nbsp; To: {list?.name||'—'}
     </div>
 
-    {/* Stats bar */}
+    {/* Tracking-disabled notice */}
+    {noEngagementTracked && (
+      <div style={{background:'#e6f1fb',borderLeft:`3px solid ${BLUE}`,borderRadius:6,padding:'12px 14px',marginBottom:14}}>
+        <div style={{fontSize:13,fontWeight:500,color:BLUE,marginBottom:4}}>Sent without engagement tracking</div>
+        <div style={{fontSize:12,color:BLUE,lineHeight:1.6}}>
+          This campaign was deliberately sent without open or click tracking — the right call for cold outreach because tracking signals can hurt deliverability by 15–30%.
+          Opens and clicks aren't recorded for this campaign. <b>Bounces and spam complaints are still tracked</b> via AWS SNS at the account level.
+          For domain reputation monitoring, use Google Postmaster Tools and Microsoft SNDS rather than open rates.
+        </div>
+      </div>
+    )}
+
+    {/* Stats bar — only shows cards relevant to what was actually tracked */}
     <div style={{background:CARD,border:`0.5px solid ${BORDER}`,borderRadius:10,overflow:'hidden',marginBottom:14}}>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(6,1fr)',borderBottom:`0.5px solid ${BORDER}`}}>
+      <div style={{display:'flex',borderBottom:`0.5px solid ${BORDER}`}}>
         {[
-          {n:sent,l:'Recipients',c:TEXT},
-          {n:opens,pct:pct(opens,sent),l:'Opened',c:GREEN},
-          {n:clicks,pct:pct(clicks,sent),l:'Clicked',c:BLUE},
-          {n:notOpened,pct:pct(notOpened,sent),l:'Not opened',c:AMBER},
-          {n:unsubs,pct:pct(unsubs,sent),l:'Unsubscribed',c:DANGER},
-          {n:bounces,pct:pct(bounces,sent),l:'Bounced',c:DANGER},
-        ].map((s,i)=>(
-          <div key={i} style={{padding:'12px 14px',borderRight:i<5?`0.5px solid ${BORDER}`:'none'}}>
+          {n:sent,l:'Recipients',c:TEXT,show:true},
+          {n:opens,pct:pct(opens,sent),l:'Opened',c:GREEN,show:tracksOpens},
+          {n:clicks,pct:pct(clicks,sent),l:'Clicked',c:BLUE,show:tracksClicks},
+          {n:notOpened,pct:pct(notOpened,sent),l:'Not opened',c:AMBER,show:tracksOpens},
+          {n:unsubs,pct:pct(unsubs,sent),l:'Unsubscribed',c:DANGER,show:tracksUnsub},
+          {n:bounces,pct:pct(bounces,sent),l:'Bounced',c:DANGER,show:true},
+        ].filter(s=>s.show).map((s,i,arr)=>(
+          <div key={i} style={{flex:1,padding:'12px 14px',borderRight:i<arr.length-1?`0.5px solid ${BORDER}`:'none'}}>
             <div style={{fontSize:20,fontWeight:500,color:s.c}}>{s.n.toLocaleString()}</div>
             {s.pct&&<div style={{fontSize:11,fontWeight:500,color:s.c,marginTop:1}}>{s.pct}</div>}
             <div style={{fontSize:10,color:MUTED,marginTop:2}}>{s.l}</div>
@@ -856,9 +879,9 @@ function CampaignReport({campaign,lists,onBack}){
         ))}
       </div>
       <div style={{padding:'10px 14px',display:'flex',gap:8,flexWrap:'wrap'}}>
-        <Btn small onClick={()=>exportData('openers')}>Export openers</Btn>
-        <Btn small onClick={()=>exportData('clickers')}>Export clickers</Btn>
-        <Btn small onClick={()=>exportData('non-openers')}>Export non-openers</Btn>
+        {tracksOpens&&<Btn small onClick={()=>exportData('openers')}>Export openers</Btn>}
+        {tracksClicks&&<Btn small onClick={()=>exportData('clickers')}>Export clickers</Btn>}
+        {tracksOpens&&<Btn small onClick={()=>exportData('non-openers')}>Export non-openers</Btn>}
         <Btn small onClick={()=>exportData('bounced')}>Export bounced</Btn>
         <Btn small variant="primary" style={{marginLeft:'auto'}} onClick={async()=>{
           const r=await fetch(`/api/email/campaigns/${c.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({...c,title:c.title+' (copy)',status:'draft',sent_at:null,sent_count:0,open_count:0,click_count:0,bounce_count:0,unsubscribe_count:0})});
@@ -867,17 +890,19 @@ function CampaignReport({campaign,lists,onBack}){
       </div>
     </div>
 
+    {/* Engagement panels — only shown when at least one tracking signal is on */}
+    {!noEngagementTracked && <>
     <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14,marginBottom:14}}>
       {/* Engagement breakdown */}
       <div style={{background:CARD,border:`0.5px solid ${BORDER}`,borderRadius:10,overflow:'hidden'}}>
         <div style={{padding:'10px 14px',borderBottom:`0.5px solid ${BORDER}`,fontSize:11,fontWeight:500,color:MUTED,textTransform:'uppercase',letterSpacing:'.06em'}}>Engagement breakdown</div>
         {[
-          {pct:pct(opens,sent),label:'Opened',detail:`${opens.toLocaleString()} unique`,c:GREEN},
-          {pct:pct(notOpened,sent),label:'Not opened',detail:`${notOpened.toLocaleString()} subscribers`,c:AMBER,action:()=>exportData('non-openers')},
-          {pct:pct(clicks,sent),label:'Clicked a link',detail:`${clicks.toLocaleString()} unique`,c:BLUE},
-          {pct:pct(unsubs,sent),label:'Unsubscribed',detail:`${unsubs.toLocaleString()} removed`,c:DANGER},
-          {pct:pct(bounces,sent),label:'Bounced',detail:`${bounces.toLocaleString()} hard bounces`,c:DANGER},
-        ].map((m,i)=>(
+          {pct:pct(opens,sent),label:'Opened',detail:`${opens.toLocaleString()} unique`,c:GREEN,show:tracksOpens},
+          {pct:pct(notOpened,sent),label:'Not opened',detail:`${notOpened.toLocaleString()} subscribers`,c:AMBER,show:tracksOpens,action:()=>exportData('non-openers')},
+          {pct:pct(clicks,sent),label:'Clicked a link',detail:`${clicks.toLocaleString()} unique`,c:BLUE,show:tracksClicks},
+          {pct:pct(unsubs,sent),label:'Unsubscribed',detail:`${unsubs.toLocaleString()} removed`,c:DANGER,show:tracksUnsub},
+          {pct:pct(bounces,sent),label:'Bounced',detail:`${bounces.toLocaleString()} hard bounces`,c:DANGER,show:true},
+        ].filter(m=>m.show).map((m,i)=>(
           <div key={i} style={{padding:'10px 14px',borderBottom:`0.5px solid ${BORDER}`,display:'flex',alignItems:'center',gap:10}}>
             <div style={{fontSize:17,fontWeight:500,color:m.c,minWidth:52}}>{m.pct}</div>
             <div style={{flex:1}}>
@@ -889,7 +914,8 @@ function CampaignReport({campaign,lists,onBack}){
         ))}
       </div>
 
-      {/* Bar chart countries placeholder */}
+      {/* Top countries — only meaningful with open tracking on */}
+      {tracksOpens ? (
       <div style={{background:CARD,border:`0.5px solid ${BORDER}`,borderRadius:10,overflow:'hidden'}}>
         <div style={{padding:'10px 14px',borderBottom:`0.5px solid ${BORDER}`,fontSize:11,fontWeight:500,color:MUTED,textTransform:'uppercase',letterSpacing:'.06em'}}>Top countries</div>
         <div style={{padding:14}}>
@@ -908,19 +934,26 @@ function CampaignReport({campaign,lists,onBack}){
               <div style={{width:30,color:TEXT,fontSize:11,fontWeight:500,flexShrink:0}}>{count}</div>
             </div>
           ))}
-          <div style={{fontSize:11,color:MUTED,marginTop:6}}>* Country data available after open tracking is enabled</div>
+          <div style={{fontSize:11,color:MUTED,marginTop:6}}>* Country data is approximate (based on open events)</div>
         </div>
       </div>
+      ) : (
+        <div style={{background:CARD,border:`0.5px solid ${BORDER}`,borderRadius:10,padding:14,fontSize:12,color:MUTED,display:'flex',alignItems:'center',justifyContent:'center'}}>
+          Top countries panel hidden — open tracking is off for this campaign.
+        </div>
+      )}
     </div>
+    </>}
 
-    {/* Link activity */}
+    {/* Link activity — only shown if click tracking was on */}
+    {tracksClicks && (
     <div style={{background:CARD,border:`0.5px solid ${BORDER}`,borderRadius:10,overflow:'hidden'}}>
       <div style={{padding:'10px 14px',borderBottom:`0.5px solid ${BORDER}`,fontSize:11,fontWeight:500,color:MUTED,textTransform:'uppercase',letterSpacing:'.06em',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
         Link activity
         <Btn small onClick={()=>exportData('clickers')}>Export all clickers</Btn>
       </div>
       {!report||report.link_clicks?.length===0?(
-        <div style={{padding:24,textAlign:'center',color:MUTED,fontSize:13}}>No link clicks recorded yet — link tracking will be available in the next update.</div>
+        <div style={{padding:24,textAlign:'center',color:MUTED,fontSize:13}}>No link clicks recorded yet.</div>
       ):(
         <table style={{width:'100%',borderCollapse:'collapse'}}>
           <thead><tr><TH>Link URL</TH><TH>Unique clicks</TH><TH>Total clicks</TH><TH>Actions</TH></tr></thead>
@@ -937,6 +970,7 @@ function CampaignReport({campaign,lists,onBack}){
         </table>
       )}
     </div>
+    )}
   </div>);
 }
 
