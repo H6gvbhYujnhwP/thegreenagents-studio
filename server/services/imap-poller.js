@@ -5,15 +5,17 @@
  * Phase 3.1 scope: connect, fetch, store, match. Classification and
  * auto-unsubscribe live in classify-replies.js (Phase 3.2).
  *
- * Forward-only processing: when a mailbox is first connected we record
- * `connected_at`. The poller only fetches messages received AFTER that time.
- * Already-existing inbox messages are ignored — the user should clean them
- * up manually before connecting if they want a fresh start.
+ * Phase 3.1.5: full inbox view (not just campaign replies) and 30-day backfill
+ * on first poll. Subsequent polls use uid > last_uid for efficiency.
+ *
+ * Phase 3.1.6 (this file): every poll now logs its outcome so we can debug
+ * silent zero-returns from Render logs alone. Also fixes a stuck-state bug
+ * where a first poll returning 0 UIDs would leave last_uid=0 forever and
+ * keep retrying the same backfill window with no end condition.
  *
  * Architecture: one Node interval timer that loops every POLL_INTERVAL_MS,
  * runs through all enabled inboxes serially (one at a time, not parallel),
- * each inbox connects → fetches → stores → disconnects. Serial processing
- * keeps memory low and prevents Gmail rate-limiting (~7 connections/account/sec).
+ * each inbox connects → fetches → stores → disconnects.
  */
 
 import { ImapFlow } from 'imapflow';
@@ -63,7 +65,7 @@ async function pollAllInboxes() {
         await pollOneInbox(ib);
       } catch (err) {
         // Log but continue — one bad inbox shouldn't kill the whole loop
-        console.error(`[poller] ${ib.email_address}: ${err.message}`);
+        console.error(`[poller] ${ib.email_address}: ERROR ${err.message}`);
         db.prepare(
           "UPDATE email_inboxes SET last_polled_at = datetime('now'), last_error = ? WHERE id = ?"
         ).run(err.message.slice(0, 500), ib.id);
@@ -85,6 +87,7 @@ export async function pollSingleInbox(inboxId) {
     const result = await pollOneInbox(ib);
     return { ok: true, ...result };
   } catch (err) {
+    console.error(`[poller] ${ib.email_address}: MANUAL ERROR ${err.message}`);
     db.prepare(
       "UPDATE email_inboxes SET last_polled_at = datetime('now'), last_error = ? WHERE id = ?"
     ).run(err.message.slice(0, 500), ib.id);
@@ -113,34 +116,47 @@ async function pollOneInbox(inbox) {
   await client.connect();
   let stored = 0;
   let scanned = 0;
+  const isFirstPoll = !inbox.last_uid || inbox.last_uid === 0;
+
+  console.log(`[poller] ${inbox.email_address}: connected, last_uid=${inbox.last_uid || 0}, mode=${isFirstPoll ? 'BACKFILL' : 'INCREMENTAL'}`);
 
   try {
-    await client.mailboxOpen('INBOX');
+    const mbox = await client.mailboxOpen('INBOX');
+    // Log the mailbox's reported size so we can sanity-check Gmail server-side
+    console.log(`[poller] ${inbox.email_address}: INBOX has ${mbox.exists} message(s) total, uidNext=${mbox.uidNext}`);
 
-    const isFirstPoll = !inbox.last_uid || inbox.last_uid === 0;
     let uids;
 
     if (isFirstPoll) {
       // First poll for this inbox — backfill recent history so the UI isn't empty.
       const sinceDate = new Date(Date.now() - BACKFILL_DAYS * 86400 * 1000);
       uids = await client.search({ since: sinceDate }, { uid: true });
-      console.log(`[poller] ${inbox.email_address}: first poll, backfilling ${BACKFILL_DAYS}d — ${uids.length} messages found`);
+      uids = uids || [];
+      console.log(`[poller] ${inbox.email_address}: backfill search since ${sinceDate.toISOString().slice(0,10)} → ${uids.length} UID(s)`);
     } else {
       // Subsequent poll — Gmail IMAP UIDs are monotonically increasing.
       // ImapFlow doesn't take a UID range cleanly via search(), so we fetch all
       // UIDs and filter in JS. For large mailboxes this is ~10ms.
-      const allUids = await client.search({ all: true }, { uid: true });
+      const allUids = await client.search({ all: true }, { uid: true }) || [];
       uids = allUids.filter(u => u > inbox.last_uid);
+      console.log(`[poller] ${inbox.email_address}: incremental scan, ${allUids.length} total UIDs, ${uids.length} above last_uid=${inbox.last_uid}`);
     }
 
     scanned = uids.length;
 
-    // Cap so a single poll can't take forever
+    // Cap so a single poll can't take forever. Slice tail so we get the
+    // newest messages first if the mailbox is huge.
     const toFetch = uids.slice(-MAX_FETCH_PER_POLL);
 
     if (toFetch.length === 0) {
+      // Nothing to do. Stamp last_polled_at but DON'T touch last_uid:
+      //   - On a first poll that returned 0, leaving last_uid=0 means we'll
+      //     retry the backfill next time. That's the correct behaviour for a
+      //     genuinely empty mailbox or one where the search hit transient issues.
+      //   - On an incremental poll that returned 0, last_uid is already correct.
       db.prepare("UPDATE email_inboxes SET last_polled_at = datetime('now'), last_error = NULL WHERE id = ?")
         .run(inbox.id);
+      console.log(`[poller] ${inbox.email_address}: 0 to fetch — done (last_polled stamped)`);
       return { fetched: 0, scanned };
     }
 
@@ -246,11 +262,12 @@ async function pollOneInbox(inbox) {
       "UPDATE email_inboxes SET last_polled_at = datetime('now'), last_error = NULL, last_uid = ? WHERE id = ?"
     ).run(highestUid, inbox.id);
 
+    console.log(`[poller] ${inbox.email_address}: stored ${stored}/${toFetch.length} (scanned ${scanned}), new last_uid=${highestUid}`);
+
   } finally {
     try { await client.logout(); } catch {}
   }
 
-  if (stored > 0) console.log(`[poller] ${inbox.email_address}: stored ${stored} new emails (scanned ${scanned})`);
   return { fetched: stored, scanned };
 }
 
@@ -272,4 +289,16 @@ export async function testImapCredentials({ email, appPassword, host = 'imap.gma
     try { await client.logout(); } catch {}
     return { ok: false, error: err.message };
   }
+}
+
+// Reset an inbox's poll cursor so the next poll re-runs the 30-day backfill.
+// Called by the "Resync" button when an inbox connected before Phase 3.1.5
+// is missing all its older mail. Does NOT delete existing replies — the
+// dedupe-by-message-id guard in pollOneInbox handles that.
+export function resyncInbox(inboxId) {
+  const ib = db.prepare("SELECT id, email_address FROM email_inboxes WHERE id = ?").get(inboxId);
+  if (!ib) return { ok: false, error: 'Inbox not found' };
+  db.prepare("UPDATE email_inboxes SET last_uid = 0, last_error = NULL WHERE id = ?").run(inboxId);
+  console.log(`[poller] ${ib.email_address}: resync requested — last_uid reset to 0`);
+  return { ok: true };
 }

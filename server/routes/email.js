@@ -7,7 +7,7 @@ import { sendCampaign, getQuota, getVerifiedDomains } from '../services/ses.js';
 import { getLinkUrl, TRANSPARENT_GIF } from '../services/tracking.js';
 import { getTouchCountsBulk, shouldTrackRecipient } from '../services/touch-count.js';
 import { encrypt, selfTest as cryptoSelfTest } from '../services/crypto-vault.js';
-import { testImapCredentials, pollSingleInbox } from '../services/imap-poller.js';
+import { testImapCredentials, pollSingleInbox, resyncInbox } from '../services/imap-poller.js';
 import dns from 'dns';
 import { promisify } from 'util';
 
@@ -1213,6 +1213,22 @@ router.delete('/mailboxes/:id', (req, res) => {
 
 // POST /api/email/mailboxes/:id/poll — trigger an immediate poll (for "Check now" button)
 router.post('/mailboxes/:id/poll', async (req, res) => {
+  const result = await pollSingleInbox(req.params.id);
+  res.json(result);
+});
+
+// POST /api/email/mailboxes/:id/resync — reset the poll cursor so the next poll
+// re-runs the 30-day backfill from scratch. For mailboxes connected before the
+// Phase 3.1.5 backfill behaviour was added, or any time the inbox view looks empty
+// when the underlying mailbox isn't. Does NOT delete existing replies; dedupe by
+// message_id prevents duplicates on re-fetch.
+router.post('/mailboxes/:id/resync', async (req, res) => {
+  const reset = resyncInbox(req.params.id);
+  if (!reset.ok) return res.status(404).json(reset);
+  db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id)
+              VALUES (?, 'user', 'resync_mailbox', 'mailbox', ?)`)
+    .run(uuid(), req.params.id);
+  // Trigger an immediate poll so the user sees results without waiting 3 min
   const result = await pollSingleInbox(req.params.id);
   res.json(result);
 });

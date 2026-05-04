@@ -1483,8 +1483,18 @@ export default function EmailSection({initialTab='customers'}){
 // Date helper used in several mailbox views: "14 min ago", "2 h ago", "yesterday"
 function relTime(iso){
   if(!iso) return '—';
-  const d=new Date(iso); const now=Date.now();
+  // SQLite's datetime('now') returns "YYYY-MM-DD HH:MM:SS" — a UTC string with
+  // a space separator and no timezone marker. Chrome/Edge parse that as LOCAL
+  // time, which makes timestamps appear off by the user's TZ offset (e.g. 1h
+  // behind in BST). Detect and force-treat as UTC. ISO strings (with T and Z,
+  // like email received_at values) parse correctly without modification.
+  let s = iso;
+  if (typeof s === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
+    s = s.replace(' ', 'T') + 'Z';
+  }
+  const d=new Date(s); const now=Date.now();
   const sec=Math.round((now-d.getTime())/1000);
+  if (sec<0)         return 'just now';            // clock skew safety net
   if (sec<60)        return 'just now';
   if (sec<3600)      return `${Math.round(sec/60)}m ago`;
   if (sec<86400)     return `${Math.round(sec/3600)}h ago`;
@@ -1636,6 +1646,26 @@ function MailboxDetail({inbox, onRefresh}){
       setTimeout(()=>setPollMsg(null), 8000);
     }
   }
+  // Resync — reset the IMAP cursor so the next poll re-runs the 30-day backfill.
+  // Used when an inbox connected pre-Phase-3.1.5 is showing an empty inbox.
+  async function resyncNow(){
+    if(!confirm('Resync this mailbox?\n\nThis re-fetches the last 30 days of mail from Gmail. Existing emails won\'t be duplicated. Use this if the inbox looks emptier than it should.')) return;
+    setPolling(true);
+    setPollMsg(null);
+    const r=await fetch(`/api/email/mailboxes/${inbox.id}/resync`,{method:'POST'});
+    const d=await r.json();
+    setPolling(false);
+    if(d.ok){
+      loadReplies();
+      onRefresh();
+      const f=d.fetched||0, s=d.scanned||0;
+      setPollMsg({ok:true, text:`Resync complete — fetched ${f} email${f===1?'':'s'} (scanned ${s})`});
+      setTimeout(()=>setPollMsg(null), 6000);
+    } else {
+      setPollMsg({ok:false, text:d.error||'Resync failed'});
+      setTimeout(()=>setPollMsg(null), 8000);
+    }
+  }
 
   return(<div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0,overflow:'hidden'}}>
 
@@ -1650,6 +1680,15 @@ function MailboxDetail({inbox, onRefresh}){
         </div>
       </div>
       <Btn small onClick={checkNow} disabled={polling}>{polling?'Checking…':'Check now'}</Btn>
+      <button
+        onClick={resyncNow}
+        disabled={polling}
+        title="Reset the IMAP cursor and re-fetch the last 30 days. Use if the inbox looks empty when it shouldn't."
+        style={{
+          background:'transparent',border:'none',padding:'4px 8px',fontSize:11,
+          color:polling?MUTED:BLUE,cursor:polling?'default':'pointer',textDecoration:'underline',
+        }}
+      >Resync</button>
     </div>
 
     {/* Poll-result toast — disappears after 5s */}
