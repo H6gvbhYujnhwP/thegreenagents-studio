@@ -23,7 +23,8 @@ import db from '../db.js';
 import { decrypt } from './crypto-vault.js';
 
 const POLL_INTERVAL_MS = 3 * 60 * 1000;   // 3 minutes
-const MAX_FETCH_PER_POLL = 50;            // safety cap per inbox per cycle
+const MAX_FETCH_PER_POLL = 200;           // cap per cycle; on backfill this can fill quickly
+const BACKFILL_DAYS = 30;                 // first-poll backfill window
 
 let pollerHandle = null;
 let isPolling = false;   // prevents overlapping runs if a poll takes >3 min
@@ -73,14 +74,16 @@ async function pollAllInboxes() {
   }
 }
 
-// Manual one-off poll trigger — used by the "test connection" route.
-// Returns { ok, fetched, error } so the UI can display feedback.
+// Manual one-off poll trigger — used by the "Check now" button.
+// Returns { ok, fetched, scanned, error } so the UI can display feedback.
+//   scanned = how many UIDs the IMAP search returned (visible inbox size in window)
+//   fetched = how many we actually wrote to the DB this run (new since last poll)
 export async function pollSingleInbox(inboxId) {
   const ib = db.prepare("SELECT * FROM email_inboxes WHERE id = ?").get(inboxId);
   if (!ib) return { ok: false, error: 'Inbox not found' };
   try {
-    const fetched = await pollOneInbox(ib);
-    return { ok: true, fetched };
+    const result = await pollOneInbox(ib);
+    return { ok: true, ...result };
   } catch (err) {
     db.prepare(
       "UPDATE email_inboxes SET last_polled_at = datetime('now'), last_error = ? WHERE id = ?"
@@ -90,7 +93,12 @@ export async function pollSingleInbox(inboxId) {
 }
 
 // Connect to one inbox, fetch new mail, parse, store, disconnect.
-// Returns the count of replies stored.
+// Returns { fetched, scanned } — how many we stored vs how many we looked at.
+//
+// First poll for an inbox (last_uid = 0): fetches the last BACKFILL_DAYS of mail
+// so the user sees recent context, not an empty inbox.
+// Subsequent polls: fetches anything with UID > last_uid (efficient — IMAP UIDs
+// only ever increase within a folder, so we never reprocess what we've seen).
 async function pollOneInbox(inbox) {
   const password = decrypt(inbox.app_password_encrypted);
   const client = new ImapFlow({
@@ -98,46 +106,56 @@ async function pollOneInbox(inbox) {
     port: inbox.imap_port,
     secure: true,
     auth: { user: inbox.email_address, pass: password },
-    logger: false,                    // suppress verbose imapflow logs
+    logger: false,
     socketTimeout: 30_000,
   });
 
   await client.connect();
   let stored = 0;
+  let scanned = 0;
 
   try {
-    // Open INBOX read-write so we can mark messages seen if we want to.
-    // For Phase 3.1 we don't mark anything — Gmail will continue to show
-    // them as unread in the user's mail client.
     await client.mailboxOpen('INBOX');
 
-    // Forward-only: only messages received SINCE the inbox was connected.
-    // Plus we additionally filter on UID > last_uid so we never re-process
-    // a message we've already stored, even if connected_at is older.
-    const sinceDate = new Date(inbox.connected_at);
-    const searchCriteria = { since: sinceDate };
+    const isFirstPoll = !inbox.last_uid || inbox.last_uid === 0;
+    let uids;
 
-    // imapflow's search returns UIDs by default
-    const uids = await client.search(searchCriteria, { uid: true });
-    const newUids = uids.filter(u => u > (inbox.last_uid || 0)).slice(-MAX_FETCH_PER_POLL);
-    if (newUids.length === 0) {
+    if (isFirstPoll) {
+      // First poll for this inbox — backfill recent history so the UI isn't empty.
+      const sinceDate = new Date(Date.now() - BACKFILL_DAYS * 86400 * 1000);
+      uids = await client.search({ since: sinceDate }, { uid: true });
+      console.log(`[poller] ${inbox.email_address}: first poll, backfilling ${BACKFILL_DAYS}d — ${uids.length} messages found`);
+    } else {
+      // Subsequent poll — Gmail IMAP UIDs are monotonically increasing.
+      // ImapFlow doesn't take a UID range cleanly via search(), so we fetch all
+      // UIDs and filter in JS. For large mailboxes this is ~10ms.
+      const allUids = await client.search({ all: true }, { uid: true });
+      uids = allUids.filter(u => u > inbox.last_uid);
+    }
+
+    scanned = uids.length;
+
+    // Cap so a single poll can't take forever
+    const toFetch = uids.slice(-MAX_FETCH_PER_POLL);
+
+    if (toFetch.length === 0) {
       db.prepare("UPDATE email_inboxes SET last_polled_at = datetime('now'), last_error = NULL WHERE id = ?")
         .run(inbox.id);
-      return 0;
+      return { fetched: 0, scanned };
     }
 
     let highestUid = inbox.last_uid || 0;
 
-    for (const uid of newUids) {
+    for (const uid of toFetch) {
       try {
         const message = await client.fetchOne(uid, { source: true, envelope: true }, { uid: true });
         if (!message || !message.source) continue;
 
-        // Skip if we already have this message_id (defensive; the UID filter
-        // above should catch this, but Gmail's IMAP UIDs occasionally repeat
-        // across folder operations).
         const parsed = await simpleParser(message.source);
         const messageId = parsed.messageId || null;
+
+        // Defensive dedupe — even if the UID filter above missed something, the
+        // message_id check guarantees we never store the same email twice.
         if (messageId) {
           const existing = db.prepare(
             "SELECT id FROM email_replies WHERE message_id = ? AND inbox_id = ?"
@@ -148,17 +166,8 @@ async function pollOneInbox(inbox) {
           }
         }
 
-        // Skip if the message is older than connected_at — defensive guard
-        // since IMAP `since` can be off-by-a-day depending on TZ.
-        if (parsed.date && parsed.date < new Date(inbox.connected_at)) {
-          highestUid = Math.max(highestUid, uid);
-          continue;
-        }
-
-        // Try to match the reply back to a campaign send by walking the
-        // In-Reply-To / References headers. SES MessageIds we sent become the
-        // Message-ID header of the original email; recipients reply with that
-        // in their In-Reply-To.
+        // Threading info — In-Reply-To and References tell us this is a reply
+        // to a previous message. We use these to match back to a campaign send.
         const inReplyTo = parsed.inReplyTo || null;
         const refsHeader = parsed.references
           ? (Array.isArray(parsed.references) ? parsed.references.join(' ') : parsed.references)
@@ -167,7 +176,6 @@ async function pollOneInbox(inbox) {
         let matchedSubscriberId = null;
         let matchedCampaignId = null;
         if (inReplyTo) {
-          // Strip <> if present
           const cleanId = inReplyTo.replace(/[<>]/g, '');
           const sendRow = db.prepare(
             "SELECT subscriber_id, campaign_id FROM email_sends WHERE message_id = ? OR message_id = ?"
@@ -177,7 +185,6 @@ async function pollOneInbox(inbox) {
             matchedCampaignId = sendRow.campaign_id;
           }
         }
-        // Fall back: if In-Reply-To didn't match, try References (chain of prior msgs)
         if (!matchedSubscriberId && refsHeader) {
           const refIds = refsHeader.split(/\s+/).map(r => r.replace(/[<>]/g, '')).filter(Boolean);
           for (const refId of refIds) {
@@ -191,9 +198,8 @@ async function pollOneInbox(inbox) {
             }
           }
         }
-        // Fall back 2: match by sender email to any subscriber on this client's lists.
-        // This catches replies where the recipient's mail client stripped the
-        // threading headers (some corporate gateways do this).
+        // Fall back: match by sender email to any subscriber on this client's lists.
+        // Catches replies where threading headers were stripped by gateways.
         if (!matchedSubscriberId && parsed.from?.value?.[0]?.address) {
           const fromAddr = parsed.from.value[0].address.toLowerCase();
           const subRow = db.prepare(`
@@ -205,8 +211,6 @@ async function pollOneInbox(inbox) {
           if (subRow) matchedSubscriberId = subRow.id;
         }
 
-        // Insert. Classification is left NULL for now; classify-replies.js
-        // (Phase 3.2) will fill it in on a separate cron pass.
         const fromValue = parsed.from?.value?.[0] || {};
         db.prepare(`
           INSERT INTO email_replies (
@@ -246,8 +250,8 @@ async function pollOneInbox(inbox) {
     try { await client.logout(); } catch {}
   }
 
-  if (stored > 0) console.log(`[poller] ${inbox.email_address}: stored ${stored} new replies`);
-  return stored;
+  if (stored > 0) console.log(`[poller] ${inbox.email_address}: stored ${stored} new emails (scanned ${scanned})`);
+  return { fetched: stored, scanned };
 }
 
 // Verify IMAP credentials work without committing them to the DB.

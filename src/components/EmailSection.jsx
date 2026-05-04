@@ -1576,7 +1576,7 @@ function MailboxesSection(){
               {hasError?
                 <div style={{fontSize:10,color:DANGER,marginTop:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{ib.last_error}</div>
                 :
-                <div style={{fontSize:10,color:MUTED,marginTop:1}}>{(ib.replies_30d||0).toLocaleString()} replies · {relTime(ib.last_polled_at)}</div>
+                <div style={{fontSize:10,color:MUTED,marginTop:1}}>{(ib.replies_30d||0).toLocaleString()} emails · {relTime(ib.last_polled_at)}</div>
               }
             </div>
             {(ib.new_prospect_count||0)>0 && <span style={{background:'#E6F1FB',color:'#0C447C',fontSize:10,fontWeight:500,padding:'1px 6px',borderRadius:8,minWidth:14,textAlign:'center',lineHeight:1.5}}>{ib.new_prospect_count}</span>}
@@ -1615,13 +1615,26 @@ function MailboxDetail({inbox, onRefresh}){
     setReplies(r.ok?await r.json():[]);
     setLoading(false);
   }
+  const [pollMsg,setPollMsg]=useState(null);  // toast-style feedback after Check Now
   async function checkNow(){
     setPolling(true);
+    setPollMsg(null);
     const r=await fetch(`/api/email/mailboxes/${inbox.id}/poll`,{method:'POST'});
     const d=await r.json();
     setPolling(false);
-    if(d.ok){loadReplies();onRefresh();}
-    else alert(d.error||'Poll failed');
+    if(d.ok){
+      loadReplies();
+      onRefresh();
+      // Show what actually happened — "fetched" is new emails stored, "scanned" is total examined
+      const f=d.fetched||0, s=d.scanned||0;
+      if(f>0)      setPollMsg({ok:true, text:`Fetched ${f} new email${f===1?'':'s'}`});
+      else if(s>0) setPollMsg({ok:true, text:`Up to date — scanned ${s} email${s===1?'':'s'}, nothing new`});
+      else         setPollMsg({ok:true, text:`Up to date — no new emails`});
+      setTimeout(()=>setPollMsg(null), 5000);
+    } else {
+      setPollMsg({ok:false, text:d.error||'Poll failed'});
+      setTimeout(()=>setPollMsg(null), 8000);
+    }
   }
 
   return(<div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0,overflow:'hidden'}}>
@@ -1639,6 +1652,16 @@ function MailboxDetail({inbox, onRefresh}){
       <Btn small onClick={checkNow} disabled={polling}>{polling?'Checking…':'Check now'}</Btn>
     </div>
 
+    {/* Poll-result toast — disappears after 5s */}
+    {pollMsg && (
+      <div style={{
+        padding:'8px 20px',fontSize:12,
+        background:pollMsg.ok?`${GREEN}15`:'#fdecea',
+        color:pollMsg.ok?GREEN:DANGER,
+        borderBottom:`0.5px solid ${BORDER}`,
+      }}>{pollMsg.text}</div>
+    )}
+
     {/* KPI strip */}
     <div style={{padding:'12px 20px',background:CARD,borderBottom:`0.5px solid ${BORDER}`,display:'grid',gridTemplateColumns:'repeat(3, 1fr)',gap:10}}>
       <div style={{padding:'8px 12px',background:BG,borderRadius:7,border:`0.5px solid ${BORDER}`}}>
@@ -1651,14 +1674,14 @@ function MailboxDetail({inbox, onRefresh}){
       </div>
       <div style={{padding:'8px 12px',background:BG,borderRadius:7,border:`0.5px solid ${BORDER}`}}>
         <div style={{fontSize:20,fontWeight:500,color:TEXT}}>{(inbox.replies_30d||0).toLocaleString()}</div>
-        <div style={{fontSize:11,color:MUTED}}>Replies (30d)</div>
+        <div style={{fontSize:11,color:MUTED}}>Emails (30d)</div>
       </div>
     </div>
 
     {/* Sub-tabs */}
     <div style={{display:'flex',gap:18,padding:'0 20px',borderBottom:`0.5px solid ${BORDER}`,background:CARD,flexShrink:0}}>
       {[
-        {k:'all',         l:'All replies'},
+        {k:'all',         l:'Inbox'},
         {k:'prospects',   l:'New prospects', count:inbox.new_prospect_count, color:BLUE},
         {k:'auto_unsubscribed', l:'Auto-unsubscribed', count:inbox.auto_unsub_count, color:'#633806'},
         {k:'out_of_office',l:'Out of office'},
@@ -1678,7 +1701,7 @@ function MailboxDetail({inbox, onRefresh}){
     {/* Reply list */}
     <div style={{flex:1,overflowY:'auto',background:BG}}>
       {loading?<div style={{color:MUTED,textAlign:'center',padding:40,fontSize:13}}>Loading…</div>
-      :replies.length===0?<div style={{color:MUTED,textAlign:'center',padding:40,fontSize:13}}>No replies in this view</div>
+      :replies.length===0?<div style={{color:MUTED,textAlign:'center',padding:40,fontSize:13}}>No emails in this view</div>
       :replies.map(r=>(
         <div key={r.id} onClick={()=>setOpenReplyId(r.id)} style={{
           display:'grid',gridTemplateColumns:'24px minmax(0, 1fr) auto auto',gap:12,
@@ -1734,7 +1757,7 @@ function ReplyDetailModal({replyId, onClose, onAction}){
     <div style={{textAlign:'center',padding:30,color:MUTED,fontSize:13}}>Fetching reply…</div>
   </Modal>);
 
-  return(<Modal title="Reply detail" onClose={onClose} wide>
+  return(<Modal title="Email" onClose={onClose} wide>
     {/* Header: sender */}
     <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:12,gap:8,flexWrap:'wrap'}}>
       <div style={{minWidth:0}}>
