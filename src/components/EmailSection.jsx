@@ -933,7 +933,6 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
     from_name:  initial?.from_name  || (editing ? '' : (emailClient?.default_from_name  || '')),
     from_email: initial?.from_email || (editing ? '' : (emailClient?.default_from_email || '')),
     reply_to:initial?.reply_to||'',
-    html_body: editing ? (initial?.html_body || '') : DEFAULT_BODY,
     // Tracking fields. Default to safest (off) for new campaigns; preserve on edit.
     tracking_mode:      initial?.tracking_mode      ?? 'off',
     tracking_threshold: initial?.tracking_threshold ?? 3,
@@ -951,23 +950,153 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
     drip_timezone:      initial?.drip_timezone      ?? 'Europe/London',
     send_order:         initial?.send_order         ?? 'top',
   });
+  // Phase 4: multi-step sequence. steps[0] is always step 1; later entries
+  // are follow-ups with delay_days >= 1. New campaigns start with one step
+  // pre-filled with DEFAULT_BODY. Editing fetches the saved step list.
+  const [steps, setSteps] = useState(
+    editing
+      ? [{ step_number: 1, html_body: initial?.html_body || '', delay_days: 0, sent_count: 0 }]
+      : [{ step_number: 1, html_body: DEFAULT_BODY, delay_days: 0, sent_count: 0 }]
+  );
+  const [activeStep, setActiveStep] = useState(1);
+  const [stepsLoaded, setStepsLoaded] = useState(!editing);
+
+  // On open in edit mode, fetch the full step list so we can show 2nd / 3rd contact tabs
+  // if the user already saved them. New campaigns skip this fetch.
+  useEffect(() => {
+    if (!editing) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/email/campaigns/${initial.id}/steps`);
+        const d = await r.json();
+        if (cancelled) return;
+        if (Array.isArray(d.steps) && d.steps.length > 0) {
+          setSteps(d.steps.map(s => ({
+            step_number: s.step_number,
+            html_body: s.html_body,
+            delay_days: s.delay_days,
+            sent_count: s.sent_count || 0,
+          })));
+        }
+        setStepsLoaded(true);
+      } catch {
+        setStepsLoaded(true);  // give up — fall back to single-step
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [editing, initial?.id]);
+
   const [saving,setSaving]=useState(false);
   const [err,setErr]=useState('');
   const [showPreview,setShowPreview]=useState(false);
   const [copiedChip,setCopiedChip]=useState(false);
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+
+  // Step helpers — keep all manipulation in one place so the UI stays consistent.
+  const activeStepIdx = steps.findIndex(s => s.step_number === activeStep);
+  const activeStepObj = steps[activeStepIdx] || steps[0];
+
+  function updateStepBody(newBody) {
+    setSteps(prev => prev.map(s =>
+      s.step_number === activeStep ? { ...s, html_body: newBody } : s
+    ));
+  }
+  function updateStepDelay(newDelay) {
+    const n = parseInt(newDelay, 10);
+    if (!Number.isFinite(n) || n < 1) return;
+    setSteps(prev => prev.map(s =>
+      s.step_number === activeStep ? { ...s, delay_days: n } : s
+    ));
+  }
+  function addStep() {
+    if (steps.length >= 10) return;  // hard cap
+    const nextNumber = steps.length + 1;
+    const newStep = { step_number: nextNumber, html_body: '', delay_days: 3, sent_count: 0 };
+    setSteps(prev => [...prev, newStep]);
+    setActiveStep(nextNumber);
+  }
+  function removeStep(stepNumber) {
+    if (stepNumber === 1) return;  // step 1 cannot be deleted
+    const target = steps.find(s => s.step_number === stepNumber);
+    if (target && target.sent_count > 0) {
+      const ok = window.confirm(
+        `Step ${stepNumber} has already been sent to ${target.sent_count} recipient(s). ` +
+        `Removing it stops the sequence at step ${stepNumber - 1} for everyone still queued. ` +
+        `Already-sent emails are unaffected. Continue?`
+      );
+      if (!ok) return;
+    }
+    setSteps(prev => prev
+      .filter(s => s.step_number !== stepNumber)
+      .map((s, i) => ({ ...s, step_number: i + 1 }))  // renumber to keep contiguity
+    );
+    // Move active step to the previous one
+    setActiveStep(stepNumber - 1);
+  }
+
   async function save(){
     const missing=[];
     if(!form.list_id) missing.push('mailing list');
     if(!form.title)   missing.push('campaign title');
     if(!form.subject) missing.push('email subject');
     if(!form.from_email) missing.push('from email');
-    if(!form.html_body)  missing.push('email body');
+    // Each step must have a body. Step 1 is always present.
+    for (const s of steps) {
+      // Strip whitespace and inert HTML so an empty editor doesn't pass.
+      const stripped = (s.html_body || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
+      if (!stripped) {
+        missing.push(`step ${s.step_number} body`);
+      }
+    }
     if(missing.length){setErr(`Please fill in: ${missing.join(', ')}`);return;}
+    // Warn if any step with sent_count > 0 has its body or delay changed.
+    // We don't have the original values to diff against perfectly, but on edit
+    // mode we can compare against initial.html_body for step 1 — for steps 2+
+    // we trust the user since they explicitly opened the tab.
     setSaving(true);setErr('');
-    const r=await fetch(editing?`/api/email/campaigns/${initial.id}`:'/api/email/campaigns',{method:editing?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...form,email_client_id:emailClient.id})});
-    const d=await r.json();
-    if(d.error){setErr(d.error);setSaving(false);return;}
+
+    // Step 1's body is also the campaign's html_body for legacy code paths.
+    const step1Body = steps.find(s => s.step_number === 1)?.html_body || '';
+    const campaignPayload = { ...form, html_body: step1Body, email_client_id: emailClient.id };
+
+    let campaignId = initial?.id;
+    try {
+      // 1) Save campaign-wide fields (creates new or updates existing)
+      const r = await fetch(
+        editing ? `/api/email/campaigns/${initial.id}` : '/api/email/campaigns',
+        {
+          method: editing ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(campaignPayload),
+        }
+      );
+      const d = await r.json();
+      if (d.error) { setErr(d.error); setSaving(false); return; }
+      campaignId = d.id || campaignId;
+
+      // 2) Save the step list. For new campaigns step 1's body was already mirrored
+      // via html_body; PUT /steps writes the canonical step rows AND mirrors step 1
+      // back to html_body again — idempotent and safe.
+      const stepsPayload = {
+        steps: steps.map(s => ({
+          step_number: s.step_number,
+          html_body: s.html_body,
+          delay_days: s.delay_days,
+        })),
+      };
+      const sr = await fetch(`/api/email/campaigns/${campaignId}/steps`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(stepsPayload),
+      });
+      const sd = await sr.json();
+      if (sd.error) { setErr('Step save failed: ' + sd.error); setSaving(false); return; }
+    } catch (e) {
+      setErr('Save failed: ' + e.message);
+      setSaving(false);
+      return;
+    }
     onSaved();onClose();
   }
   return(<Modal title={editing?'Edit campaign':'New campaign'} onClose={onClose} wide>
@@ -1001,7 +1130,113 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
           >{'{{first_name}}'}</button>
         </div>
       </div>
-      <RichTextEditor value={form.html_body} onChange={v => set('html_body', v)} />
+      {/* Phase 4: tab strip for multi-step sequences. 1st contact / 2nd contact / etc.
+          Active tab is white-on-white (matches the panel below); inactive tabs are
+          recessed grey. Each non-step-1 tab has a × close button. The last item is
+          the "+ Add contact" pill, hidden once we hit the 10-step cap. */}
+      <div style={{display:'flex',alignItems:'flex-end',gap:4,marginBottom:0}}>
+        {steps.map(s => {
+          const isActive = s.step_number === activeStep;
+          const label = s.step_number === 1 ? '1st contact'
+                      : s.step_number === 2 ? '2nd contact'
+                      : s.step_number === 3 ? '3rd contact'
+                      : `${s.step_number}th contact`;
+          return (
+            <div key={s.step_number}
+              onClick={() => setActiveStep(s.step_number)}
+              style={{
+                padding:'7px 12px',
+                fontSize:12,
+                cursor:'pointer',
+                background: isActive ? CARD : `${MUTED}15`,
+                color: isActive ? TEXT : MUTED,
+                border:`0.5px solid ${BORDER}`,
+                borderBottomColor: isActive ? CARD : BORDER,
+                borderRadius:'6px 6px 0 0',
+                fontWeight: isActive ? 500 : 400,
+                display:'flex',alignItems:'center',gap:6,
+                marginBottom: isActive ? '-0.5px' : 0,
+                position:'relative',
+                zIndex: isActive ? 2 : 1,
+              }}
+            >
+              <span>{label}</span>
+              {s.step_number > 1 && (
+                <span
+                  onClick={e => { e.stopPropagation(); removeStep(s.step_number); }}
+                  title="Remove this contact"
+                  style={{
+                    width:14,height:14,borderRadius:'50%',
+                    display:'inline-flex',alignItems:'center',justifyContent:'center',
+                    fontSize:11,color:MUTED,
+                    cursor:'pointer',lineHeight:1,
+                  }}
+                >×</span>
+              )}
+            </div>
+          );
+        })}
+        {steps.length < 10 && (
+          <button type="button" onClick={addStep}
+            style={{
+              padding:'7px 10px',
+              fontSize:12,
+              border:`0.5px dashed ${BORDER}`,
+              borderRadius:6,
+              background:'transparent',
+              color:MUTED,
+              cursor:'pointer',
+              marginLeft:4,
+            }}
+          >+ Add contact</button>
+        )}
+      </div>
+      {/* Tab panel — the body editor lives here, plus the delay row for steps 2+. */}
+      <div style={{
+        border:`0.5px solid ${BORDER}`,
+        borderTopLeftRadius: activeStep === 1 ? 0 : 6,
+        borderTopRightRadius: 6,
+        borderBottomLeftRadius: 6,
+        borderBottomRightRadius: 6,
+        padding:10,
+        background:CARD,
+        position:'relative',
+        zIndex:0,
+      }}>
+        {activeStep > 1 && (
+          <div style={{
+            display:'flex',alignItems:'center',gap:10,
+            padding:'8px 10px',marginBottom:10,
+            background:`${BLUE}10`,
+            color:BLUE,
+            borderRadius:6,
+            fontSize:12,
+          }}>
+            <span>Send</span>
+            <input type="number" min={1} max={60}
+              value={activeStepObj?.delay_days || 3}
+              onChange={e => updateStepDelay(e.target.value)}
+              style={{
+                width:50,padding:'3px 6px',
+                border:`0.5px solid ${BORDER}`,borderRadius:4,
+                fontSize:12,textAlign:'center',
+                background:CARD,color:TEXT,
+              }}
+            />
+            <span>days after the previous contact</span>
+            {activeStepObj?.sent_count > 0 && (
+              <span style={{marginLeft:'auto',fontSize:11,color:MUTED}}>
+                Already sent to {activeStepObj.sent_count} — changes apply to the rest only.
+              </span>
+            )}
+          </div>
+        )}
+        <RichTextEditor
+          key={activeStep}
+          value={activeStepObj?.html_body || ''}
+          onChange={updateStepBody}
+        />
+      </div>
     </div>
     <ScheduleControls form={form} set={set} totalSubs={lists.find(l=>l.id===form.list_id)?.subscriber_count||0}/>
     <TrackingControls form={form} set={set}/>
@@ -1583,6 +1818,35 @@ function CampaignRecipientsPanel({campaignId, tracksOpens, tracksClicks, onExpor
       </div>
     </div>
 
+    {/* Phase 4: per-step counts. Only render when the campaign has 2+ steps —
+        single-step campaigns keep the existing layout unchanged. Each tile
+        shows step N's send count and reply count side-by-side. */}
+    {Array.isArray(s.steps) && s.steps.length > 1 && (
+      <div style={{padding:'10px 14px',borderBottom:`0.5px solid ${BORDER}`,display:'flex',gap:8,flexWrap:'wrap'}}>
+        {s.steps.map(st => (
+          <div key={st.step_number}
+            style={{
+              flex:'1 1 140px',
+              padding:'8px 12px',
+              background:BG,
+              borderRadius:8,
+              minWidth:140,
+            }}
+          >
+            <div style={{fontSize:11,color:MUTED,textTransform:'uppercase',letterSpacing:'.06em',marginBottom:4}}>
+              {st.step_number === 1 ? '1st contact' : st.step_number === 2 ? '2nd contact' : st.step_number === 3 ? '3rd contact' : `${st.step_number}th contact`}
+            </div>
+            <div style={{fontSize:13,color:TEXT}}>
+              <span style={{fontWeight:500}}>{(st.sent_count||0).toLocaleString()}</span>
+              <span style={{color:MUTED}}> sent · </span>
+              <span style={{fontWeight:500,color: st.reply_count>0 ? GREEN : TEXT}}>{(st.reply_count||0).toLocaleString()}</span>
+              <span style={{color:MUTED}}> {st.reply_count===1 ? 'reply' : 'replies'}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    )}
+
     {/* Filter pills */}
     <div style={{padding:'10px 14px',borderBottom:`0.5px solid ${BORDER}`,display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
       {pills.map(p=>(
@@ -1605,7 +1869,14 @@ function CampaignRecipientsPanel({campaignId, tracksOpens, tracksClicks, onExpor
       <div style={{maxHeight:480,overflowY:'auto'}}>
         <table style={{width:'100%',borderCollapse:'collapse'}}>
           <thead style={{position:'sticky',top:0,background:BG,zIndex:1}}>
-            <tr><TH>Recipient</TH><TH>Status</TH><TH>Sent at</TH>{tracksOpens && <TH>Opens</TH>}{tracksClicks && <TH>Clicks</TH>}</tr>
+            <tr>
+              <TH>Recipient</TH>
+              <TH>Status</TH>
+              {Array.isArray(s.steps) && s.steps.length > 1 && <TH>Step</TH>}
+              <TH>Sent at</TH>
+              {tracksOpens && <TH>Opens</TH>}
+              {tracksClicks && <TH>Clicks</TH>}
+            </tr>
           </thead>
           <tbody>
             {filtered.slice(0, 500).map(r=>(
@@ -1615,6 +1886,11 @@ function CampaignRecipientsPanel({campaignId, tracksOpens, tracksClicks, onExpor
                   <div style={{fontSize:11,color:MUTED}}>{r.email}</div>
                 </TD>
                 <TD>{bucketLabel(r.bucket)}</TD>
+                {Array.isArray(s.steps) && s.steps.length > 1 && (
+                  <TD center style={{fontSize:11,color: r.last_step > 0 ? TEXT : MUTED}}>
+                    {r.last_step > 0 ? `Step ${r.last_step}` : '—'}
+                  </TD>
+                )}
                 <TD muted style={{fontSize:11}}>
                   {r.sent_at ? new Date(r.sent_at).toLocaleString('en-GB',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}) : '—'}
                 </TD>
