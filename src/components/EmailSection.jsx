@@ -726,11 +726,17 @@ function ImportNewListModal({ emailClient, onClose, onSaved }) {
 // ── Campaign modal ────────────────────────────────────────────────────────────
 function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
   const editing=!!initial?.id;
+  // Default body for brand-new campaigns: pre-seed with the personalised greeting
+  // so the user doesn't have to think about adding {{first_name}} every time.
+  // The leading <p> ensures the cursor lands on a new line below the greeting
+  // when the rich-text editor mounts. Edit campaigns keep whatever's saved.
+  const DEFAULT_BODY = '<p>Hi {{first_name}},</p><p><br></p><p></p>';
   const [form,setForm]=useState({
     list_id:initial?.list_id||(lists.length===1?lists[0].id:''),
     title:initial?.title||'',subject:initial?.subject||'',
     from_name:initial?.from_name||'',from_email:initial?.from_email||'',
-    reply_to:initial?.reply_to||'',html_body:initial?.html_body||'',
+    reply_to:initial?.reply_to||'',
+    html_body: editing ? (initial?.html_body || '') : DEFAULT_BODY,
     // Tracking fields. Default to safest (off) for new campaigns; preserve on edit.
     tracking_mode:      initial?.tracking_mode      ?? 'off',
     tracking_threshold: initial?.tracking_threshold ?? 3,
@@ -742,6 +748,7 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
   const [saving,setSaving]=useState(false);
   const [err,setErr]=useState('');
   const [showPreview,setShowPreview]=useState(false);
+  const [copiedChip,setCopiedChip]=useState(false);
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
   async function save(){
     const missing=[];
@@ -776,15 +783,15 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}}>
         <label style={{ display: 'block', fontSize: 12, color: MUTED }}>Email body *</label>
         <div style={{display:'flex',alignItems:'center',gap:8,fontSize:11,color:MUTED}}>
-          <span>Personalise with</span>
+          <span>{copiedChip ? 'Copied — paste it anywhere' : 'Personalise with'}</span>
           <button type="button"
             onClick={()=>{
-              const next=(form.html_body||'')+' {{first_name}}';
-              set('html_body', next);
               navigator.clipboard?.writeText('{{first_name}}').catch(()=>{});
+              setCopiedChip(true);
+              setTimeout(()=>setCopiedChip(false), 1800);
             }}
             style={{background:`${BLUE}10`,color:BLUE,border:`0.5px solid ${BLUE}40`,padding:'2px 8px',borderRadius:4,fontSize:11,cursor:'pointer',fontFamily:'ui-monospace, monospace'}}
-            title="Click to append {{first_name}} to the body. You can also paste it anywhere — it's been copied to your clipboard."
+            title="Click to copy. Then paste {{first_name}} anywhere in the subject or body."
           >{'{{first_name}}'}</button>
         </div>
       </div>
