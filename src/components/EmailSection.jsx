@@ -227,6 +227,30 @@ function SendCampaignDialog({campaignId, onClose, onConfirmed}){
       </div>
     </div>
 
+    {/* Personalisation — skip count for {{first_name}} */}
+    {preview.personalisation?.uses_first_name && (
+      <div style={{
+        background: preview.personalisation.will_skip>0 ? '#fff3cd' : `${GREEN}10`,
+        borderLeft: `3px solid ${preview.personalisation.will_skip>0 ? AMBER : GREEN}`,
+        borderRadius: 6, padding: '10px 14px', marginBottom: 14,
+      }}>
+        <div style={{fontSize:12,fontWeight:500,color:preview.personalisation.will_skip>0?AMBER:DARK,marginBottom:4}}>
+          {preview.personalisation.will_skip>0
+            ? `${preview.personalisation.will_skip.toLocaleString()} recipient${preview.personalisation.will_skip===1?'':'s'} will be skipped`
+            : 'All recipients have parsed first names'}
+        </div>
+        <div style={{fontSize:12,color:preview.personalisation.will_skip>0?AMBER:DARK,lineHeight:1.5}}>
+          This campaign uses <code style={{fontFamily:'ui-monospace, monospace',fontSize:11,padding:'1px 5px',background:'rgba(0,0,0,0.05)',borderRadius:3}}>{'{{first_name}}'}</code>.
+          {preview.personalisation.will_skip>0 && (
+            <> {preview.personalisation.will_send.toLocaleString()} will receive the campaign — open the Preview to see who's being skipped and override their first name if needed.</>
+          )}
+          {preview.personalisation.unparsed>0 && (
+            <> <b>{preview.personalisation.unparsed}</b> subscribers haven't been name-parsed yet — run Preview first to populate them.</>
+          )}
+        </div>
+      </div>
+    )}
+
     {/* What will happen */}
     {showTrackingNote ? (
       <div style={{background:'#e6f1fb',borderLeft:`3px solid ${BLUE}`,borderRadius:6,padding:'10px 14px',marginBottom:14}}>
@@ -250,7 +274,15 @@ function SendCampaignDialog({campaignId, onClose, onConfirmed}){
 
     <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
       <Btn onClick={onClose} disabled={sending}>Cancel</Btn>
-      <Btn variant={isOverridingSchedule?'amber':'primary'} onClick={doSend} disabled={sending}>{sending?'Sending…':isOverridingSchedule?`Override schedule and send ${preview.total_recipients.toLocaleString()} now`:`Send ${preview.total_recipients.toLocaleString()} email${preview.total_recipients===1?'':'s'}`}</Btn>
+      <Btn variant={isOverridingSchedule?'amber':'primary'} onClick={doSend} disabled={sending}>
+        {sending ? 'Sending…' : (() => {
+          const sendCount = preview.personalisation?.uses_first_name
+            ? preview.personalisation.will_send
+            : preview.total_recipients;
+          if (isOverridingSchedule) return `Override schedule and send ${sendCount.toLocaleString()} now`;
+          return `Send ${sendCount.toLocaleString()} email${sendCount===1?'':'s'}`;
+        })()}
+      </Btn>
     </div>
   </Modal>);
 }
@@ -709,6 +741,7 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
   });
   const [saving,setSaving]=useState(false);
   const [err,setErr]=useState('');
+  const [showPreview,setShowPreview]=useState(false);
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
   async function save(){
     const missing=[];
@@ -740,14 +773,306 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
       <Input label="Reply-to (leave blank to match from email)" value={form.reply_to} onChange={v=>set('reply_to',v)}/>
     </div>
     <div style={{ marginBottom: 14 }}>
-      <label style={{ display: 'block', fontSize: 12, color: MUTED, marginBottom: 4 }}>Email body *</label>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}}>
+        <label style={{ display: 'block', fontSize: 12, color: MUTED }}>Email body *</label>
+        <div style={{display:'flex',alignItems:'center',gap:8,fontSize:11,color:MUTED}}>
+          <span>Personalise with</span>
+          <button type="button"
+            onClick={()=>{
+              const next=(form.html_body||'')+' {{first_name}}';
+              set('html_body', next);
+              navigator.clipboard?.writeText('{{first_name}}').catch(()=>{});
+            }}
+            style={{background:`${BLUE}10`,color:BLUE,border:`0.5px solid ${BLUE}40`,padding:'2px 8px',borderRadius:4,fontSize:11,cursor:'pointer',fontFamily:'ui-monospace, monospace'}}
+            title="Click to append {{first_name}} to the body. You can also paste it anywhere — it's been copied to your clipboard."
+          >{'{{first_name}}'}</button>
+        </div>
+      </div>
       <RichTextEditor value={form.html_body} onChange={v => set('html_body', v)} />
     </div>
     <TrackingControls form={form} set={set}/>
     {err&&<div style={{color:DANGER,fontSize:13,marginTop:14,marginBottom:10}}>{err}</div>}
-    <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:18}}><Btn onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={save} disabled={saving}>{saving?'Saving…':editing?'Save changes':'Create campaign'}</Btn></div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,marginTop:18}}>
+      <div>
+        {editing && (
+          <Btn small onClick={()=>setShowPreview(true)}>Preview</Btn>
+        )}
+        {!editing && (
+          <span style={{fontSize:11,color:MUTED}}>Save the campaign first to use Preview</span>
+        )}
+      </div>
+      <div style={{display:'flex',gap:8}}>
+        <Btn onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" onClick={save} disabled={saving}>{saving?'Saving…':editing?'Save changes':'Create campaign'}</Btn>
+      </div>
+    </div>
+    {showPreview && <PreviewCampaignModal campaignId={initial.id} onClose={()=>setShowPreview(false)}/>}
   </Modal>);
 }
+
+// ── Preview campaign modal — arrow through subscribers, see rendered emails ───
+// Shows the email exactly as it'll be sent to each subscriber, with the
+// {{first_name}} placeholder replaced by the parsed Christian name. Subscribers
+// whose name couldn't be parsed are shown as "will be skipped". The user can
+// override the first name per-subscriber from inside this modal.
+function PreviewCampaignModal({campaignId, onClose}){
+  const [data,setData]=useState(null);
+  const [idx,setIdx]=useState(0);
+  const [parsing,setParsing]=useState(false);
+  const [parseMsg,setParseMsg]=useState(null);
+  const [showSkipped,setShowSkipped]=useState(false);
+
+  async function load(){
+    const r=await fetch(`/api/email/campaigns/${campaignId}/preview-recipients`);
+    const d=await r.json();
+    setData(d);
+  }
+  useEffect(()=>{load();},[campaignId]);
+
+  // Parse names — bulk-call the rule + AI fallback for the whole list. Idempotent;
+  // only touches subs that haven't been parsed yet (or were last marked needs_ai).
+  async function parseNames(){
+    if (!data) return;
+    setParsing(true);
+    setParseMsg(null);
+    try{
+      const r=await fetch(`/api/email/lists/${data.campaign.list_id}/parse-names`,{method:'POST'});
+      const d=await r.json();
+      if (d.ok) {
+        setParseMsg(`Parsed ${d.processed} subscribers — ${d.byRule} by rule, ${d.byAI} by AI, ${d.skipped} skipped`);
+        await load();
+        setTimeout(()=>setParseMsg(null), 6000);
+      } else {
+        setParseMsg('Error: '+(d.error||'unknown'));
+        setTimeout(()=>setParseMsg(null), 8000);
+      }
+    } catch(err){
+      setParseMsg('Error: '+err.message);
+      setTimeout(()=>setParseMsg(null), 8000);
+    }
+    setParsing(false);
+  }
+
+  // Manual override — set or clear a single subscriber's first_name. Used to
+  // rescue a subscriber that the parser marked as "will be skipped".
+  async function overrideFirstName(){
+    if (!data) return;
+    const r = data.recipients[idx];
+    const v = window.prompt(
+      `Set first name for ${r.name||r.email}\n\n(Leave blank to mark as skip — they won't receive this campaign)`,
+      r.first_name || ''
+    );
+    if (v === null) return;
+    const body = JSON.stringify({first_name: v.trim() === '' ? null : v.trim()});
+    const resp = await fetch(`/api/email/subscribers/${r.id}/first-name`,{method:'PUT',headers:{'Content-Type':'application/json'},body});
+    if (resp.ok) await load();
+    else alert('Failed to update');
+  }
+
+  // Keyboard nav for the arrow keys (matches the mockup behaviour)
+  useEffect(()=>{
+    function onKey(e){
+      if (!data) return;
+      if (showSkipped) return;
+      if (e.key==='ArrowLeft')  { setIdx(i => (i - 1 + data.recipients.length) % data.recipients.length); e.preventDefault(); }
+      if (e.key==='ArrowRight') { setIdx(i => (i + 1) % data.recipients.length); e.preventDefault(); }
+    }
+    document.addEventListener('keydown', onKey);
+    return ()=>document.removeEventListener('keydown', onKey);
+  },[data, showSkipped]);
+
+  if (!data) {
+    return (<Modal title="Email preview" onClose={onClose} wide>
+      <div style={{textAlign:'center',color:MUTED,padding:'40px 20px',fontSize:13}}>Loading…</div>
+    </Modal>);
+  }
+
+  if (data.recipients.length === 0) {
+    return (<Modal title="Email preview" onClose={onClose} wide>
+      <div style={{textAlign:'center',color:MUTED,padding:'40px 20px',fontSize:13}}>No active subscribers on this list.</div>
+      <div style={{display:'flex',justifyContent:'flex-end',marginTop:18}}><Btn onClick={onClose}>Close</Btn></div>
+    </Modal>);
+  }
+
+  const total = data.recipients.length;
+  const willSkip = data.summary.will_skip;
+  const unparsed = data.summary.by_source.unparsed || 0;
+  const r = data.recipients[idx];
+  const usesPlaceholder = data.uses_first_name;
+
+  return(<Modal title="Email preview" onClose={onClose} wide>
+
+    {/* Top strip — subscriber count + parse-names button */}
+    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14,gap:12,flexWrap:'wrap'}}>
+      <div style={{fontSize:12,color:MUTED}}>
+        Subscriber <b style={{color:TEXT}}>{idx+1}</b> of <b style={{color:TEXT}}>{total}</b>
+        {usesPlaceholder && <> · <b style={{color:willSkip>0?DANGER:GREEN}}>{willSkip}</b> will be skipped</>}
+        {unparsed > 0 && <> · <b style={{color:AMBER}}>{unparsed}</b> not yet parsed</>}
+      </div>
+      <div style={{display:'flex',gap:8}}>
+        {unparsed > 0 && (
+          <Btn small onClick={parseNames} disabled={parsing}>{parsing?'Parsing…':`Parse ${unparsed} name${unparsed===1?'':'s'}`}</Btn>
+        )}
+        {willSkip > 0 && (
+          <Btn small onClick={()=>setShowSkipped(true)}>Review skipped ({willSkip})</Btn>
+        )}
+        <Btn small onClick={()=>setIdx(i => (i - 1 + total) % total)}>←</Btn>
+        <Btn small onClick={()=>setIdx(i => (i + 1) % total)}>→</Btn>
+      </div>
+    </div>
+
+    {parseMsg && (
+      <div style={{padding:'8px 12px',background:`${BLUE}10`,color:BLUE,borderRadius:6,fontSize:12,marginBottom:12}}>{parseMsg}</div>
+    )}
+
+    {!usesPlaceholder && (
+      <div style={{padding:'10px 14px',background:`${AMBER}15`,color:AMBER,borderRadius:6,fontSize:12,marginBottom:12}}>
+        This campaign doesn't use the {'{{first_name}}'} placeholder. Every subscriber will receive identical text. Add the placeholder to the subject or body to personalise.
+      </div>
+    )}
+
+    {/* Email card */}
+    <div style={{background:CARD,border:`0.5px solid ${BORDER}`,borderRadius:10,overflow:'hidden'}}>
+
+      {/* Subscriber meta strip */}
+      <div style={{padding:'10px 14px',background:BG,borderBottom:`0.5px solid ${BORDER}`,display:'grid',gridTemplateColumns:'1fr auto',gap:12,alignItems:'center',fontSize:12}}>
+        <div style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+          <span style={{color:MUTED}}>Stored name:</span>
+          <span style={{color:TEXT,fontWeight:500,marginLeft:6}}>{r.name||'(none)'}</span>
+          <span style={{color:MUTED,margin:'0 6px'}}>·</span>
+          <span style={{color:MUTED}}>{r.email}</span>
+        </div>
+        <div>{firstNameSourceBadge(r)}</div>
+      </div>
+
+      {/* Email headers */}
+      <div style={{padding:'14px 16px',borderBottom:`0.5px solid ${BORDER}`,display:'grid',gridTemplateColumns:'80px 1fr',gap:'6px 14px',fontSize:13}}>
+        <div style={{color:MUTED}}>From:</div>
+        <div>{data.campaign.from_name} &lt;{data.campaign.from_email}&gt;</div>
+        <div style={{color:MUTED}}>To:</div>
+        <div>{r.name?`${r.name} <${r.email}>`:r.email}</div>
+        <div style={{color:MUTED}}>Subject:</div>
+        <div style={{
+          fontWeight:500,
+          color:r.will_skip?MUTED:TEXT,
+          textDecoration:r.will_skip?'line-through':'none',
+        }}>
+          {renderHighlighted(r.rendered_subject || data.campaign.subject || '', r.first_name, r.will_skip)}
+        </div>
+      </div>
+
+      {/* Body */}
+      <div style={{
+        padding:'18px 16px',fontSize:14,lineHeight:1.6,minHeight:160,
+        color:r.will_skip?MUTED:TEXT,
+        background:r.will_skip?BG:CARD,
+        opacity:r.will_skip?0.7:1,
+      }} dangerouslySetInnerHTML={{
+        __html: htmlWithHighlight(r.will_skip?(data.campaign.html_body||''):r.rendered_html||'', r.first_name, r.will_skip)
+      }}/>
+
+    </div>
+
+    {/* Status strip */}
+    <div style={{
+      marginTop:12,padding:'10px 14px',borderRadius:7,fontSize:13,
+      display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,
+      background: r.will_skip ? '#FAEEDA' : (r.first_name ? `${GREEN}15` : '#F1EFE8'),
+      color: r.will_skip ? '#633806' : (r.first_name ? DARK : MUTED),
+    }}>
+      <div style={{minWidth:0}}>
+        {r.will_skip ? (
+          <><b style={{fontWeight:500}}>Will be skipped.</b> {r.first_name_reason||'No first name parsed.'}</>
+        ) : r.first_name ? (
+          <>
+            <b style={{fontWeight:500}}>Resolves to:</b>{' '}
+            <code style={{background:'rgba(0,0,0,0.05)',padding:'1px 5px',borderRadius:3,fontFamily:'ui-monospace, monospace'}}>{r.first_name}</code>
+            {r.first_name_reason && <> · <span style={{color:MUTED}}>{r.first_name_reason}</span></>}
+          </>
+        ) : (
+          <>Not yet parsed — click "Parse {unparsed} names" above to populate.</>
+        )}
+      </div>
+      <Btn small onClick={overrideFirstName}>Edit</Btn>
+    </div>
+
+    {/* Footer */}
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:18}}>
+      <div style={{fontSize:11,color:MUTED}}>Tip: use ← → arrow keys to navigate</div>
+      <Btn onClick={onClose}>Close</Btn>
+    </div>
+
+    {showSkipped && (
+      <SkippedListModal recipients={data.recipients.filter(x=>x.will_skip)} onClose={()=>setShowSkipped(false)} onChanged={load}/>
+    )}
+
+  </Modal>);
+}
+
+// Small modal listing every subscriber being skipped. Each row has an "Edit"
+// button to set the first name manually and rescue them.
+function SkippedListModal({recipients, onClose, onChanged}){
+  async function setName(sub){
+    const v = window.prompt(`Set first name for ${sub.name||sub.email}\n\n(Leave blank to keep skipped)`, sub.first_name || '');
+    if (v === null || v.trim() === '') return;
+    const r = await fetch(`/api/email/subscribers/${sub.id}/first-name`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({first_name:v.trim()})});
+    if (r.ok) onChanged();
+    else alert('Failed to update');
+  }
+  return(<Modal title={`Skipped subscribers (${recipients.length})`} onClose={onClose}>
+    <p style={{fontSize:12,color:MUTED,marginBottom:14}}>These subscribers won't receive the campaign because their first name couldn't be parsed. Set a name manually to include them.</p>
+    <div style={{maxHeight:380,overflowY:'auto',border:`0.5px solid ${BORDER}`,borderRadius:7}}>
+      {recipients.map(s=>(
+        <div key={s.id} style={{padding:'10px 12px',borderBottom:`0.5px solid ${BORDER}`,display:'grid',gridTemplateColumns:'1fr auto',gap:10,alignItems:'center'}}>
+          <div style={{minWidth:0}}>
+            <div style={{fontSize:13,color:TEXT,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{s.name||'(no name)'}</div>
+            <div style={{fontSize:11,color:MUTED,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{s.email} · {s.first_name_reason||'No reason recorded'}</div>
+          </div>
+          <Btn small onClick={()=>setName(s)}>Set name</Btn>
+        </div>
+      ))}
+      {recipients.length===0 && <div style={{padding:30,textAlign:'center',color:MUTED,fontSize:13}}>No skipped subscribers.</div>}
+    </div>
+    <div style={{display:'flex',justifyContent:'flex-end',marginTop:14}}><Btn onClick={onClose}>Close</Btn></div>
+  </Modal>);
+}
+
+// Source-of-parse badge for the top of the preview card
+function firstNameSourceBadge(r){
+  if (r.will_skip)              return <Badge label="Will be skipped"  color="#633806" bg="#FAEEDA"/>;
+  if (!r.first_name_source)     return <Badge label="Not parsed yet"   color={MUTED}    bg="#F1EFE8"/>;
+  if (r.first_name_source==='rule')   return <Badge label="Parsed by rule"   color="#0C447C" bg="#E6F1FB"/>;
+  if (r.first_name_source==='ai')     return <Badge label="Parsed by AI"     color="#3C3489" bg="#EEEDFE"/>;
+  if (r.first_name_source==='manual') return <Badge label="Manual override"  color="#085041" bg="#E1F5EE"/>;
+  return <Badge label={r.first_name_source||'Unknown'} color={MUTED} bg="#F1EFE8"/>;
+}
+
+// Highlight {{first_name}} replacements in plain-text strings (subject line)
+function renderHighlighted(text, firstName, isSkipped){
+  if (!text) return null;
+  if (isSkipped || !firstName) return text;
+  // Walk the text, swapping the rendered first-name spans with a highlighted node
+  // We don't have access to the original placeholder in the string anymore (it's
+  // already been substituted), so we just bold the first-name occurrences.
+  const parts = text.split(new RegExp(`(${escapeRegex(firstName)})`, 'g'));
+  return parts.map((p, i) => p === firstName
+    ? <span key={i} style={{background:'#E1F5EE',color:'#085041',padding:'1px 4px',borderRadius:3,fontWeight:500}}>{p}</span>
+    : <span key={i}>{p}</span>
+  );
+}
+
+// Same but for HTML body — wraps occurrences of the first name in a highlighted span.
+// Skips matches inside HTML tag attributes by only replacing in text nodes (using a
+// regex with negative lookahead/lookbehind for tag chars). Good-enough heuristic.
+function htmlWithHighlight(html, firstName, isSkipped){
+  if (!html) return '';
+  if (isSkipped || !firstName) return html;
+  const re = new RegExp(`(?<![<>=&\\w])(${escapeRegex(firstName)})(?![<>\\w])`, 'g');
+  return html.replace(re, '<span style="background:#E1F5EE;color:#085041;padding:1px 4px;border-radius:3px;font-weight:500;">$1</span>');
+}
+
+function escapeRegex(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
 
 // ── Drip modal ────────────────────────────────────────────────────────────────
 function DripModal({campaign,totalSubs,onClose,onSaved}){
@@ -1140,6 +1465,7 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
   }
   const [testStatus,setTestStatus]=useState({});
   const [sendStatus,setSendStatus]=useState({});
+  const [previewCampaignId,setPreviewCampaignId]=useState(null);
   const [sendDialogId,setSendDialogId]=useState(null);
 
   useEffect(()=>{load();},[emailClient.id]);
@@ -1290,6 +1616,7 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
                         </>}
                         {!isSending&&c.status!=='cancelled'&&<Btn small variant="danger" onClick={()=>deleteCampaign(c.id)}>Delete</Btn>}
                         {(c.status==='draft'||c.status==='scheduled')&&<>
+                          <Btn small onClick={()=>setPreviewCampaignId(c.id)}>Preview</Btn>
                           <Btn small variant="blue" onClick={()=>sendTest(c.id)}>{testStatus[c.id]==='sending'?'Sending…':testStatus[c.id]==='sent'?'✓ Sent!':testStatus[c.id]==='error'?'Error':'Test'}</Btn>
                         </>}
                       </div>
@@ -1308,6 +1635,7 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
     {modal==='edit-campaign'&&<CampaignModal emailClient={emailClient} lists={getLists()} initial={modalData} onClose={()=>setModal(null)} onSaved={()=>{load();onRefresh();}}/>}
     {modal==='drip'&&<DripModal campaign={modalData} totalSubs={lists.find(l=>l.id===modalData.list_id)?.subscriber_count||0} onClose={()=>setModal(null)} onSaved={load}/>}
     {sendDialogId&&<SendCampaignDialog campaignId={sendDialogId} onClose={()=>setSendDialogId(null)} onConfirmed={()=>onSendConfirmed(sendDialogId)}/>}
+    {previewCampaignId&&<PreviewCampaignModal campaignId={previewCampaignId} onClose={()=>setPreviewCampaignId(null)}/>}
   </div>);
 }
 

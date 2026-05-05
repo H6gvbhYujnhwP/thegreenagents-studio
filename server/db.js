@@ -264,6 +264,23 @@ db.exec(`
     db.exec(`ALTER TABLE email_subscribers ADD COLUMN spam_at TEXT`);
     console.log('[db] migration: added spam_at to email_subscribers');
   }
+  // Phase 4 — first_name caching for {{first_name}} placeholder personalisation.
+  // first_name = the parsed Christian name; NULL means we couldn't parse it and
+  //   the subscriber will be skipped from any campaign that uses {{first_name}}.
+  // first_name_source = 'rule' | 'ai' | 'skip' | 'manual' — provenance.
+  // first_name_reason = human-readable explanation (for the preview UI).
+  if (!subCols.includes('first_name')) {
+    db.exec(`ALTER TABLE email_subscribers ADD COLUMN first_name TEXT`);
+    console.log('[db] migration: added first_name to email_subscribers');
+  }
+  if (!subCols.includes('first_name_source')) {
+    db.exec(`ALTER TABLE email_subscribers ADD COLUMN first_name_source TEXT`);
+    console.log('[db] migration: added first_name_source to email_subscribers');
+  }
+  if (!subCols.includes('first_name_reason')) {
+    db.exec(`ALTER TABLE email_subscribers ADD COLUMN first_name_reason TEXT`);
+    console.log('[db] migration: added first_name_reason to email_subscribers');
+  }
 }
 
 // 9. Add test_email to email_clients for per-client test send persistence

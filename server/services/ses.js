@@ -15,6 +15,7 @@ import db from '../db.js';
 import { v4 as uuid } from 'uuid';
 import { applyTracking } from './tracking.js';
 import { getTouchCountsBulk, shouldTrackRecipient } from './touch-count.js';
+import { renderTemplate, templateUsesFirstName } from './name-parser.js';
 import { SESClient, GetSendQuotaCommand, ListIdentitiesCommand, GetIdentityVerificationAttributesCommand } from '@aws-sdk/client-ses';
 
 const REGION  = process.env.AWS_SES_REGION || 'eu-north-1';
@@ -212,7 +213,7 @@ export async function sendEmail({
 // Writes one email_sends row per subscriber AT SEND TIME, capturing the
 // SES MessageId — this is what makes SNS bounce/complaint webhooks work.
 export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm = false, onProgress }) {
-  const results = { sent: 0, failed: 0, errors: [], tracked: 0, untracked: 0 };
+  const results = { sent: 0, failed: 0, skipped: 0, errors: [], tracked: 0, untracked: 0 };
   const BATCH_SIZE = 10;
   const DELAY_MS   = 800;
 
@@ -252,6 +253,12 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm 
     }
   }
 
+  // Detect whether this campaign uses {{first_name}} anywhere — if it doesn't,
+  // we don't need to skip subscribers with no parsed first name.
+  const usesFirstName = templateUsesFirstName(
+    campaign.subject, campaign.html_body, campaign.plain_body
+  );
+
   for (let i = 0; i < subscribers.length; i += BATCH_SIZE) {
     // Check pause/cancel before each batch
     const gate = await statusGate();
@@ -260,9 +267,18 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm 
     const batch = subscribers.slice(i, i + BATCH_SIZE);
     await Promise.all(batch.map(async sub => {
       try {
-        const firstName = sub.name ? sub.name.trim().split(/\s+/)[0] : '';
-        const htmlBody  = (campaign.html_body  || '').replace(/\[Name\]/gi, firstName);
-        const plainBody = (campaign.plain_body || htmlToPlain(campaign.html_body || '')).replace(/\[Name\]/gi, firstName);
+        // Skip if the template needs a first name and this subscriber has none.
+        // This shouldn't happen in practice — the route filters them out before
+        // calling sendCampaign — but it's a belt-and-braces check.
+        if (usesFirstName && !sub.first_name) {
+          results.skipped = (results.skipped || 0) + 1;
+          return;
+        }
+
+        const firstName = sub.first_name || '';
+        const subject   = renderTemplate(campaign.subject,    firstName);
+        const htmlBody  = renderTemplate(campaign.html_body,  firstName);
+        const plainBody = renderTemplate(campaign.plain_body || htmlToPlain(campaign.html_body || ''), firstName);
 
         // Decide whether to track this specific recipient
         const touchCount = touchCounts.get(sub.id) || 0;
@@ -274,7 +290,7 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm 
           fromName:    campaign.from_name,
           fromEmail:   campaign.from_email,
           replyTo:     campaign.reply_to,
-          subject:     campaign.subject,
+          subject,
           htmlBody,
           plainBody,
           campaignId:    campaign.id,

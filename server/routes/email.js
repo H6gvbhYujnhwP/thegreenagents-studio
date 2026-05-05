@@ -8,6 +8,7 @@ import { getLinkUrl, TRANSPARENT_GIF } from '../services/tracking.js';
 import { getTouchCountsBulk, shouldTrackRecipient } from '../services/touch-count.js';
 import { encrypt, selfTest as cryptoSelfTest } from '../services/crypto-vault.js';
 import { testImapCredentials, pollSingleInbox, resyncInbox } from '../services/imap-poller.js';
+import { parseFirstName, parseAndCacheList, templateUsesFirstName, renderTemplate } from '../services/name-parser.js';
 import dns from 'dns';
 import { promisify } from 'util';
 
@@ -663,7 +664,7 @@ router.post('/lists/:id/import', (req, res) => {
     return 'subscribed'; // Active, Subscribed etc
   }
 
-  const insert = db.prepare('INSERT OR IGNORE INTO email_subscribers (id,list_id,email,name,status) VALUES (?,?,?,?,?)');
+  const insert = db.prepare('INSERT OR IGNORE INTO email_subscribers (id,list_id,email,name,status,first_name,first_name_source,first_name_reason) VALUES (?,?,?,?,?,?,?,?)');
   const insertMany = db.transaction((rows) => {
     let added = 0;
     for (const line of rows) {
@@ -676,7 +677,12 @@ router.post('/lists/:id/import', (req, res) => {
       const status = hasHeader && statusIdx !== -1 ? mapStatus(cols[statusIdx]) : 'subscribed';
 
       if (!email || !email.includes('@')) continue;
-      insert.run(uuid(), req.params.id, email.toLowerCase(), name || null, status);
+      // Run the fast rule parse on import. AI fallback is deferred — call
+      // POST /lists/:id/parse-names to resolve the rule's "needs_ai" cases.
+      const parsed = parseFirstName(name);
+      const fnVal    = (parsed.source === 'rule')     ? parsed.firstName : null;
+      const fnSource = (parsed.source === 'needs_ai') ? null : parsed.source; // null = "not yet decided, awaiting AI"
+      insert.run(uuid(), req.params.id, email.toLowerCase(), name || null, status, fnVal, fnSource, parsed.reason);
       added++;
     }
     return added;
@@ -696,6 +702,99 @@ router.delete('/lists/:listId/subscribers/:subId', (req, res) => {
     .run(req.params.subId, req.params.listId);
   db.prepare("UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?")
     .run(req.params.listId, req.params.listId);
+  res.json({ ok: true });
+});
+
+// ── FIRST-NAME PARSING ────────────────────────────────────────────────────────
+// Phase 4 — parse Christian names from each subscriber's stored `name` field
+// for use in {{first_name}} email placeholders. Two-stage: fast rule first,
+// Claude Haiku fallback for messy cases (caps, joint names, role-only entries).
+
+// POST /api/email/lists/:id/parse-names
+// Bulk-parse every subscriber on this list. Idempotent: only touches rows where
+// first_name_source IS NULL (i.e. never been parsed). Pass ?force=1 to re-parse
+// everything, including manual overrides — use sparingly.
+router.post('/lists/:id/parse-names', async (req, res) => {
+  const list = db.prepare('SELECT id FROM email_lists WHERE id=?').get(req.params.id);
+  if (!list) return res.status(404).json({ error: 'List not found' });
+  try {
+    const force = req.query.force === '1' || req.query.force === 'true';
+    const result = await parseAndCacheList(req.params.id, { force });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[parse-names] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/email/campaigns/:id/preview-recipients
+// Returns the active subscriber list for this campaign with parsed first names,
+// the rendered (subject, body) for each, and skip status. Used by the
+// arrow-driven preview UI in the campaign edit modal.
+//
+// Response shape:
+//   { campaign, recipients: [{ id, email, name, first_name, first_name_source,
+//                              first_name_reason, will_skip, rendered_subject,
+//                              rendered_html, rendered_plain }, ...],
+//     uses_first_name: true|false,
+//     summary: { total, will_send, will_skip, by_source: {rule,ai,manual,skip,unparsed} } }
+router.get('/campaigns/:id/preview-recipients', (req, res) => {
+  const campaign = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Not found' });
+
+  const subs = db.prepare(
+    "SELECT id, email, name, first_name, first_name_source, first_name_reason FROM email_subscribers WHERE list_id=? AND status='subscribed' ORDER BY created_at ASC"
+  ).all(campaign.list_id);
+
+  const usesFirstName = templateUsesFirstName(campaign.subject, campaign.html_body, campaign.plain_body);
+
+  const summary = {
+    total: subs.length, will_send: 0, will_skip: 0,
+    by_source: { rule: 0, ai: 0, manual: 0, skip: 0, unparsed: 0 },
+  };
+
+  const recipients = subs.map(s => {
+    const source = s.first_name_source || 'unparsed';
+    summary.by_source[source] = (summary.by_source[source] || 0) + 1;
+    // Skip when the template uses {{first_name}} and we have no parsed name.
+    // If the template doesn't use it, everyone receives — first_name irrelevant.
+    const willSkip = usesFirstName && !s.first_name;
+    if (willSkip) summary.will_skip++; else summary.will_send++;
+
+    const fn = s.first_name || '';
+    return {
+      id:                 s.id,
+      email:              s.email,
+      name:               s.name,
+      first_name:         s.first_name,
+      first_name_source:  s.first_name_source,
+      first_name_reason:  s.first_name_reason,
+      will_skip:          willSkip,
+      rendered_subject:   willSkip ? campaign.subject    : renderTemplate(campaign.subject, fn),
+      rendered_html:      willSkip ? campaign.html_body  : renderTemplate(campaign.html_body, fn),
+      rendered_plain:     willSkip ? campaign.plain_body : renderTemplate(campaign.plain_body, fn),
+    };
+  });
+
+  res.json({ campaign, recipients, uses_first_name: usesFirstName, summary });
+});
+
+// PUT /api/email/subscribers/:id/first-name
+// Manual override for a single subscriber. Pass { first_name: "Andy" } to set,
+// or { first_name: null } to mark as unparseable (will be skipped).
+router.put('/subscribers/:id/first-name', (req, res) => {
+  const sub = db.prepare('SELECT id FROM email_subscribers WHERE id=?').get(req.params.id);
+  if (!sub) return res.status(404).json({ error: 'Subscriber not found' });
+  const fn = req.body?.first_name;
+  if (fn === undefined) return res.status(400).json({ error: 'Missing first_name in body (use null to clear)' });
+  if (fn === null || fn === '') {
+    db.prepare("UPDATE email_subscribers SET first_name=NULL, first_name_source='manual', first_name_reason='Manually cleared' WHERE id=?")
+      .run(req.params.id);
+  } else {
+    if (typeof fn !== 'string' || fn.length > 80) return res.status(400).json({ error: 'Invalid first_name' });
+    db.prepare("UPDATE email_subscribers SET first_name=?, first_name_source='manual', first_name_reason='Manually set' WHERE id=?")
+      .run(fn.trim(), req.params.id);
+  }
   res.json({ ok: true });
 });
 
@@ -807,13 +906,23 @@ router.get('/campaigns/:id/send-preview', (req, res) => {
   const list = db.prepare('SELECT * FROM email_lists WHERE id=?').get(campaign.list_id);
   if (!list) return res.status(404).json({ error: 'Campaign list missing' });
 
-  const subs = db.prepare("SELECT id FROM email_subscribers WHERE list_id=? AND status='subscribed'").all(campaign.list_id);
+  const subs = db.prepare("SELECT id, first_name, first_name_source FROM email_subscribers WHERE list_id=? AND status='subscribed'").all(campaign.list_id);
   const window    = campaign.tracking_window || 6;
   const mode      = campaign.tracking_mode || 'off';
   const threshold = campaign.tracking_threshold || 3;
   const alwaysWarm = !!(list && list.always_warm);
 
   const counts = getTouchCountsBulk(subs.map(s => s.id), window);
+
+  // First-name personalisation: if the campaign uses {{first_name}}, anyone
+  // without a parsed first name will be skipped at send time.
+  const usesFirstName = templateUsesFirstName(campaign.subject, campaign.html_body, campaign.plain_body);
+  let willSkip = 0;
+  let unparsed = 0;
+  for (const sub of subs) {
+    if (!sub.first_name_source) unparsed++;
+    if (usesFirstName && !sub.first_name) willSkip++;
+  }
 
   // Histogram: 1st, 2nd, 3rd, 4+ contact (touchCount + 1 = nth contact for this send)
   const buckets = { '1st': 0, '2nd': 0, '3rd': 0, '4+': 0 };
@@ -831,6 +940,12 @@ router.get('/campaigns/:id/send-preview', (req, res) => {
   res.json({
     total_recipients: subs.length,
     buckets,
+    personalisation: {
+      uses_first_name: usesFirstName,
+      will_skip:       willSkip,        // subs that'll be skipped due to no first_name (only meaningful when uses_first_name)
+      unparsed:        unparsed,         // subs whose first_name has never been parsed (rule or AI)
+      will_send:       subs.length - willSkip,
+    },
     tracking: {
       mode, threshold, window_months: window, always_warm: alwaysWarm,
       track_opens:  !!campaign.track_opens,
@@ -872,15 +987,33 @@ router.post('/campaigns/:id/send', async (req, res) => {
   if (campaign.status === 'sending') return res.status(400).json({ error: 'Currently sending' });
 
   const list = db.prepare('SELECT * FROM email_lists WHERE id=?').get(campaign.list_id);
-  const subscribers = db.prepare("SELECT * FROM email_subscribers WHERE list_id=? AND status='subscribed'").all(campaign.list_id);
-  if (subscribers.length === 0) return res.status(400).json({ error: 'No active subscribers in list' });
+  const allSubscribers = db.prepare("SELECT * FROM email_subscribers WHERE list_id=? AND status='subscribed'").all(campaign.list_id);
+  if (allSubscribers.length === 0) return res.status(400).json({ error: 'No active subscribers in list' });
+
+  // Filter recipients based on first-name personalisation.
+  // If the template uses {{first_name}}, anyone without a parsed first_name is
+  // skipped to avoid sending "Hi ," or "Hi {{first_name}}," to real prospects.
+  // The user has already seen the skip count in the pre-send dialog and chosen
+  // to proceed; we log how many got filtered for diagnostics.
+  const usesFirstName = templateUsesFirstName(campaign.subject, campaign.html_body, campaign.plain_body);
+  const subscribers = usesFirstName
+    ? allSubscribers.filter(s => s.first_name)
+    : allSubscribers;
+  const skippedNoName = allSubscribers.length - subscribers.length;
+  if (subscribers.length === 0) {
+    db.prepare("UPDATE email_campaigns SET status='draft' WHERE id=?").run(campaign.id);
+    return res.status(400).json({ error: 'All subscribers would be skipped (no parsed first names). Run name parsing on the list first.' });
+  }
+  if (skippedNoName > 0) {
+    console.log(`[email/send] campaign ${campaign.id}: ${skippedNoName} subscribers skipped (no parsed first_name)`);
+  }
 
   db.prepare("UPDATE email_campaigns SET status='sending' WHERE id=?").run(campaign.id);
   // baseUrl comes from the request — on Render this is studio.thegreenagents.com.
   // PUBLIC_URL env var can override (useful for local dev where req.host is localhost).
   const baseUrl = process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
   const alwaysWarm = !!(list && list.always_warm);
-  res.json({ ok: true, subscribers: subscribers.length });
+  res.json({ ok: true, subscribers: subscribers.length, skipped_no_first_name: skippedNoName });
 
   try {
     const results = await sendCampaign({
@@ -1012,7 +1145,14 @@ router.post('/campaigns/:id/test', async (req, res) => {
 
   try {
     const testFooter = `<p style="margin-top:32px;font-size:11px;color:#999;text-align:center;border-top:1px solid #eee;padding-top:16px;"><strong>TEST SEND</strong> — This is a preview only.</p>`;
-    const rawHtml = campaign.html_body.replace(/\[Name\]/gi, 'there');
+    // Use "there" as a sentinel for both placeholder forms in test sends, so
+    // the user sees a believable email even though no real subscriber is chosen.
+    const rawHtml = (campaign.html_body || '')
+      .replace(/\{\{\s*first_name\s*\}\}/gi, 'there')
+      .replace(/\[Name\]/gi, 'there');
+    const subject = (campaign.subject || '')
+      .replace(/\{\{\s*first_name\s*\}\}/gi, 'there')
+      .replace(/\[Name\]/gi, 'there');
     const html = rawHtml.includes('</body>') ? rawHtml.replace('</body>', `${testFooter}</body>`) : rawHtml + testFooter;
 
     const { sendEmail } = await import('../services/ses.js');
@@ -1024,7 +1164,7 @@ router.post('/campaigns/:id/test', async (req, res) => {
       fromName:  campaign.from_name,
       fromEmail: campaign.from_email,
       replyTo:   campaign.reply_to || campaign.from_email,
-      subject:   `[TEST] ${campaign.subject}`,
+      subject:   `[TEST] ${subject}`,
       htmlBody:  html,
       plainBody: `TEST SEND\n\n${campaign.plain_body || campaign.html_body.replace(/<[^>]+>/g,'')}`,
     });
