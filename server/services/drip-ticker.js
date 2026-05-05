@@ -125,11 +125,31 @@ async function tickOneCampaign(campaign) {
   const todayLeft  = Math.max(0, dailyLimit - (campaign.drip_today_sent || 0));
   if (todayLeft === 0) return;  // already done for today
 
-  // 6. How many subscribers haven't been sent yet on this campaign?
-  // We re-fetch on every tick so newly-added subs (rare) get picked up,
-  // and so cancellations/unsubs since the last tick are respected.
+  // ── PHASE 4: load step list ──────────────────────────────────────────────
+  // Every campaign has at least step 1 (auto-backfilled by the migration).
+  // Step 1 has delay_days=0; steps 2+ have delay_days >= 1.
+  const steps = db.prepare(`
+    SELECT step_number, html_body, delay_days
+    FROM email_campaign_steps
+    WHERE campaign_id = ?
+    ORDER BY step_number ASC
+  `).all(campaign.id);
+  if (steps.length === 0) {
+    // Defensive: should never happen post-migration. Fall back to legacy single-step
+    // behaviour using campaign.html_body so we don't strand the campaign.
+    steps.push({ step_number: 1, html_body: campaign.html_body, delay_days: 0 });
+  }
+  const stepByNumber = new Map();
+  for (const s of steps) stepByNumber.set(s.step_number, s);
+
+  // 6. Build the candidate list — combines step 1 (subscribers never sent) with
+  // follow-up candidates (subscribers due for step N+1 based on delay_days since
+  // their last send AND not halted by a positive reply).
   const order = campaign.send_order === 'random' ? 'RANDOM()' : 's.created_at ASC';
-  const remainingSubs = db.prepare(`
+
+  // Step 1 candidates: subscribed list members who have no email_sends row at all
+  // for this campaign. Same logic as pre-Phase-4.
+  const step1Subs = db.prepare(`
     SELECT s.* FROM email_subscribers s
     WHERE s.list_id = ?
       AND s.status = 'subscribed'
@@ -137,17 +157,96 @@ async function tickOneCampaign(campaign) {
         SELECT 1 FROM email_sends es WHERE es.campaign_id = ? AND es.subscriber_id = s.id
       )
     ORDER BY ${order}
-  `).all(campaign.list_id, campaign.id);
+  `).all(campaign.list_id, campaign.id).map(s => ({ ...s, _stepNumber: 1 }));
 
-  if (remainingSubs.length === 0) {
-    // Nothing left — campaign is done
-    db.prepare("UPDATE email_campaigns SET status = 'sent', sent_at = datetime('now'), sent_count = drip_sent WHERE id = ?")
-      .run(campaign.id);
-    console.log(`[drip] ${campaign.id}: complete — marking sent`);
+  // Follow-up candidates: for each step N (where N >= 2), find subscribers whose
+  // latest email_sends.step_number for this campaign is N-1, where the time since
+  // that send exceeds step N's delay_days, AND who haven't been halted by a
+  // positive reply.
+  //
+  // Halt condition (per user's spec): a 'positive' classification reply from this
+  // subscriber's email to this email_client halts the sequence. Soft_negative,
+  // neutral, OOO, forwarding do NOT halt. Hard_negative auto-unsubs upstream so
+  // the subscriber is already filtered out by the status='subscribed' check.
+  const followUpCandidates = [];
+  for (let n = 2; n <= steps.length; n++) {
+    const step = stepByNumber.get(n);
+    if (!step) continue;
+    const prevStep = n - 1;
+    const delayDays = step.delay_days || 0;
+    // Subscribers whose latest send for this campaign is step (n-1) AND that send
+    // is at least delay_days old AND no positive reply blocks them AND no row
+    // already exists for step n (so we don't double-send if the previous tick
+    // raced on the same person).
+    const dueRows = db.prepare(`
+      SELECT s.* FROM email_subscribers s
+      WHERE s.list_id = ?
+        AND s.status = 'subscribed'
+        AND EXISTS (
+          SELECT 1 FROM email_sends es
+          WHERE es.campaign_id = ? AND es.subscriber_id = s.id
+            AND es.step_number = ?
+            AND es.status IN ('sent','opened','clicked','bounced')
+            AND datetime(es.sent_at) <= datetime('now', ?)
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM email_sends es2
+          WHERE es2.campaign_id = ? AND es2.subscriber_id = s.id
+            AND es2.step_number = ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM email_replies r
+          WHERE r.email_client_id = ?
+            AND lower(r.from_address) = lower(s.email)
+            AND r.classification = 'positive'
+        )
+      ORDER BY ${order}
+    `).all(
+      campaign.list_id,
+      campaign.id, prevStep, `-${delayDays} days`,
+      campaign.id, n,
+      campaign.email_client_id,
+    );
+    for (const sub of dueRows) followUpCandidates.push({ ...sub, _stepNumber: n });
+  }
+
+  // Order: send follow-ups before new step-1s when both compete for today's quota.
+  // Follow-ups represent already-engaged prospects; step 1 can wait until tomorrow.
+  const allCandidates = [...followUpCandidates, ...step1Subs];
+
+  if (allCandidates.length === 0) {
+    // Anyone left to ever receive a follow-up? (i.e. sent step N where N < lastStep)
+    const lastStep = steps[steps.length - 1].step_number;
+    const stillPending = db.prepare(`
+      SELECT COUNT(*) as c FROM email_subscribers s
+      WHERE s.list_id = ? AND s.status = 'subscribed'
+        AND (
+          NOT EXISTS (SELECT 1 FROM email_sends es WHERE es.campaign_id = ? AND es.subscriber_id = s.id)
+          OR EXISTS (
+            SELECT 1 FROM email_sends es
+            WHERE es.campaign_id = ? AND es.subscriber_id = s.id
+              AND es.step_number < ?
+              AND NOT EXISTS (
+                SELECT 1 FROM email_replies r
+                WHERE r.email_client_id = ?
+                  AND lower(r.from_address) = lower(s.email)
+                  AND r.classification = 'positive'
+              )
+          )
+        )
+    `).get(campaign.list_id, campaign.id, campaign.id, lastStep, campaign.email_client_id);
+
+    if (!stillPending || stillPending.c === 0) {
+      // Truly done — nobody left to receive any further step.
+      db.prepare("UPDATE email_campaigns SET status = 'sent', sent_at = datetime('now'), sent_count = drip_sent WHERE id = ?")
+        .run(campaign.id);
+      console.log(`[drip] ${campaign.id}: complete — marking sent`);
+    }
+    // Otherwise the pending subs are just waiting for their delay timer; do nothing this tick.
     return;
   }
 
-  const toSendNow = remainingSubs.slice(0, todayLeft);
+  const toSendNow = allCandidates.slice(0, todayLeft);
 
   // 7. Pace across the remaining window time with random jitter.
   // Compute average gap = (window time remaining in ms) / batchSize.
@@ -159,7 +258,9 @@ async function tickOneCampaign(campaign) {
   // to "send as fast as throttle allows" rather than missing the window.
   const avgGap = batchSize > 0 ? Math.max(1000, msRemaining / batchSize) : 0;
 
-  console.log(`[drip] ${campaign.id}: bursting ${batchSize} email(s) over ~${Math.round(msRemaining/60000)}min, avgGap ${Math.round(avgGap/1000)}s`);
+  const followCount = toSendNow.filter(s => s._stepNumber > 1).length;
+  const stepBreakdown = followCount > 0 ? ` (${followCount} follow-up, ${batchSize - followCount} step 1)` : '';
+  console.log(`[drip] ${campaign.id}: bursting ${batchSize} email(s)${stepBreakdown} over ~${Math.round(msRemaining/60000)}min, avgGap ${Math.round(avgGap/1000)}s`);
 
   // Mark this campaign as bursting
   let cancelled = false;
@@ -187,13 +288,20 @@ async function tickOneCampaign(campaign) {
         }
 
         const sub = toSendNow[i];
+        const stepNumber = sub._stepNumber || 1;
+        const stepRow = stepByNumber.get(stepNumber);
+        const bodyOverride = stepNumber === 1 ? null : (stepRow ? stepRow.html_body : null);
+
         // Send a "campaign" of one — sendCampaign handles personalisation, tracking,
-        // and the email_sends row insertion. We give it a single subscriber.
+        // and the email_sends row insertion. We give it a single subscriber, plus
+        // the step number and (for step 2+) the body override from email_campaign_steps.
         const result = await sendCampaign({
           campaign,
           subscribers: [sub],
           baseUrl,
           alwaysWarm,
+          stepNumber,
+          bodyOverride,
         });
 
         // Update counters atomically
@@ -212,18 +320,10 @@ async function tickOneCampaign(campaign) {
         }
       }
 
-      // After burst — was that the last send? If so mark as 'sent'
-      const remaining = db.prepare(`
-        SELECT COUNT(*) as c FROM email_subscribers s
-        WHERE s.list_id = ? AND s.status = 'subscribed'
-        AND NOT EXISTS (SELECT 1 FROM email_sends es WHERE es.campaign_id = ? AND es.subscriber_id = s.id)
-      `).get(campaign.list_id, campaign.id);
-
-      if (remaining.c === 0) {
-        db.prepare("UPDATE email_campaigns SET status = 'sent', sent_at = datetime('now') WHERE id = ?")
-          .run(campaign.id);
-        console.log(`[drip] ${campaign.id}: complete — marking sent`);
-      }
+      // After burst — was that the last possible send? Mark sent only if no one
+      // has more steps coming AND nobody is still queued for step 1.
+      // The full check is the same as the one above when allCandidates is empty,
+      // so let the next tick handle that decision rather than duplicating it.
     } catch (err) {
       console.error(`[drip] ${campaign.id}: burst error: ${err.message}`);
     } finally {

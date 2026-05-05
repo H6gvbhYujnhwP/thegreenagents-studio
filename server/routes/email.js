@@ -974,8 +974,128 @@ router.delete('/campaigns/:id', (req, res) => {
   if (!c) return res.status(404).json({ error: 'Not found' });
   if (c.status === 'sending') return res.status(400).json({ error: 'Cannot delete while sending' });
   db.prepare('DELETE FROM email_sends WHERE campaign_id=?').run(req.params.id);
+  db.prepare('DELETE FROM email_campaign_steps WHERE campaign_id=?').run(req.params.id);
   db.prepare('DELETE FROM email_campaigns WHERE id=?').run(req.params.id);
   res.json({ ok: true });
+});
+
+// ── PHASE 4: MULTI-STEP SEQUENCE ENDPOINTS ───────────────────────────────────
+// A campaign can have N steps (1st contact / 2nd contact / 3rd contact...).
+// Step 1 is always present and its body lives BOTH in email_campaigns.html_body
+//   (kept in sync for backwards-compat with all the existing send/preview code)
+//   AND in email_campaign_steps as step_number=1. The migration backfilled
+//   step 1 from html_body for every existing campaign.
+// Steps 2+ live only in email_campaign_steps.
+// delay_days = days to wait after the previous step's send before firing this step.
+//   Step 1 has delay_days=0. Step 2 typically 3, etc.
+
+// GET /api/email/campaigns/:id/steps
+// Returns the ordered step list. Always includes step 1.
+router.get('/campaigns/:id/steps', (req, res) => {
+  const campaign = db.prepare('SELECT id, html_body FROM email_campaigns WHERE id=?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+  let steps = db.prepare(`
+    SELECT id, step_number, html_body, delay_days, created_at
+    FROM email_campaign_steps
+    WHERE campaign_id=?
+    ORDER BY step_number ASC
+  `).all(req.params.id);
+  // Defensive: if a campaign somehow has no step 1 row (e.g. created right between
+  // table creation and the backfill), synthesise one from html_body so the UI
+  // never sees an empty list. This should never happen in practice.
+  if (steps.length === 0 || steps[0].step_number !== 1) {
+    const synthId = `step_${campaign.id}_1_synth`;
+    db.prepare(`INSERT INTO email_campaign_steps (id, campaign_id, step_number, html_body, delay_days)
+                VALUES (?,?,1,?,0)`).run(synthId, campaign.id, campaign.html_body || '');
+    steps = db.prepare(`
+      SELECT id, step_number, html_body, delay_days, created_at
+      FROM email_campaign_steps
+      WHERE campaign_id=?
+      ORDER BY step_number ASC
+    `).all(req.params.id);
+  }
+  // Per-step send counts so the UI can show the edit-warning toast for in-flight steps.
+  const sendCounts = db.prepare(`
+    SELECT step_number, COUNT(*) as sent_count
+    FROM email_sends
+    WHERE campaign_id=? AND status IN ('sent','opened','clicked','bounced')
+    GROUP BY step_number
+  `).all(req.params.id);
+  const sentByStep = {};
+  for (const r of sendCounts) sentByStep[r.step_number] = r.sent_count;
+  res.json({
+    steps: steps.map(s => ({ ...s, sent_count: sentByStep[s.step_number] || 0 })),
+  });
+});
+
+// PUT /api/email/campaigns/:id/steps
+// Replace the entire step list. Body: { steps: [{ step_number, html_body, delay_days }, ...] }
+//   - Step 1 is always required and must have delay_days=0.
+//   - Step numbers must be contiguous starting from 1 (1,2,3,...).
+//   - Max 10 steps total.
+//   - Step 1's html_body is also written to email_campaigns.html_body so the
+//     existing send / preview code paths (which read html_body) keep working
+//     unchanged for step-1 sends.
+//   - Already-sent rows are NOT touched. Editing a step's body or delay only
+//     affects future sends. The UI surfaces a warning toast before save.
+router.put('/campaigns/:id/steps', (req, res) => {
+  const campaign = db.prepare('SELECT id, status FROM email_campaigns WHERE id=?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+  if (campaign.status === 'sent') return res.status(400).json({ error: 'Cannot edit a sent campaign' });
+
+  const incoming = Array.isArray(req.body?.steps) ? req.body.steps : null;
+  if (!incoming || incoming.length === 0) {
+    return res.status(400).json({ error: 'steps array is required and must contain at least step 1' });
+  }
+  if (incoming.length > 10) {
+    return res.status(400).json({ error: 'Maximum 10 steps per campaign' });
+  }
+  // Validate shape: step_numbers must be 1..N contiguous, html_body required, delay_days non-negative integer.
+  // Step 1's delay_days must be 0; steps 2+ must have delay_days >= 1.
+  const sorted = [...incoming].sort((a,b) => (a.step_number||0) - (b.step_number||0));
+  for (let i = 0; i < sorted.length; i++) {
+    const s = sorted[i];
+    const expectedNum = i + 1;
+    if (s.step_number !== expectedNum) {
+      return res.status(400).json({ error: `Step numbers must be contiguous from 1; got ${s.step_number} at position ${i+1}` });
+    }
+    if (typeof s.html_body !== 'string' || s.html_body.trim().length === 0) {
+      return res.status(400).json({ error: `Step ${expectedNum} has an empty body` });
+    }
+    if (!Number.isInteger(s.delay_days) || s.delay_days < 0) {
+      return res.status(400).json({ error: `Step ${expectedNum} has an invalid delay_days` });
+    }
+    if (expectedNum === 1 && s.delay_days !== 0) {
+      return res.status(400).json({ error: 'Step 1 must have delay_days=0' });
+    }
+    if (expectedNum > 1 && s.delay_days < 1) {
+      return res.status(400).json({ error: `Step ${expectedNum} must have delay_days >= 1` });
+    }
+  }
+
+  const tx = db.transaction(() => {
+    // Wipe and rewrite. Cleanest semantics — no orphaned step rows possible.
+    db.prepare('DELETE FROM email_campaign_steps WHERE campaign_id=?').run(req.params.id);
+    const insert = db.prepare(`INSERT INTO email_campaign_steps
+      (id, campaign_id, step_number, html_body, delay_days) VALUES (?,?,?,?,?)`);
+    for (const s of sorted) {
+      const stepId = `step_${req.params.id}_${s.step_number}_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
+      insert.run(stepId, req.params.id, s.step_number, s.html_body, s.delay_days);
+    }
+    // Mirror step 1's body to email_campaigns.html_body so existing code paths
+    // (test-send, preview, send) keep reading the right thing.
+    db.prepare('UPDATE email_campaigns SET html_body=? WHERE id=?')
+      .run(sorted[0].html_body, req.params.id);
+  });
+  tx();
+
+  const out = db.prepare(`
+    SELECT id, step_number, html_body, delay_days, created_at
+    FROM email_campaign_steps
+    WHERE campaign_id=?
+    ORDER BY step_number ASC
+  `).all(req.params.id);
+  res.json({ ok: true, steps: out });
 });
 
 // ── TOUCH-COUNT ENDPOINTS (for the smart-tracking UI) ────────────────────────
@@ -1340,13 +1460,28 @@ router.get('/campaigns/:id/report', (req, res) => {
 // in-flight drips ("who got it so far, who's still queued") and completed sends
 // ("who opened, who didn't").
 //
-// Optional ?status=sent|queued|opened|not-opened|clicked filters the list.
+// Phase 4: for multi-step sequences, each subscriber may have multiple email_sends
+// rows (one per step received). We surface the LATEST step per recipient as
+// `last_step`, and add per-step send/reply counts to the summary.
+//
+// Optional ?status=sent|queued|opened|not-opened|clicked|bounced filters the list.
 router.get('/campaigns/:id/recipients', (req, res) => {
   const campaign = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
   if (!campaign) return res.status(404).json({ error: 'Not found' });
 
-  // Outer join lets us include subscribers who haven't been sent yet.
-  // Per-subscriber click count via correlated subquery.
+  // Steps lookup so the summary knows the configured step count.
+  const steps = db.prepare(`
+    SELECT step_number, delay_days FROM email_campaign_steps
+    WHERE campaign_id=? ORDER BY step_number ASC
+  `).all(req.params.id);
+
+  // For each subscriber, pick their LATEST email_sends row for this campaign
+  // (highest step_number). Subscribers with no send row at all show as queued
+  // for step 1 (last_step = 0).
+  //
+  // Strategy: left-join the row whose step_number equals the max step_number
+  // for that (campaign, subscriber). Sub-select with MAX() handles the multi-step
+  // case correctly.
   const rows = db.prepare(`
     SELECT
       s.id           as subscriber_id,
@@ -1363,15 +1498,20 @@ router.get('/campaigns/:id/recipients', (req, res) => {
       es.bounced_at,
       es.open_count,
       es.click_count,
+      COALESCE(es.step_number, 0) as last_step,
       (SELECT COUNT(*) FROM email_link_clicks lc WHERE lc.campaign_id = ? AND lc.subscriber_id = s.id) as link_click_count
     FROM email_subscribers s
     LEFT JOIN email_sends es ON es.subscriber_id = s.id AND es.campaign_id = ?
+      AND es.step_number = (
+        SELECT MAX(step_number) FROM email_sends
+        WHERE campaign_id = ? AND subscriber_id = s.id
+      )
     WHERE s.list_id = ?
     ORDER BY
       CASE WHEN es.sent_at IS NULL THEN 1 ELSE 0 END,
       es.sent_at DESC,
       s.email ASC
-  `).all(req.params.id, req.params.id, campaign.list_id);
+  `).all(req.params.id, req.params.id, req.params.id, campaign.list_id);
 
   // Apply filter — done in JS rather than SQL because the bucket logic is
   // small and easier to reason about here.
@@ -1392,6 +1532,42 @@ router.get('/campaigns/:id/recipients', (req, res) => {
   else if (filter === 'clicked') visible = all.filter(r => r.clicked_at != null || r.link_click_count > 0);
   else if (filter === 'bounced') visible = all.filter(r => r.bounced_at != null || r.subscriber_status === 'bounced');
 
+  // Per-step send counts — one row per step that has at least one send.
+  // Includes opened/bounced rows because they were sent at some point.
+  const stepCountRows = db.prepare(`
+    SELECT step_number, COUNT(DISTINCT subscriber_id) as sent_count
+    FROM email_sends
+    WHERE campaign_id = ? AND status IN ('sent','opened','clicked','bounced')
+    GROUP BY step_number
+    ORDER BY step_number ASC
+  `).all(req.params.id);
+
+  // Per-step reply counts — count subscribers on this campaign's list who replied
+  // (any classification) AFTER receiving a given step. The "after" check uses
+  // the email_sends.sent_at vs email_replies.received_at timestamps.
+  const stepReplyRows = db.prepare(`
+    SELECT es.step_number, COUNT(DISTINCT r.id) as reply_count
+    FROM email_sends es
+    JOIN email_subscribers s ON s.id = es.subscriber_id
+    JOIN email_replies r ON r.email_client_id = ?
+      AND lower(r.from_address) = lower(s.email)
+      AND datetime(r.received_at) >= datetime(es.sent_at)
+    WHERE es.campaign_id = ?
+    GROUP BY es.step_number
+    ORDER BY es.step_number ASC
+  `).all(campaign.email_client_id, req.params.id);
+
+  const stepStats = steps.map(step => {
+    const sentRow = stepCountRows.find(r => r.step_number === step.step_number);
+    const replyRow = stepReplyRows.find(r => r.step_number === step.step_number);
+    return {
+      step_number: step.step_number,
+      delay_days: step.delay_days,
+      sent_count: sentRow ? sentRow.sent_count : 0,
+      reply_count: replyRow ? replyRow.reply_count : 0,
+    };
+  });
+
   // Summary counts (always over all, not the filtered set)
   const summary = {
     total: all.length,
@@ -1401,6 +1577,8 @@ router.get('/campaigns/:id/recipients', (req, res) => {
     clicked: all.filter(r => r.clicked_at != null || r.link_click_count > 0).length,
     bounced: all.filter(r => r.bounced_at != null).length,
     failed: all.filter(r => r.send_status === 'failed').length,
+    step_count: steps.length,
+    steps: stepStats,
   };
 
   res.json({ campaign_id: req.params.id, summary, recipients: visible });

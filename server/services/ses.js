@@ -223,7 +223,13 @@ export async function sendEmail({
 //
 // Writes one email_sends row per subscriber AT SEND TIME, capturing the
 // SES MessageId — this is what makes SNS bounce/complaint webhooks work.
-export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm = false, onProgress }) {
+//
+// stepNumber (Phase 4): which step in a multi-step sequence this send is for.
+//   Default 1 — backwards compatible with all existing call sites.
+// bodyOverride (Phase 4): if provided, used as the html body INSTEAD of
+//   campaign.html_body. Used by the drip ticker when sending follow-up steps
+//   whose body lives in email_campaign_steps. Subject stays campaign-wide.
+export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm = false, onProgress, stepNumber = 1, bodyOverride = null }) {
   const results = { sent: 0, failed: 0, skipped: 0, errors: [], tracked: 0, untracked: 0 };
   const BATCH_SIZE = 10;
   const DELAY_MS   = 800;
@@ -241,12 +247,12 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm 
   };
 
   const insertSend = db.prepare(`INSERT INTO email_sends
-    (id, campaign_id, subscriber_id, message_id, status, sent_at)
-    VALUES (?, ?, ?, ?, 'sent', datetime('now'))`);
+    (id, campaign_id, subscriber_id, message_id, status, sent_at, step_number)
+    VALUES (?, ?, ?, ?, 'sent', datetime('now'), ?)`);
 
   const markFailed = db.prepare(`INSERT INTO email_sends
-    (id, campaign_id, subscriber_id, status, sent_at)
-    VALUES (?, ?, ?, 'failed', datetime('now'))`);
+    (id, campaign_id, subscriber_id, status, sent_at, step_number)
+    VALUES (?, ?, ?, 'failed', datetime('now'), ?)`);
 
   // Status checker — runs between batches. Returns one of:
   //   'continue' → keep sending
@@ -264,10 +270,13 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm 
     }
   }
 
-  // Detect whether this campaign uses {{first_name}} anywhere — if it doesn't,
+  // Body for THIS send call. For step 1 (or any non-step-aware send) it's the
+  // campaign's html_body. For follow-up steps the ticker passes the step body in.
+  const effectiveHtmlBody = bodyOverride !== null ? bodyOverride : campaign.html_body;
+  // Detect whether this body uses {{first_name}} anywhere — if it doesn't,
   // we don't need to skip subscribers with no parsed first name.
   const usesFirstName = templateUsesFirstName(
-    campaign.subject, campaign.html_body, campaign.plain_body
+    campaign.subject, effectiveHtmlBody, campaign.plain_body
   );
 
   for (let i = 0; i < subscribers.length; i += BATCH_SIZE) {
@@ -288,8 +297,8 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm 
 
         const firstName = sub.first_name || '';
         const subject   = renderTemplate(campaign.subject,    firstName);
-        const htmlBody  = renderTemplate(campaign.html_body,  firstName);
-        const plainBody = renderTemplate(campaign.plain_body || htmlToPlain(campaign.html_body || ''), firstName);
+        const htmlBody  = renderTemplate(effectiveHtmlBody,   firstName);
+        const plainBody = renderTemplate(campaign.plain_body || htmlToPlain(effectiveHtmlBody || ''), firstName);
 
         // Decide whether to track this specific recipient
         const touchCount = touchCounts.get(sub.id) || 0;
@@ -314,11 +323,11 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm 
           track_unsub:  trackThis && flags.track_unsub,
         });
 
-        insertSend.run(uuid(), campaign.id, sub.id, messageId);
+        insertSend.run(uuid(), campaign.id, sub.id, messageId, stepNumber);
         results.sent++;
         if (trackThis) results.tracked++; else results.untracked++;
       } catch (err) {
-        try { markFailed.run(uuid(), campaign.id, sub.id); } catch {}
+        try { markFailed.run(uuid(), campaign.id, sub.id, stepNumber); } catch {}
         results.failed++;
         results.errors.push({ email: sub.email, error: err.message });
       }
