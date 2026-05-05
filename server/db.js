@@ -554,7 +554,15 @@ db.exec(`
 }
 
 // Reset any stuck algorithm analysis runs on startup
-db.prepare('UPDATE linkedin_settings SET brief_running = 0 WHERE id = 1').run();
+// Also clear any partial/garbage brief (valid brief starts with # LinkedIn Algorithm)
+db.prepare("UPDATE linkedin_settings SET brief_running = 0 WHERE id = 1").run();
+{
+  const row = db.prepare("SELECT algorithm_brief FROM linkedin_settings WHERE id = 1").get();
+  if (row?.algorithm_brief && !row.algorithm_brief.trim().startsWith('#')) {
+    db.prepare("UPDATE linkedin_settings SET algorithm_brief = NULL, brief_updated_at = NULL WHERE id = 1").run();
+    console.log('[db] Cleared invalid algorithm brief (did not start with #)');
+  }
+}
 
 export default db;
 

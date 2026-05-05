@@ -94,7 +94,6 @@ async function runAnalysis() {
       max_tokens: 8000,
       system: ANALYST_SYSTEM_PROMPT,
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-      betas: ['web-search-2025-03-05'],
       messages: [{
         role: 'user',
         content: `Run the weekly LinkedIn analysis now. Today's date is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}.
@@ -105,6 +104,8 @@ Execute both research steps using your web_search tool:
 
 Then output the Algorithm & Style Brief in the exact format specified. Start directly with the # heading.`
       }]
+    }, {
+      headers: { 'anthropic-beta': 'web-search-2025-03-05' }
     });
 
     console.log(`[algorithm] Claude finished — stop_reason: ${response.stop_reason}`);
