@@ -1952,6 +1952,7 @@ function MailboxDetail({inbox, onRefresh}){
   const [loading,setLoading]=useState(true);
   const [openReplyId,setOpenReplyId]=useState(null);
   const [polling,setPolling]=useState(false);
+  const [classifying,setClassifying]=useState(false);
 
   useEffect(()=>{loadReplies();},[inbox.id, bucket]);
   async function loadReplies(){
@@ -2002,6 +2003,41 @@ function MailboxDetail({inbox, onRefresh}){
     }
   }
 
+  // Classify pending — kick the AI classifier cron now instead of waiting up to 60s.
+  // Hits the global classify-now endpoint (not scoped to this mailbox) since the
+  // classifier processes the whole queue. Refreshes the UI to show new badges.
+  async function classifyPending(){
+    setClassifying(true);
+    setPollMsg(null);
+    try {
+      const r = await fetch('/api/email/replies/classify-now',{method:'POST'});
+      const d = await r.json();
+      if (d.ok) {
+        loadReplies();
+        onRefresh();
+        const total = d.processed || 0;
+        if (total === 0) {
+          setPollMsg({ok:true, text:'Nothing pending — all replies are already classified'});
+        } else {
+          const pieces = [];
+          if (d.byPass.regex)     pieces.push(`${d.byPass.regex} by rule`);
+          if (d.byPass.heuristic) pieces.push(`${d.byPass.heuristic} by heuristic`);
+          if (d.byPass.ai)        pieces.push(`${d.byPass.ai} by AI`);
+          if (d.byPass.error)     pieces.push(`${d.byPass.error} errored`);
+          setPollMsg({ok:true, text:`Classified ${total} repl${total===1?'y':'ies'} — ${pieces.join(', ')}`});
+        }
+        setTimeout(()=>setPollMsg(null), 6000);
+      } else {
+        setPollMsg({ok:false, text:d.error||'Classifier failed'});
+        setTimeout(()=>setPollMsg(null), 8000);
+      }
+    } catch(err) {
+      setPollMsg({ok:false, text:err.message});
+      setTimeout(()=>setPollMsg(null), 8000);
+    }
+    setClassifying(false);
+  }
+
   return(<div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0,overflow:'hidden'}}>
 
     {/* Header */}
@@ -2015,6 +2051,7 @@ function MailboxDetail({inbox, onRefresh}){
         </div>
       </div>
       <Btn small onClick={checkNow} disabled={polling}>{polling?'Checking…':'Check now'}</Btn>
+      <Btn small onClick={classifyPending} disabled={polling||classifying} title="Run the AI classifier now on any unclassified emails. Otherwise it runs automatically every minute.">{classifying?'Classifying…':'Classify pending'}</Btn>
       <button
         onClick={resyncNow}
         disabled={polling}
@@ -2172,6 +2209,20 @@ function ReplyDetailModal({replyId, onClose, onAction}){
 
     {/* Actions */}
     <div style={{display:'flex',gap:8,flexWrap:'wrap',justifyContent:'flex-end',paddingTop:12,borderTop:`0.5px solid ${BORDER}`}}>
+      {!reply.classification && (
+        <Btn variant="blue" onClick={async()=>{
+          setBusy(true);
+          const r=await fetch(`/api/email/replies/${replyId}/classify`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:true})});
+          const d=await r.json();
+          setBusy(false);
+          if(d.ok){
+            // Reload to show new classification
+            const rr=await fetch(`/api/email/replies/${replyId}`);
+            setReply(await rr.json());
+            onAction();
+          } else alert(d.error||'Classify failed');
+        }} disabled={busy}>{busy?'Classifying…':'Classify with AI'}</Btn>
+      )}
       {reply.classification==='positive' && !reply.handled_at && (
         <Btn variant="primary" onClick={()=>action('handle')} disabled={busy}>Mark as handled</Btn>
       )}

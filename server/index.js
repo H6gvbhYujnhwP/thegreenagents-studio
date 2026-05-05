@@ -7,6 +7,7 @@ import clientRoutes   from './routes/clients.js';
 import campaignRoutes from './routes/campaigns.js';
 import emailRoutes    from './routes/email.js';
 import { startPoller } from './services/imap-poller.js';
+import { startClassifier } from './services/classify-replies.js';
 import { selfTest as cryptoSelfTest } from './services/crypto-vault.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -42,4 +43,9 @@ app.listen(PORT, () => {
   // Start the IMAP poller — only if encryption is configured
   if (ct.ok) startPoller();
   else console.log('[poller] not started — set MAILBOX_ENCRYPTION_KEY to enable inbox monitoring');
+
+  // Start the reply classifier — needs both encryption (so the poller can fetch
+  // replies in the first place) and the Anthropic API key for the AI fallback pass.
+  if (ct.ok && process.env.ANTHROPIC_API_KEY) startClassifier();
+  else console.log('[classifier] not started — needs MAILBOX_ENCRYPTION_KEY and ANTHROPIC_API_KEY');
 });

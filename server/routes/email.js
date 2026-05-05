@@ -9,6 +9,7 @@ import { getTouchCountsBulk, shouldTrackRecipient } from '../services/touch-coun
 import { encrypt, selfTest as cryptoSelfTest } from '../services/crypto-vault.js';
 import { testImapCredentials, pollSingleInbox, resyncInbox } from '../services/imap-poller.js';
 import { parseFirstName, parseAndCacheList, templateUsesFirstName, renderTemplate } from '../services/name-parser.js';
+import { classifyPendingOnce, classifyOneReply } from '../services/classify-replies.js';
 import dns from 'dns';
 import { promisify } from 'util';
 
@@ -1499,6 +1500,33 @@ router.post('/replies/:id/reclassify', (req, res) => {
               VALUES (?, 'user', 'reclassify', 'reply', ?, ?, ?)`)
     .run(uuid(), req.params.id, req.params.id, JSON.stringify({ from: r.classification, to: classification }));
   res.json({ ok: true });
+});
+
+// POST /api/email/replies/:id/classify — run the AI classifier on this single reply
+// (force=true re-runs even if already classified). Used by the "Classify with AI"
+// button in the reply detail modal.
+router.post('/replies/:id/classify', async (req, res) => {
+  const force = req.body?.force === true || req.query.force === '1';
+  try {
+    const result = await classifyOneReply(req.params.id, { force });
+    res.json(result);
+  } catch (err) {
+    console.error('[classify-one] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/email/replies/classify-now — kick the classifier cron immediately.
+// Runs the next batch of unclassified replies (capped at MAX_PER_RUN per run).
+// Used by the "Classify pending" button in the mailbox detail header.
+router.post('/replies/classify-now', async (req, res) => {
+  try {
+    const stats = await classifyPendingOnce();
+    res.json({ ok: true, ...stats });
+  } catch (err) {
+    console.error('[classify-now] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // POST /api/email/replies/:id/manual-unsubscribe — operator unsubscribes the sender
