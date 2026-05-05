@@ -466,12 +466,23 @@ function ClientModal({initial,onClose,onSaved}){
   const editing=!!initial?.id;
   const [name,setName]=useState(initial?.name||'');
   const [color,setColor]=useState(initial?.color||'#1D9E75');
+  // Default sender — set once per client, auto-populates new campaigns and lists
+  const [defaultFromEmail,setDefaultFromEmail]=useState(initial?.default_from_email||'');
+  const [defaultFromName,setDefaultFromName]=useState(initial?.default_from_name||'');
   const [saving,setSaving]=useState(false);
   const [err,setErr]=useState('');
   async function save(){
     if(!name.trim()){setErr('Name required');return;}
     setSaving(true);
-    const r=await fetch(editing?`/api/email/clients/${initial.id}`:'/api/email/clients',{method:editing?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,color})});
+    const r=await fetch(editing?`/api/email/clients/${initial.id}`:'/api/email/clients',{
+      method:editing?'PUT':'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        name, color,
+        default_from_email: defaultFromEmail.trim() || null,
+        default_from_name:  defaultFromName.trim()  || null,
+      }),
+    });
     const d=await r.json();
     if(d.error){setErr(d.error);setSaving(false);return;}
     onSaved();onClose();
@@ -482,14 +493,28 @@ function ClientModal({initial,onClose,onSaved}){
       <label style={{display:'block',fontSize:12,color:MUTED,marginBottom:6}}>Colour</label>
       <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>{BRAND_COLORS.map(c=><div key={c} onClick={()=>setColor(c)} style={{width:24,height:24,borderRadius:6,background:c,cursor:'pointer',border:color===c?`2px solid ${TEXT}`:'2px solid transparent'}}/>)}</div>
     </div>
-    {err&&<div style={{color:DANGER,fontSize:13,marginBottom:10}}>{err}</div>}
-    <div style={{display:'flex',justifyContent:'flex-end',gap:8}}><Btn onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={save} disabled={saving}>{saving?'Saving…':editing?'Save changes':'Create client'}</Btn></div>
+    {/* Default sender — pre-fills new campaigns and lists for this client */}
+    <div style={{marginTop:18,padding:14,background:'#fafaf8',borderRadius:8,border:`0.5px solid ${BORDER}`}}>
+      <div style={{fontSize:13,fontWeight:500,color:TEXT,marginBottom:2}}>Default sender</div>
+      <div style={{fontSize:11,color:MUTED,marginBottom:12}}>Auto-fills From and Reply-To on new campaigns and lists for this client.</div>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'0 14px'}}>
+        <Input label="From name"  value={defaultFromName}  onChange={setDefaultFromName}  placeholder="John Wicks"/>
+        <Input label="From email" value={defaultFromEmail} onChange={setDefaultFromEmail} placeholder="john@clearerpaths.co.uk"/>
+      </div>
+    </div>
+    {err&&<div style={{color:DANGER,fontSize:13,marginTop:14,marginBottom:10}}>{err}</div>}
+    <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:18}}><Btn onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={save} disabled={saving}>{saving?'Saving…':editing?'Save changes':'Create client'}</Btn></div>
   </Modal>);
 }
 
 // ── List modal ────────────────────────────────────────────────────────────────
 function ListModal({emailClient,onClose,onSaved}){
-  const [form,setForm]=useState({name:'',from_name:'',from_email:'',reply_to:''});
+  const [form,setForm]=useState({
+    name:'',
+    from_name:  emailClient?.default_from_name  || '',
+    from_email: emailClient?.default_from_email || '',
+    reply_to:   emailClient?.default_from_email || '',
+  });
   const [saving,setSaving]=useState(false);
   const [err,setErr]=useState('');
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
@@ -905,7 +930,8 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
   const [form,setForm]=useState({
     list_id:initial?.list_id||(lists.length===1?lists[0].id:''),
     title:initial?.title||'',subject:initial?.subject||'',
-    from_name:initial?.from_name||'',from_email:initial?.from_email||'',
+    from_name:  initial?.from_name  || (editing ? '' : (emailClient?.default_from_name  || '')),
+    from_email: initial?.from_email || (editing ? '' : (emailClient?.default_from_email || '')),
     reply_to:initial?.reply_to||'',
     html_body: editing ? (initial?.html_body || '') : DEFAULT_BODY,
     // Tracking fields. Default to safest (off) for new campaigns; preserve on edit.

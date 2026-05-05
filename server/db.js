@@ -308,6 +308,20 @@ db.exec(`
     db.exec(`ALTER TABLE email_clients ADD COLUMN test_email TEXT`);
     console.log('[db] migration: added test_email to email_clients');
   }
+  // default_from_email: the address every campaign on this client defaults to using
+  // for both From and Reply-To. Saves typing and prevents typos. Per request 1 the
+  // user only sends from one address per domain identity, so this is the natural
+  // place to remember it once.
+  if (!cols.includes('default_from_email')) {
+    db.exec(`ALTER TABLE email_clients ADD COLUMN default_from_email TEXT`);
+    console.log('[db] migration: added default_from_email to email_clients');
+  }
+  // default_from_name: paired with default_from_email so the From line renders as
+  // "John Wicks <john@clearerpaths.co.uk>" without re-typing both halves.
+  if (!cols.includes('default_from_name')) {
+    db.exec(`ALTER TABLE email_clients ADD COLUMN default_from_name TEXT`);
+    console.log('[db] migration: added default_from_name to email_clients');
+  }
 }
 
 // ── 10. TRACKING (open/click/bounce/spam) ─────────────────────────────────────

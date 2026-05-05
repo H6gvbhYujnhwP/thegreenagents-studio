@@ -113,6 +113,17 @@ function buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, html
   const plain      = plainBody || htmlToPlain(htmlBody);
   const subjEnc    = `=?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`;
 
+  // Wrap the body fragment with a minimal HTML shell + CSS that normalises
+  // paragraph spacing. Why: the rich-text editor saves <p>...</p> blocks for
+  // every line, and browsers' default <p> margin is ~1em top + ~1em bottom.
+  // When the user adds a "blank line" by pressing Enter twice, the saved HTML
+  // becomes <p>...</p><p><br></p><p>...</p> — three paragraphs with margins
+  // between them, rendering in Outlook/Gmail as ~3 visual line breaks instead
+  // of 1. The CSS below resets paragraph margins to a sensible 1em-bottom
+  // (one blank line between paragraphs) and hides empty <p> placeholders.
+  // Result: what you see in the editor matches what the recipient sees.
+  const wrappedHtml = wrapBodyWithEmailCss(htmlBody);
+
   const headers = [
     `From: ${fromName} <${fromEmail}>`,
     `To: ${toAddress}`,
@@ -145,8 +156,8 @@ function buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, html
   // caused recipient clients (or relays) to interpret literal '=' chars in
   // tracking URLs as QP escape sequences — corrupting hrefs and styles.
   // base64 is the safest choice for HTML containing arbitrary URLs and styles.
-  const htmlB64  = Buffer.from(htmlBody, 'utf8').toString('base64').replace(/(.{76})/g, '$1\r\n');
-  const plainB64 = Buffer.from(plain,    'utf8').toString('base64').replace(/(.{76})/g, '$1\r\n');
+  const htmlB64  = Buffer.from(wrappedHtml, 'utf8').toString('base64').replace(/(.{76})/g, '$1\r\n');
+  const plainB64 = Buffer.from(plain,       'utf8').toString('base64').replace(/(.{76})/g, '$1\r\n');
 
   return [
     ...headers,
@@ -339,6 +350,44 @@ export async function getVerifiedDomains() {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// Wrap a body fragment from the rich-text editor with the minimal HTML shell
+// every email client expects, plus a tiny CSS reset that fixes paragraph
+// spacing. Without this the recipient sees ~3x the line spacing the user typed
+// because browsers' default <p> margins (1em top + 1em bottom = ~28px each)
+// stack between every paragraph and around every empty <p><br></p> placeholder.
+//
+// Notes:
+//   • Idempotent: if the body already has <html>/<body> tags (legacy or AI-
+//     generated), we don't double-wrap. We just inject the <style> into <head>.
+//   • Safe with both base64 transport AND with tracking pixel/link injection:
+//     applyTracking() in tracking.js operates on the raw string, and we wrap
+//     here AFTER tracking has been applied (in sendEmail caller order).
+function wrapBodyWithEmailCss(body) {
+  if (!body) return '';
+  const css = `
+    body { margin: 0; padding: 0; line-height: 1.4; font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #1a1a1a; }
+    p { margin: 0 0 1em 0; }
+    p:last-child { margin-bottom: 0; }
+    p:empty, p:has(> br:only-child) { display: none; }
+    br + br { display: none; }
+    ul, ol { margin: 0 0 1em 1.5em; padding: 0; }
+    li { margin: 0 0 0.25em 0; }
+    a { color: #185FA5; }
+  `.trim();
+
+  // If the body already looks like a full document, just slot the CSS into <head>.
+  if (/<html[\s>]/i.test(body)) {
+    if (/<head[\s>]/i.test(body)) {
+      return body.replace(/<head([^>]*)>/i, `<head$1><style>${css}</style>`);
+    }
+    return body.replace(/<html([^>]*)>/i, `<html$1><head><style>${css}</style></head>`);
+  }
+
+  // Otherwise wrap the fragment.
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>${css}</style></head><body>${body}</body></html>`;
+}
+
 function htmlToPlain(html) {
   return (html || '')
     .replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>/gi, '\n\n')

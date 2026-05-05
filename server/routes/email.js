@@ -546,11 +546,16 @@ router.post('/clients', (req, res) => {
 });
 
 router.put('/clients/:id', (req, res) => {
-  const { name, color, test_email } = req.body;
+  const { name, color, test_email, default_from_email, default_from_name } = req.body;
   const c = db.prepare('SELECT * FROM email_clients WHERE id=?').get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Not found' });
-  db.prepare('UPDATE email_clients SET name=?,color=?,test_email=? WHERE id=?')
-    .run(name ?? c.name, color ?? c.color, test_email ?? c.test_email, req.params.id);
+  db.prepare('UPDATE email_clients SET name=?,color=?,test_email=?,default_from_email=?,default_from_name=? WHERE id=?')
+    .run(
+      name ?? c.name, color ?? c.color, test_email ?? c.test_email,
+      default_from_email ?? c.default_from_email,
+      default_from_name  ?? c.default_from_name,
+      req.params.id
+    );
   res.json(db.prepare('SELECT * FROM email_clients WHERE id=?').get(req.params.id));
 });
 
