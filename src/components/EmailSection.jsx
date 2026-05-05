@@ -26,6 +26,26 @@ function subBadge(s){
   if(s==='spam')       return <Badge label="Spam" color={DANGER} bg="#fdecea"/>;
   return <Badge label={s} color={MUTED}/>;
 }
+
+// Estimate when a scheduled drip campaign will finish, walking forward day by
+// day from today. Used in the queue's "Est. finish" column. Skips inactive
+// weekdays per the campaign's drip_send_days setting.
+function estimateDripFinish(c, totalSubs){
+  const dl = c.daily_limit || 0;
+  const remaining = Math.max(0, totalSubs - (c.drip_sent || 0));
+  if (dl <= 0 || remaining <= 0) return '—';
+  const activeDays = (c.drip_send_days || '1,2,3,4,5').split(',');
+  if (activeDays.length === 0) return '—';
+  const cursor = new Date();
+  let sent = 0, calendarDays = 0;
+  while (sent < remaining && calendarDays < 365) {
+    const dow = String(cursor.getDay());
+    if (activeDays.includes(dow)) sent += dl;
+    if (sent < remaining) cursor.setDate(cursor.getDate() + 1);
+    calendarDays++;
+  }
+  return cursor.toLocaleDateString('en-GB', { day:'numeric', month:'short' });
+}
 function Modal({title,children,onClose,wide}){
   return(<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.35)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000}}>
     <div style={{background:CARD,borderRadius:12,padding:28,width:wide?800:480,maxWidth:'95vw',maxHeight:'90vh',overflowY:'auto',boxShadow:'0 8px 40px rgba(0,0,0,0.15)'}}>
@@ -68,6 +88,157 @@ function Toggle({checked,onChange}){
 }
 
 // ── TrackingControls — the tracking section of the campaign editor ───────────
+// ── Schedule controls (drip / one-shot) ──────────────────────────────────────
+// Renders inside the campaign modal. When drip is on, the user picks a daily
+// limit, a start date, time window, days of week, and send order. Live estimate
+// underneath shows when the campaign will finish, taking weekday rules into
+// account. Toggle "Drip over multiple days" to switch back to one-shot.
+function ScheduleControls({form, set, totalSubs}){
+  const dripOn = (form.daily_limit || 0) > 0;
+
+  // Day-of-week buttons — JS Date.getDay() uses 0=Sun..6=Sat
+  const DAY_DEFS = [
+    { k:'1', l:'Mon' }, { k:'2', l:'Tue' }, { k:'3', l:'Wed' },
+    { k:'4', l:'Thu' }, { k:'5', l:'Fri' }, { k:'6', l:'Sat' }, { k:'0', l:'Sun' },
+  ];
+  const activeDays = (form.drip_send_days || '1,2,3,4,5').split(',').map(s=>s.trim()).filter(Boolean);
+  function toggleDay(k){
+    const next = activeDays.includes(k)
+      ? activeDays.filter(d => d !== k)
+      : [...activeDays, k];
+    next.sort();
+    set('drip_send_days', next.join(','));
+  }
+
+  // Estimate completion. Walks forward day by day from start date; on each
+  // active day, counts dailyLimit sends. Stops when total subs reached.
+  function estimate(){
+    const dl = parseInt(form.daily_limit, 10) || 0;
+    const subs = totalSubs || 0;
+    if (dl <= 0 || subs <= 0 || activeDays.length === 0) return null;
+    const startStr = form.drip_start_at || new Date().toISOString().slice(0,10);
+    const startDate = new Date(startStr.length > 10 ? startStr : startStr + 'T00:00:00');
+    if (Number.isNaN(startDate.getTime())) return null;
+
+    const cursor = new Date(startDate);
+    let sent = 0, calendarDays = 0, sendDays = 0;
+    while (sent < subs && calendarDays < 365) {
+      const dow = String(cursor.getDay());
+      if (activeDays.includes(dow)) { sent += dl; sendDays++; }
+      if (sent < subs) cursor.setDate(cursor.getDate() + 1);
+      calendarDays++;
+    }
+    if (sent < subs) return null;  // would exceed 365 days, treat as unbounded
+    return {
+      sendDays, calendarDays,
+      finishDate: cursor.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' }),
+    };
+  }
+  const est = estimate();
+
+  // Helpful warning if window is too short for the daily limit
+  function windowWarning(){
+    const dl = parseInt(form.daily_limit, 10) || 0;
+    if (dl < 30) return null;
+    const [sh, sm] = (form.drip_window_start || '09:00').split(':').map(Number);
+    const [eh, em] = (form.drip_window_end   || '11:00').split(':').map(Number);
+    const mins = (eh*60 + em) - (sh*60 + sm);
+    if (mins <= 0) return null;
+    if (dl >= 30 && mins < 60) {
+      return `Tight pacing: ${dl} sends in ${mins} min ≈ ${Math.round(mins*60/dl)}s between sends. Looks more human with a 2+ hour window.`;
+    }
+    return null;
+  }
+  const warn = windowWarning();
+
+  return(<div style={{marginTop:18,padding:18,background:'#fafaf8',borderRadius:8,border:`0.5px solid ${BORDER}`}}>
+    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}}>
+      <div style={{fontSize:14,fontWeight:500,color:TEXT}}>Schedule</div>
+      <label style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:12,color:MUTED,cursor:'pointer'}}>
+        <input type="checkbox" checked={dripOn}
+          onChange={e=>set('daily_limit', e.target.checked ? (form.daily_limit > 0 ? form.daily_limit : 50) : 0)}
+          style={{margin:0,cursor:'pointer'}}
+        />
+        Drip over multiple days
+      </label>
+    </div>
+    <div style={{fontSize:12,color:MUTED,marginBottom:14}}>
+      {dripOn
+        ? 'Spread the send across days. Cold-outreach inboxes prefer this over a single big burst.'
+        : 'Off — clicking Send now will fire all subscribers immediately (with the existing throttle).'}
+    </div>
+
+    {dripOn && (<>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:12}}>
+        <div>
+          <label style={{display:'block',fontSize:11,color:MUTED,marginBottom:4}}>Emails per day</label>
+          <input type="number" min="1" max="5000" value={form.daily_limit}
+            onChange={e=>set('daily_limit', Math.max(1, parseInt(e.target.value, 10) || 1))}
+            style={{width:'100%',padding:'8px 12px',border:`0.5px solid ${BORDER}`,borderRadius:7,fontSize:13,color:TEXT,background:CARD,outline:'none'}}/>
+        </div>
+        <div>
+          <label style={{display:'block',fontSize:11,color:MUTED,marginBottom:4}}>Start date</label>
+          <input type="date" value={(form.drip_start_at || '').slice(0,10)}
+            onChange={e=>set('drip_start_at', e.target.value)}
+            style={{width:'100%',padding:'8px 12px',border:`0.5px solid ${BORDER}`,borderRadius:7,fontSize:13,color:TEXT,background:CARD,outline:'none'}}/>
+        </div>
+      </div>
+
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12,marginBottom:12}}>
+        <div>
+          <label style={{display:'block',fontSize:11,color:MUTED,marginBottom:4}}>Window start ({form.drip_timezone||'Europe/London'})</label>
+          <input type="time" value={form.drip_window_start||'09:00'}
+            onChange={e=>set('drip_window_start', e.target.value)}
+            style={{width:'100%',padding:'8px 12px',border:`0.5px solid ${BORDER}`,borderRadius:7,fontSize:13,color:TEXT,background:CARD,outline:'none'}}/>
+        </div>
+        <div>
+          <label style={{display:'block',fontSize:11,color:MUTED,marginBottom:4}}>Window end</label>
+          <input type="time" value={form.drip_window_end||'11:00'}
+            onChange={e=>set('drip_window_end', e.target.value)}
+            style={{width:'100%',padding:'8px 12px',border:`0.5px solid ${BORDER}`,borderRadius:7,fontSize:13,color:TEXT,background:CARD,outline:'none'}}/>
+        </div>
+        <div>
+          <label style={{display:'block',fontSize:11,color:MUTED,marginBottom:4}}>Send order</label>
+          <select value={form.send_order||'top'} onChange={e=>set('send_order', e.target.value)}
+            style={{width:'100%',padding:'8px 12px',border:`0.5px solid ${BORDER}`,borderRadius:7,fontSize:13,color:TEXT,background:CARD}}>
+            <option value="top">Top first</option>
+            <option value="random">Random</option>
+          </select>
+        </div>
+      </div>
+
+      <div style={{marginBottom:12}}>
+        <label style={{display:'block',fontSize:11,color:MUTED,marginBottom:6}}>Send on these days</label>
+        <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+          {DAY_DEFS.map(d=>{
+            const on = activeDays.includes(d.k);
+            return(<button key={d.k} type="button" onClick={()=>toggleDay(d.k)} style={{
+              padding:'6px 12px',fontSize:12,borderRadius:6,cursor:'pointer',minWidth:48,
+              background: on ? `${BLUE}15` : CARD,
+              color:      on ? BLUE         : MUTED,
+              border:    `0.5px solid ${on ? BLUE+'60' : BORDER}`,
+            }}>{d.l}</button>);
+          })}
+        </div>
+      </div>
+
+      {warn && (
+        <div style={{padding:'8px 12px',background:`${AMBER}15`,color:AMBER,borderRadius:6,fontSize:12,marginBottom:10,lineHeight:1.5}}>{warn}</div>
+      )}
+
+      <div style={{padding:'10px 14px',background:CARD,border:`0.5px solid ${BORDER}`,borderRadius:7,fontSize:12,lineHeight:1.5,color:TEXT}}>
+        {est ? (<>
+          Sending <b style={{fontWeight:500}}>{form.daily_limit}/day</b> between <b style={{fontWeight:500}}>{form.drip_window_start}</b> and <b style={{fontWeight:500}}>{form.drip_window_end}</b> on {activeDays.length===7?'every day':activeDays.map(d=>DAY_DEFS.find(x=>x.k===d)?.l).filter(Boolean).join(', ')}.<br/>
+          {totalSubs.toLocaleString()} subscriber{totalSubs===1?'':'s'} → completes in <b style={{fontWeight:500}}>{est.sendDays} send-day{est.sendDays===1?'':'s'}</b>, finishing around <b style={{fontWeight:500}}>{est.finishDate}</b>.
+        </>) : (
+          <span style={{color:MUTED}}>{totalSubs===0 ? 'Pick a list with subscribers to see the schedule estimate.' : 'Pick at least one day and a daily limit.'}</span>
+        )}
+      </div>
+    </>)}
+  </div>);
+}
+
+
 function TrackingControls({form, set}){
   const mode = form.tracking_mode || 'off';
   const setMode = (m) => {
@@ -744,6 +915,15 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
     track_opens:  !!initial?.track_opens,
     track_clicks: !!initial?.track_clicks,
     track_unsub:  !!initial?.track_unsub,
+    // Drip schedule. Default off for new campaigns. Existing campaigns preserve
+    // their saved values. daily_limit > 0 means dripping is enabled.
+    daily_limit:        initial?.daily_limit        ?? 0,
+    drip_start_at:      initial?.drip_start_at      ?? new Date().toISOString().slice(0,10),
+    drip_send_days:     initial?.drip_send_days     ?? '1,2,3,4,5',
+    drip_window_start:  initial?.drip_window_start  ?? '09:00',
+    drip_window_end:    initial?.drip_window_end    ?? '11:00',
+    drip_timezone:      initial?.drip_timezone      ?? 'Europe/London',
+    send_order:         initial?.send_order         ?? 'top',
   });
   const [saving,setSaving]=useState(false);
   const [err,setErr]=useState('');
@@ -797,6 +977,7 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
       </div>
       <RichTextEditor value={form.html_body} onChange={v => set('html_body', v)} />
     </div>
+    <ScheduleControls form={form} set={set} totalSubs={lists.find(l=>l.id===form.list_id)?.subscriber_count||0}/>
     <TrackingControls form={form} set={set}/>
     {err&&<div style={{color:DANGER,fontSize:13,marginTop:14,marginBottom:10}}>{err}</div>}
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,marginTop:18}}>
@@ -1596,6 +1777,16 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
                             <div style={{height:4,borderRadius:2,background:c.status==='paused'?AMBER:GREEN,width:`${pct}%`}}/>
                           </div>
                         </div>
+                      ):c.status==='scheduled' && c.daily_limit>0 ? (
+                        <div>
+                          <div style={{fontSize:11,color:MUTED,marginBottom:3}}>
+                            {(c.drip_sent||0).toLocaleString()} / {totalSubs.toLocaleString()}
+                            {c.drip_today_sent>0 && <span style={{color:BLUE,marginLeft:4}}>· {c.drip_today_sent} today</span>}
+                          </div>
+                          <div style={{height:4,background:BG,borderRadius:2,overflow:'hidden'}}>
+                            <div style={{height:4,borderRadius:2,background:BLUE,width:`${totalSubs?Math.min(100,Math.round(((c.drip_sent||0)/totalSubs)*100)):0}%`}}/>
+                          </div>
+                        </div>
                       ):isSent?(
                         <div style={{fontSize:11}}>
                           <span style={{color:GREEN}}>{(c.open_count||0).toLocaleString()} opens</span>
@@ -1604,7 +1795,12 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
                         </div>
                       ):<span style={{color:MUTED,fontSize:11}}>—</span>}
                     </TD>
-                    <TD muted style={{fontSize:11}}>{isSending?finish:isSent?(c.sent_at?new Date(c.sent_at).toLocaleDateString('en-GB',{day:'numeric',month:'short'}):'—'):'—'}</TD>
+                    <TD muted style={{fontSize:11}}>{
+                      isSending ? finish
+                      : c.status==='scheduled' && c.daily_limit>0 ? estimateDripFinish(c, totalSubs)
+                      : isSent ? (c.sent_at?new Date(c.sent_at).toLocaleDateString('en-GB',{day:'numeric',month:'short'}):'—')
+                      : '—'
+                    }</TD>
                     <TD>
                       <div style={{display:'flex',gap:5,flexWrap:'wrap'}}>
                         {(c.status==='draft'||c.status==='scheduled')&&<>

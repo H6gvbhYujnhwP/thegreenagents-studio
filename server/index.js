@@ -8,6 +8,7 @@ import campaignRoutes from './routes/campaigns.js';
 import emailRoutes    from './routes/email.js';
 import { startPoller } from './services/imap-poller.js';
 import { startClassifier } from './services/classify-replies.js';
+import { startDripTicker } from './services/drip-ticker.js';
 import { selfTest as cryptoSelfTest } from './services/crypto-vault.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -48,4 +49,8 @@ app.listen(PORT, () => {
   // replies in the first place) and the Anthropic API key for the AI fallback pass.
   if (ct.ok && process.env.ANTHROPIC_API_KEY) startClassifier();
   else console.log('[classifier] not started — needs MAILBOX_ENCRYPTION_KEY and ANTHROPIC_API_KEY');
+
+  // Start the drip ticker — sends scheduled campaigns batch by batch in their
+  // chosen window. Doesn't depend on encryption or Anthropic; just SES + DB.
+  startDripTicker();
 });

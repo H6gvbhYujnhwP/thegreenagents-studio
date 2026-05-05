@@ -237,6 +237,24 @@ for (const { table, col, def } of migrations) {
     { col:'drip_sent',      def:'INTEGER DEFAULT 0' },
     { col:'send_order',     def:"TEXT DEFAULT 'top'" },
     { col:'spam_count',     def:'INTEGER DEFAULT 0' },
+    // Phase 4 drip-schedule columns ─────────────────────────────────────────
+    // drip_send_days: comma-separated list of weekdays the ticker may send on.
+    //   Format: "0,1,2,3,4,5,6" with 0=Sun, 1=Mon, ..., 6=Sat (matches JS Date.getDay()).
+    //   Default Mon-Fri so cold outreach defaults to business days.
+    { col:'drip_send_days',     def:"TEXT DEFAULT '1,2,3,4,5'" },
+    // drip_window_start / drip_window_end: HH:MM strings in the campaign's timezone.
+    // The ticker sends randomly-jittered emails between these times each active day.
+    { col:'drip_window_start',  def:"TEXT DEFAULT '09:00'" },
+    { col:'drip_window_end',    def:"TEXT DEFAULT '11:00'" },
+    // drip_timezone: IANA zone, e.g. 'Europe/London'. Used so DST handles itself.
+    { col:'drip_timezone',      def:"TEXT DEFAULT 'Europe/London'" },
+    // drip_today_date / drip_today_sent: per-day quota counter. drip_today_date is
+    // the calendar date (YYYY-MM-DD in the campaign's tz) that drip_today_sent applies
+    // to. The ticker resets drip_today_sent to 0 when it first sees a new date.
+    { col:'drip_today_date',    def:'TEXT' },
+    { col:'drip_today_sent',    def:'INTEGER DEFAULT 0' },
+    // drip_last_tick_at: diagnostic — last time the ticker considered this campaign.
+    { col:'drip_last_tick_at',  def:'TEXT' },
   ];
   for (const { col, def } of toAdd) {
     if (!campCols.includes(col)) {

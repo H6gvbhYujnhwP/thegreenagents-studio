@@ -857,23 +857,45 @@ router.post('/campaigns', (req, res) => {
     // Tracking — all optional; defaults are the column-level defaults (off / 3 / 6 / 0).
     tracking_mode, tracking_threshold, tracking_window,
     track_opens, track_clicks, track_unsub,
+    // Drip schedule — all optional. If daily_limit > 0 the campaign starts as 'scheduled'
+    // and the drip ticker takes it from there. If daily_limit is 0 / unset the campaign
+    // is a 'draft' and behaves like a normal one-shot send.
+    daily_limit, drip_start_at, send_order,
+    drip_send_days, drip_window_start, drip_window_end, drip_timezone,
   } = req.body;
   if (!email_client_id || !list_id || !title || !subject || !from_name || !from_email || !html_body) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
   const id = uuid();
+
+  // Determine starting status. Drip with daily_limit > 0 → scheduled (so the ticker
+  // picks it up). Otherwise scheduled_at fallback → scheduled. Otherwise draft.
+  const isDrip = Number.isInteger(daily_limit) && daily_limit > 0;
+  const startStatus = isDrip ? 'scheduled' : (scheduled_at ? 'scheduled' : 'draft');
+  // For a drip, drip_start_at is the controlling timestamp. If absent default to now.
+  const effectiveStartAt = isDrip ? (drip_start_at || new Date().toISOString()) : (scheduled_at || null);
+
   db.prepare(`INSERT INTO email_campaigns
     (id, email_client_id, list_id, title, subject, from_name, from_email, reply_to,
      html_body, plain_body, status, scheduled_at,
      tracking_mode, tracking_threshold, tracking_window,
-     track_opens, track_clicks, track_unsub)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+     track_opens, track_clicks, track_unsub,
+     daily_limit, drip_start_at, send_order,
+     drip_send_days, drip_window_start, drip_window_end, drip_timezone)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       id, email_client_id, list_id, title, subject, from_name, from_email, reply_to || from_email,
-      html_body, plain_body || null, scheduled_at ? 'scheduled' : 'draft', scheduled_at || null,
+      html_body, plain_body || null, startStatus, scheduled_at || null,
       tracking_mode || 'off',
       Number.isInteger(tracking_threshold) ? tracking_threshold : 3,
       Number.isInteger(tracking_window) ? tracking_window : 6,
       track_opens ? 1 : 0, track_clicks ? 1 : 0, track_unsub ? 1 : 0,
+      isDrip ? daily_limit : 0,
+      effectiveStartAt,
+      (send_order === 'random' ? 'random' : 'top'),
+      drip_send_days     || '1,2,3,4,5',
+      drip_window_start  || '09:00',
+      drip_window_end    || '11:00',
+      drip_timezone      || 'Europe/London',
     );
   res.json(db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(id));
 });
@@ -883,11 +905,24 @@ router.put('/campaigns/:id', (req, res) => {
     title, subject, from_name, from_email, reply_to, html_body, plain_body, scheduled_at, list_id,
     tracking_mode, tracking_threshold, tracking_window,
     track_opens, track_clicks, track_unsub,
+    // Drip schedule fields. All optional — only the ones given are updated.
+    daily_limit, drip_start_at, send_order,
+    drip_send_days, drip_window_start, drip_window_end, drip_timezone,
   } = req.body;
   const current = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
   if (!current) return res.status(404).json({ error: 'Not found' });
   if (current.status === 'sent') return res.status(400).json({ error: 'Cannot edit a sent campaign' });
-  const status = scheduled_at ? 'scheduled' : 'draft';
+
+  // Decide status. If daily_limit transitions to >0 we want 'scheduled'.
+  // Otherwise leave whatever was there unless scheduled_at is being toggled.
+  const newDailyLimit = Number.isInteger(daily_limit) ? daily_limit : current.daily_limit;
+  const willDrip = newDailyLimit > 0;
+  let status = current.status;
+  if (willDrip && status === 'draft') status = 'scheduled';
+  if (!willDrip && status === 'scheduled' && !scheduled_at) status = 'draft';
+  if (scheduled_at && !willDrip) status = 'scheduled';
+  if (!scheduled_at && req.body.scheduled_at === null) status = 'draft';
+
   db.prepare(`UPDATE email_campaigns SET
     title=?, subject=?, from_name=?, from_email=?, reply_to=?,
     html_body=?, plain_body=?, scheduled_at=?, status=?,
@@ -897,7 +932,14 @@ router.put('/campaigns/:id', (req, res) => {
     tracking_window=COALESCE(?, tracking_window),
     track_opens=COALESCE(?, track_opens),
     track_clicks=COALESCE(?, track_clicks),
-    track_unsub=COALESCE(?, track_unsub)
+    track_unsub=COALESCE(?, track_unsub),
+    daily_limit=COALESCE(?, daily_limit),
+    drip_start_at=COALESCE(?, drip_start_at),
+    send_order=COALESCE(?, send_order),
+    drip_send_days=COALESCE(?, drip_send_days),
+    drip_window_start=COALESCE(?, drip_window_start),
+    drip_window_end=COALESCE(?, drip_window_end),
+    drip_timezone=COALESCE(?, drip_timezone)
     WHERE id=?`).run(
       title ?? current.title, subject ?? current.subject,
       from_name ?? current.from_name, from_email ?? current.from_email,
@@ -910,6 +952,13 @@ router.put('/campaigns/:id', (req, res) => {
       track_opens === undefined ? null : (track_opens ? 1 : 0),
       track_clicks === undefined ? null : (track_clicks ? 1 : 0),
       track_unsub === undefined ? null : (track_unsub ? 1 : 0),
+      Number.isInteger(daily_limit) ? daily_limit : null,
+      drip_start_at ?? null,
+      send_order ?? null,
+      drip_send_days ?? null,
+      drip_window_start ?? null,
+      drip_window_end ?? null,
+      drip_timezone ?? null,
       req.params.id,
     );
   res.json(db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id));
@@ -1001,14 +1050,20 @@ router.get('/campaigns/:id/send-preview', (req, res) => {
       will_send_clean: subs.length - trackedCount,
     },
     schedule: {
-      status:        campaign.status,            // 'draft' | 'scheduled' | 'sending' | 'paused'
-      scheduled_at:  campaign.scheduled_at,      // ISO date string if scheduled
-      daily_limit:   campaign.daily_limit,       // drip batch size
-      drip_start_at: campaign.drip_start_at,
-      drip_sent:     campaign.drip_sent,
-      send_order:    campaign.send_order,
-      is_drip:       !!campaign.daily_limit && campaign.daily_limit > 0,
-      is_scheduled:  !!campaign.scheduled_at && campaign.status === 'scheduled',
+      status:            campaign.status,
+      scheduled_at:      campaign.scheduled_at,
+      daily_limit:       campaign.daily_limit,
+      drip_start_at:     campaign.drip_start_at,
+      drip_sent:         campaign.drip_sent,
+      drip_today_sent:   campaign.drip_today_sent,
+      drip_today_date:   campaign.drip_today_date,
+      drip_send_days:    campaign.drip_send_days,
+      drip_window_start: campaign.drip_window_start,
+      drip_window_end:   campaign.drip_window_end,
+      drip_timezone:     campaign.drip_timezone,
+      send_order:        campaign.send_order,
+      is_drip:           !!campaign.daily_limit && campaign.daily_limit > 0,
+      is_scheduled:      campaign.status === 'scheduled',
     },
     list_name: list.name,
   });
@@ -1150,15 +1205,33 @@ router.post('/lists/:id/queue/reorder', (req, res) => {
 // ── DRIP SEND ─────────────────────────────────────────────────────────────────
 
 router.post('/campaigns/:id/start-drip', async (req, res) => {
-  const { daily_limit, drip_start_at, send_order } = req.body;
+  const {
+    daily_limit, drip_start_at, send_order,
+    drip_send_days, drip_window_start, drip_window_end, drip_timezone,
+  } = req.body;
   if (!daily_limit || daily_limit < 1) return res.status(400).json({ error: 'Daily limit required' });
 
   const campaign = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
   if (!campaign) return res.status(404).json({ error: 'Not found' });
 
   db.prepare(`UPDATE email_campaigns SET
-    daily_limit=?, drip_start_at=?, send_order=?, status='scheduled', drip_sent=0
-    WHERE id=?`).run(daily_limit, drip_start_at || new Date().toISOString(), send_order || 'top', req.params.id);
+    daily_limit=?, drip_start_at=?, send_order=?,
+    drip_send_days=COALESCE(?, drip_send_days),
+    drip_window_start=COALESCE(?, drip_window_start),
+    drip_window_end=COALESCE(?, drip_window_end),
+    drip_timezone=COALESCE(?, drip_timezone),
+    status='scheduled', drip_sent=0,
+    drip_today_sent=0, drip_today_date=NULL
+    WHERE id=?`).run(
+      daily_limit,
+      drip_start_at || new Date().toISOString(),
+      send_order || 'top',
+      drip_send_days ?? null,
+      drip_window_start ?? null,
+      drip_window_end ?? null,
+      drip_timezone ?? null,
+      req.params.id
+    );
 
   res.json({ ok: true });
 });
