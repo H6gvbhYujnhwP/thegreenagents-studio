@@ -303,7 +303,7 @@ For text posts and video scripts, carousel_slides must be null.`
   try {
     response = await anthropic.messages.create({
       model: 'claude-sonnet-4-5',
-      max_tokens: 16000,
+      max_tokens: 64000,
       system: [
         {
           type: 'text',
@@ -328,7 +328,7 @@ For text posts and video scripts, carousel_slides must be null.`
     onProgress('Web search unavailable — generating from RAG only...');
     response = await anthropic.messages.create({
       model: 'claude-sonnet-4-5',
-      max_tokens: 16000,
+      max_tokens: 64000,
       system: [
         {
           type: 'text',
@@ -369,7 +369,7 @@ For text posts and video scripts, carousel_slides must be null.`
 
     fullResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-5',
-      max_tokens: 16000,
+      max_tokens: 64000,
       system: [
         {
           type: 'text',
