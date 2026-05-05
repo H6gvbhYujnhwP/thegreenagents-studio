@@ -553,6 +553,9 @@ db.exec(`
   }
 }
 
+// Reset any stuck algorithm analysis runs on startup
+db.prepare('UPDATE linkedin_settings SET brief_running = 0 WHERE id = 1').run();
+
 export default db;
 
 // ── LinkedIn Algorithm Brief ──────────────────────────────────────────────────

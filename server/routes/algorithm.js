@@ -86,57 +86,39 @@ async function runAnalysis() {
   console.log('[algorithm] Starting LinkedIn Marketing Analyst run...');
 
   try {
-    // Call Claude with web search — let it do the full research protocol
-    let response = await anthropic.messages.create({
+    // web_search_20250305 is a server-side tool — Anthropic executes searches
+    // automatically. We do NOT manually handle tool_use loops for this tool.
+    // Just make one call with the beta header and wait for end_turn.
+    const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-5',
       max_tokens: 8000,
       system: ANALYST_SYSTEM_PROMPT,
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+      betas: ['web-search-2025-03-05'],
       messages: [{
         role: 'user',
         content: `Run the weekly LinkedIn analysis now. Today's date is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}.
 
-Execute both research steps:
+Execute both research steps using your web_search tool:
 1. Search for current LinkedIn algorithm signals from Shield Index, AuthoredUp, Richard van der Blom, and Reddit r/LinkedInTips
 2. Search Favikon rankings for fastest-growing Marketing & Sales creators — analyse their post anatomy
 
-Then output the Algorithm & Style Brief in the exact format specified.`
+Then output the Algorithm & Style Brief in the exact format specified. Start directly with the # heading.`
       }]
     });
 
-    // Handle agentic loop — Claude will use web_search multiple times
-    const messages = [{ role: 'user', content: `Run the weekly LinkedIn analysis now. Today's date is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}. Execute both research steps: 1. Search Shield Index, AuthoredUp, Richard van der Blom, Reddit r/LinkedInTips for current algorithm signals. 2. Search Favikon for fastest-growing Marketing & Sales creators, analyse their post anatomy. Then output the Algorithm & Style Brief.` }];
+    console.log(`[algorithm] Claude finished — stop_reason: ${response.stop_reason}`);
 
-    while (response.stop_reason === 'tool_use') {
-      console.log('[algorithm] Claude is searching the web...');
-      const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    // Extract text — may be in multiple blocks if web search results interleaved
+    const brief = response.content
+      .filter(b => b.type === 'text')
+      .map(b => b.text)
+      .join('\n')
+      .trim();
 
-      messages.push({ role: 'assistant', content: response.content });
+    if (!brief) throw new Error('Claude returned no text content');
 
-      const toolResults = toolUseBlocks.map(block => ({
-        type: 'tool_result',
-        tool_use_id: block.id,
-        content: 'Search results retrieved successfully.'
-      }));
-
-      messages.push({ role: 'user', content: toolResults });
-
-      response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-5',
-        max_tokens: 8000,
-        system: ANALYST_SYSTEM_PROMPT,
-        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-        messages
-      });
-    }
-
-    // Extract the text brief
-    const textBlock = response.content.find(b => b.type === 'text');
-    if (!textBlock?.text) throw new Error('Claude returned no text content');
-
-    const brief = textBlock.text.trim();
-    const now   = new Date().toISOString();
-
+    const now = new Date().toISOString();
     db.prepare(`
       UPDATE linkedin_settings
       SET algorithm_brief = ?, brief_updated_at = ?, brief_running = 0
