@@ -14,6 +14,36 @@ import { promisify } from 'util';
 
 const router  = express.Router();
 const resolve = promisify(dns.resolveTxt);
+
+// Run the fast rule parser over any subscribers on this list whose first_name
+// has never been touched (source IS NULL). This avoids the "0 will receive the
+// campaign" surprise when subscribers were added before name-parsing existed,
+// or via paths that didn't auto-parse. Idempotent — only updates rows that
+// currently have NULL source. AI fallback is NOT run here; users explicitly
+// trigger that via the Preview UI's "Parse N names" button.
+function ensureRuleParsed(listId) {
+  const unparsed = db.prepare(
+    "SELECT id, name FROM email_subscribers WHERE list_id = ? AND first_name_source IS NULL"
+  ).all(listId);
+  if (unparsed.length === 0) return { parsed: 0 };
+  const update = db.prepare(
+    "UPDATE email_subscribers SET first_name = ?, first_name_source = ?, first_name_reason = ? WHERE id = ?"
+  );
+  let parsed = 0;
+  for (const sub of unparsed) {
+    const r = parseFirstName(sub.name);
+    if (r.source === 'rule') {
+      update.run(r.firstName, 'rule', r.reason, sub.id);
+      parsed++;
+    } else if (r.source === 'skip') {
+      update.run(null, 'skip', r.reason, sub.id);
+      parsed++;
+    }
+    // 'needs_ai' rows stay NULL; user runs Preview → Parse N names to resolve them
+  }
+  if (parsed > 0) console.log(`[email] auto-parsed ${parsed} subscriber name(s) on list ${listId}`);
+  return { parsed };
+}
 const resolveMx = promisify(dns.resolveMx);
 
 // ── Public routes (no auth) ───────────────────────────────────────────────────
@@ -624,8 +654,14 @@ router.post('/lists/:id/subscribers', (req, res) => {
   if (!email) return res.status(400).json({ error: 'Email required' });
   const id = uuid();
   try {
-    db.prepare('INSERT INTO email_subscribers (id,list_id,email,name) VALUES (?,?,?,?)')
-      .run(id, req.params.id, email.toLowerCase().trim(), name || null);
+    // Run the rule parser inline so single-add subscribers get a first_name
+    // populated immediately, just like CSV-imported ones. AI fallback for the
+    // "needs_ai" cases happens on demand via /lists/:id/parse-names.
+    const parsed = parseFirstName(name);
+    const fnVal    = (parsed.source === 'rule')     ? parsed.firstName : null;
+    const fnSource = (parsed.source === 'needs_ai') ? null : parsed.source;
+    db.prepare('INSERT INTO email_subscribers (id,list_id,email,name,first_name,first_name_source,first_name_reason) VALUES (?,?,?,?,?,?,?)')
+      .run(id, req.params.id, email.toLowerCase().trim(), name || null, fnVal, fnSource, parsed.reason);
     db.prepare("UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?")
       .run(req.params.id, req.params.id);
     res.json({ ok: true, id });
@@ -741,6 +777,11 @@ router.post('/lists/:id/parse-names', async (req, res) => {
 router.get('/campaigns/:id/preview-recipients', (req, res) => {
   const campaign = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
   if (!campaign) return res.status(404).json({ error: 'Not found' });
+
+  // Auto-resolve any names the rule can handle. This means opening Preview on a
+  // brand-new list won't show "all subscribers not yet parsed" — only the genuinely
+  // ambiguous ones (joint names, all-caps, etc.) need the explicit "Parse N names" click.
+  ensureRuleParsed(campaign.list_id);
 
   const subs = db.prepare(
     "SELECT id, email, name, first_name, first_name_source, first_name_reason FROM email_subscribers WHERE list_id=? AND status='subscribed' ORDER BY created_at ASC"
@@ -906,6 +947,10 @@ router.get('/campaigns/:id/send-preview', (req, res) => {
   const list = db.prepare('SELECT * FROM email_lists WHERE id=?').get(campaign.list_id);
   if (!list) return res.status(404).json({ error: 'Campaign list missing' });
 
+  // Auto-run the rule parser on any unparsed subs so the user doesn't see a
+  // misleading skip count for names that the rule could have handled trivially.
+  ensureRuleParsed(campaign.list_id);
+
   const subs = db.prepare("SELECT id, first_name, first_name_source FROM email_subscribers WHERE list_id=? AND status='subscribed'").all(campaign.list_id);
   const window    = campaign.tracking_window || 6;
   const mode      = campaign.tracking_mode || 'off';
@@ -987,6 +1032,10 @@ router.post('/campaigns/:id/send', async (req, res) => {
   if (campaign.status === 'sending') return res.status(400).json({ error: 'Currently sending' });
 
   const list = db.prepare('SELECT * FROM email_lists WHERE id=?').get(campaign.list_id);
+  // Belt-and-braces: rule-parse any still-unparsed names. /send-preview already
+  // does this when the user opens the send dialog, but if they hit /send via
+  // some other path (API, future drip-tick, etc.) we still want it.
+  ensureRuleParsed(campaign.list_id);
   const allSubscribers = db.prepare("SELECT * FROM email_subscribers WHERE list_id=? AND status='subscribed'").all(campaign.list_id);
   if (allSubscribers.length === 0) return res.status(400).json({ error: 'No active subscribers in list' });
 
