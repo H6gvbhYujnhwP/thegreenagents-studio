@@ -367,10 +367,9 @@ function wrapBodyWithEmailCss(body) {
   if (!body) return '';
   const css = `
     body { margin: 0; padding: 0; line-height: 1.4; font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #1a1a1a; }
-    p { margin: 0 0 1em 0; }
-    p:last-child { margin-bottom: 0; }
-    p:empty, p:has(> br:only-child) { display: none; }
-    br + br { display: none; }
+    p { margin: 0; }
+    p:empty { min-height: 1em; }
+    p:has(> br:only-child) { min-height: 1em; }
     ul, ol { margin: 0 0 1em 1.5em; padding: 0; }
     li { margin: 0 0 0.25em 0; }
     a { color: #185FA5; }
