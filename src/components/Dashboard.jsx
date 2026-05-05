@@ -11,6 +11,10 @@ export default function Dashboard({ onLogout }) {
   const [selectedClient, setSelectedClient] = useState(null);
   const [showNewClient, setShowNewClient]   = useState(false);
   const [loading, setLoading]           = useState(true);
+  const [brief, setBrief]               = useState(null);
+  const [briefRunning, setBriefRunning] = useState(false);
+  const [briefUpdatedAt, setBriefUpdatedAt] = useState(null);
+  const [showBrief, setShowBrief]       = useState(false);
 
   async function loadClients() {
     setLoading(true);
@@ -19,6 +23,41 @@ export default function Dashboard({ onLogout }) {
       if (res.ok) setClients(await res.json());
     } catch (e) { console.error('loadClients error:', e); }
     setLoading(false);
+  }
+
+  async function loadBrief() {
+    try {
+      const res = await fetch('/api/algorithm/brief');
+      if (res.ok) {
+        const data = await res.json();
+        setBrief(data.brief);
+        setBriefRunning(data.running);
+        setBriefUpdatedAt(data.updatedAt);
+      }
+    } catch (e) { console.warn('loadBrief error:', e.message); }
+  }
+
+  async function runAnalysis() {
+    setBriefRunning(true);
+    try {
+      await fetch('/api/algorithm/run', { method: 'POST' });
+      // Poll every 5 seconds until complete
+      const poll = setInterval(async () => {
+        const res = await fetch('/api/algorithm/brief');
+        if (res.ok) {
+          const data = await res.json();
+          if (!data.running) {
+            setBrief(data.brief);
+            setBriefRunning(false);
+            setBriefUpdatedAt(data.updatedAt);
+            clearInterval(poll);
+          }
+        }
+      }, 5000);
+    } catch (e) {
+      setBriefRunning(false);
+      console.error('runAnalysis error:', e.message);
+    }
   }
 
   async function syncAndLoad() {
@@ -32,7 +71,7 @@ export default function Dashboard({ onLogout }) {
     await loadClients();
   }
 
-  useEffect(()=>{ syncAndLoad(); }, []);
+  useEffect(()=>{ syncAndLoad(); loadBrief(); }, []);
 
   function handleNavigate(v) {
     setView(v);
@@ -73,10 +112,57 @@ export default function Dashboard({ onLogout }) {
       <div style={{ flex:1, overflow:'auto', padding:28 }}>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:24 }}>
           <h1 style={{ fontSize:20, fontWeight:500, color:'#1a1a1a' }}>Supergrow</h1>
-          <button onClick={()=>setShowNewClient(true)} style={{ background:'#1D9E75', color:'#fff', border:'none', padding:'8px 18px', borderRadius:8, fontWeight:500, cursor:'pointer' }}>
-            + New client
-          </button>
+          <div style={{ display:'flex', gap:8 }}>
+            <button
+              onClick={briefRunning ? null : runAnalysis}
+              disabled={briefRunning}
+              title={briefUpdatedAt ? `Last updated: ${new Date(briefUpdatedAt).toLocaleString('en-GB')}` : 'No brief yet — click to run'}
+              style={{
+                background: briefRunning ? '#f0f0ec' : brief ? '#E1F5EE' : '#fff',
+                color: briefRunning ? '#999' : brief ? '#085041' : '#555',
+                border: `0.5px solid ${brief ? '#9FE1CB' : '#d0d0cc'}`,
+                padding:'8px 14px', borderRadius:8, fontWeight:500, cursor: briefRunning ? 'not-allowed' : 'pointer',
+                fontSize:13, display:'flex', alignItems:'center', gap:6
+              }}
+            >
+              {briefRunning ? (
+                <><span style={{ width:12, height:12, border:'1.5px solid #1D9E75', borderTopColor:'transparent', borderRadius:'50%', display:'inline-block', animation:'spin 0.8s linear infinite' }} /> Running analysis...</>
+              ) : brief ? (
+                <span onClick={e => { e.stopPropagation(); setShowBrief(true); }}>
+                  ✓ Algorithm brief {briefUpdatedAt ? `(${new Date(briefUpdatedAt).toLocaleDateString('en-GB', {day:'numeric',month:'short'})})` : ''} — click to view
+                </span>
+              ) : (
+                'Run weekly LinkedIn analysis'
+              )}
+            </button>
+            <button onClick={()=>setShowNewClient(true)} style={{ background:'#1D9E75', color:'#fff', border:'none', padding:'8px 18px', borderRadius:8, fontWeight:500, cursor:'pointer' }}>
+              + New client
+            </button>
+          </div>
         </div>
+
+        {/* Algorithm Brief Modal */}
+        {showBrief && brief && (
+          <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.4)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:9999 }}
+               onClick={() => setShowBrief(false)}>
+            <div style={{ background:'#fff', borderRadius:12, padding:28, width:'min(720px, 90vw)', maxHeight:'80vh', overflow:'auto', boxShadow:'0 4px 24px rgba(0,0,0,0.15)' }}
+                 onClick={e => e.stopPropagation()}>
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
+                <div style={{ fontSize:15, fontWeight:600, color:'#1a1a1a' }}>LinkedIn Algorithm Brief</div>
+                <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+                  {briefUpdatedAt && <span style={{ fontSize:11, color:'#888' }}>Updated {new Date(briefUpdatedAt).toLocaleString('en-GB')}</span>}
+                  <button onClick={() => runAnalysis()} disabled={briefRunning} style={{ fontSize:12, padding:'5px 12px', background:'#1D9E75', color:'#fff', border:'none', borderRadius:6, cursor:'pointer' }}>
+                    Refresh
+                  </button>
+                  <button onClick={() => setShowBrief(false)} style={{ fontSize:12, padding:'5px 10px', background:'#f5f5f3', border:'0.5px solid #d0d0cc', borderRadius:6, cursor:'pointer', color:'#555' }}>
+                    Close
+                  </button>
+                </div>
+              </div>
+              <pre style={{ fontSize:12, lineHeight:1.7, whiteSpace:'pre-wrap', color:'#333', fontFamily:'inherit' }}>{brief}</pre>
+            </div>
+          </div>
+        )}
 
         <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:12, marginBottom:28 }}>
           {[

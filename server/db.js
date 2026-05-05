@@ -554,3 +554,16 @@ db.exec(`
 }
 
 export default db;
+
+// ── LinkedIn Algorithm Brief ──────────────────────────────────────────────────
+// Single-row settings table that stores the latest algorithm brief from
+// the Marketing Analyst Agent. Injected into every Claude campaign call.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS linkedin_settings (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    algorithm_brief TEXT,
+    brief_updated_at TEXT,
+    brief_running INTEGER DEFAULT 0
+  );
+  INSERT OR IGNORE INTO linkedin_settings (id) VALUES (1);
+`);

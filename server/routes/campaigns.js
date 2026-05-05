@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { generatePosts, getLinkedInAlgorithmContext, regenerateSinglePost } from '../services/openai.js';
+import { getCurrentBrief } from './algorithm.js';
 import { generateImage, sleep } from '../services/gemini.js';
 import { uploadImageToR2 } from '../services/r2.js';
 import { createDraft, getContentDna } from '../services/supergrow.js';
@@ -259,17 +260,23 @@ async function runCampaign(campaignId, client, includeImages = true) {
     }
 
     // ── Stage 1: Generate posts via Claude Sonnet ───────────────────────────────
-    // Claude handles LinkedIn research inline using web search — no pre-fetch needed.
+    // Stage 1: Generate posts via Claude Sonnet
     sendSSE(campaignId, { type: 'log', message: 'Starting post generation with Claude Sonnet...' });
     updateCampaign(campaignId, { stage: 'generating_posts', progress: 5 });
 
-    // getLinkedInAlgorithmContext is now a no-op (Claude does research inline)
-    await getLinkedInAlgorithmContext(msg => sendSSE(campaignId, { type: 'log', message: msg }));
+    // Pull the latest algorithm brief from the DB (null if never run)
+    const algorithmBrief = getCurrentBrief();
+    if (algorithmBrief) {
+      sendSSE(campaignId, { type: 'log', message: '\u2713 Algorithm brief loaded \u2014 posts will follow latest LinkedIn best practices.' });
+    } else {
+      sendSSE(campaignId, { type: 'log', message: 'No algorithm brief found \u2014 Claude will research LinkedIn trends inline.' });
+    }
 
     const generated = await generatePosts(
       client,
       msg => sendSSE(campaignId, { type: 'log', message: msg }),
-      contentDna
+      contentDna,
+      algorithmBrief
     );
 
     const posts = generated.posts;

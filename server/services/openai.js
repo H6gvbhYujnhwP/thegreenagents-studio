@@ -195,11 +195,15 @@ Start your response with the { character and end with the } character.
 Any text outside the JSON object will cause the entire pipeline to fail.`;
 
 // ─── Generate posts using Claude with web search + prompt caching ─────────────
-export async function generatePosts(client, onProgress, contentDna = null) {
+export async function generatePosts(client, onProgress, contentDna = null, algorithmBrief = null) {
   onProgress('Starting Claude — researching LinkedIn algorithm and industry trends...');
 
   const dnaSection = contentDna
     ? `\nCLIENT CONTENT DNA (writing style from Supergrow — match this voice exactly):\n${contentDna}\n`
+    : '';
+
+  const briefSection = algorithmBrief
+    ? `\nLINKEDIN ALGORITHM & STYLE BRIEF (current week — follow these directives exactly):\n${algorithmBrief}\n`
     : '';
 
   // Build the user message — RAG is included here with cache_control
@@ -213,7 +217,7 @@ Brand: ${client.brand}
 Website: ${client.website || 'Not provided'}
 Timezone: ${client.timezone}
 Posting Cadence: ${client.cadence}
-${dnaSection}
+${dnaSection}${briefSection}
 CLIENT RAG DOCUMENT — THE ONLY SOURCE OF TRUTH FOR THIS CAMPAIGN:`,
     },
     {
