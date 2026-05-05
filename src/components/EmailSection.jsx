@@ -1354,11 +1354,17 @@ function CampaignReport({campaign,lists,onBack}){
   return(<div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0,overflow:'auto',background:BG,padding:20}}>
     <button onClick={onBack} style={{background:'none',border:'none',cursor:'pointer',color:MUTED,fontSize:12,padding:0,display:'flex',alignItems:'center',gap:4,marginBottom:12}}>← Back to campaigns</button>
     <div style={{fontSize:16,fontWeight:500,color:TEXT,marginBottom:3,display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
-      <span>{c.title} — Report</span>
+      <span>{c.title} — {c.status==='scheduled'||c.status==='sending'||c.status==='paused' ? 'Progress' : 'Report'}</span>
       {trackingBadge(c)}
+      {statusBadge(c.status)}
     </div>
     <div style={{fontSize:12,color:MUTED,marginBottom:16}}>
-      Sent {c.sent_at?new Date(c.sent_at).toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'—'} &nbsp;·&nbsp; From: {c.from_name} &lt;{c.from_email}&gt; &nbsp;·&nbsp; To: {list?.name||'—'}
+      {c.status==='sent' || c.status==='cancelled'
+        ? <>Sent {c.sent_at?new Date(c.sent_at).toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'—'}</>
+        : c.status==='scheduled' && c.daily_limit>0
+          ? <>Drip in progress · {(c.daily_limit||0).toLocaleString()}/day · window {c.drip_window_start||'09:00'}–{c.drip_window_end||'11:00'} {c.drip_timezone||'Europe/London'}</>
+          : <>Status: {c.status}</>}
+      &nbsp;·&nbsp; From: {c.from_name} &lt;{c.from_email}&gt; &nbsp;·&nbsp; To: {list?.name||'—'}
     </div>
 
     {/* Tracking-disabled notice */}
@@ -1483,6 +1489,121 @@ function CampaignReport({campaign,lists,onBack}){
         </table>
       )}
     </div>
+    )}
+
+    {/* Recipients — who got it, who hasn't yet, who opened/clicked */}
+    <div style={{marginTop:14}}>
+      <CampaignRecipientsPanel campaignId={c.id} tracksOpens={tracksOpens} tracksClicks={tracksClicks} onExport={exportData}/>
+    </div>
+  </div>);
+}
+
+// ── Campaign recipients panel ────────────────────────────────────────────────
+// Lists every subscriber on the campaign's list with their per-campaign status:
+// queued (drip not yet reached them), sent, opened, clicked, bounced, failed.
+// Filterable, with two CSV exports — recipients (everyone sent so far) and
+// queued (everyone still to come).
+function CampaignRecipientsPanel({campaignId, tracksOpens, tracksClicks, onExport}){
+  const [data,setData]=useState(null);
+  const [filter,setFilter]=useState('all');
+  const [search,setSearch]=useState('');
+
+  useEffect(()=>{
+    const url = filter==='all'
+      ? `/api/email/campaigns/${campaignId}/recipients`
+      : `/api/email/campaigns/${campaignId}/recipients?status=${filter}`;
+    fetch(url).then(r=>r.json()).then(setData);
+  },[campaignId, filter]);
+
+  if (!data) return (
+    <div style={{background:CARD,border:`0.5px solid ${BORDER}`,borderRadius:10,padding:24,textAlign:'center',color:MUTED,fontSize:13}}>Loading recipients…</div>
+  );
+
+  const s = data.summary || {};
+  const filtered = !search.trim()
+    ? data.recipients
+    : data.recipients.filter(r => {
+        const q = search.toLowerCase();
+        return (r.email||'').toLowerCase().includes(q) || (r.name||'').toLowerCase().includes(q);
+      });
+
+  function bucketLabel(b){
+    switch (b) {
+      case 'queued':       return <Badge label="Queued"      color={MUTED}    bg="#f0f0ed"/>;
+      case 'opened':       return <Badge label="Opened"      color={GREEN}    bg={`${GREEN}15`}/>;
+      case 'sent_no_open': return <Badge label="Sent"        color={BLUE}     bg="#e6f1fb"/>;
+      case 'bounced':      return <Badge label="Bounced"     color={DANGER}   bg="#fdecea"/>;
+      case 'failed':       return <Badge label="Failed"      color={DANGER}   bg="#fdecea"/>;
+      default:             return <Badge label={b}           color={MUTED}/>;
+    }
+  }
+
+  // Filter pills the user can click
+  const pills = [
+    { k:'all',        l:'All',         n: s.total },
+    { k:'sent',       l:'Sent',        n: s.sent },
+    { k:'queued',     l:'Queued',      n: s.queued },
+    ...(tracksOpens  ? [{ k:'opened',     l:'Opened',     n: s.opened }, { k:'not-opened', l:'Not opened', n: s.sent - s.opened }] : []),
+    ...(tracksClicks ? [{ k:'clicked',    l:'Clicked',    n: s.clicked }] : []),
+    { k:'bounced',    l:'Bounced',     n: s.bounced },
+  ];
+
+  return(<div style={{background:CARD,border:`0.5px solid ${BORDER}`,borderRadius:10,overflow:'hidden'}}>
+    <div style={{padding:'10px 14px',borderBottom:`0.5px solid ${BORDER}`,display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+      <div style={{fontSize:11,fontWeight:500,color:MUTED,textTransform:'uppercase',letterSpacing:'.06em'}}>Recipients</div>
+      <div style={{display:'flex',gap:6}}>
+        <Btn small onClick={()=>onExport('recipients')}>Export sent ({(s.sent||0).toLocaleString()})</Btn>
+        {(s.queued||0)>0 && <Btn small onClick={()=>onExport('queued')}>Export queued ({(s.queued||0).toLocaleString()})</Btn>}
+      </div>
+    </div>
+
+    {/* Filter pills */}
+    <div style={{padding:'10px 14px',borderBottom:`0.5px solid ${BORDER}`,display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
+      {pills.map(p=>(
+        <button key={p.k} type="button" onClick={()=>setFilter(p.k)} style={{
+          padding:'4px 10px',fontSize:11,borderRadius:6,cursor:'pointer',
+          background: filter===p.k ? `${BLUE}15` : 'transparent',
+          color:      filter===p.k ? BLUE         : MUTED,
+          border:    `0.5px solid ${filter===p.k ? BLUE+'60' : BORDER}`,
+        }}>{p.l} {(p.n||0).toLocaleString()}</button>
+      ))}
+      <input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search name or email…"
+        style={{marginLeft:'auto',padding:'4px 8px',fontSize:12,border:`0.5px solid ${BORDER}`,borderRadius:6,outline:'none',minWidth:200}}/>
+    </div>
+
+    {filtered.length===0 ? (
+      <div style={{padding:30,textAlign:'center',color:MUTED,fontSize:13}}>
+        {search ? 'No recipients match that search.' : 'No recipients in this view.'}
+      </div>
+    ) : (
+      <div style={{maxHeight:480,overflowY:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse'}}>
+          <thead style={{position:'sticky',top:0,background:BG,zIndex:1}}>
+            <tr><TH>Recipient</TH><TH>Status</TH><TH>Sent at</TH>{tracksOpens && <TH>Opens</TH>}{tracksClicks && <TH>Clicks</TH>}</tr>
+          </thead>
+          <tbody>
+            {filtered.slice(0, 500).map(r=>(
+              <tr key={r.subscriber_id}>
+                <TD>
+                  <div style={{fontSize:13,color:TEXT}}>{r.name||'(no name)'}</div>
+                  <div style={{fontSize:11,color:MUTED}}>{r.email}</div>
+                </TD>
+                <TD>{bucketLabel(r.bucket)}</TD>
+                <TD muted style={{fontSize:11}}>
+                  {r.sent_at ? new Date(r.sent_at).toLocaleString('en-GB',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}) : '—'}
+                </TD>
+                {tracksOpens && <TD center>{r.open_count || (r.opened_at ? 1 : 0) || '—'}</TD>}
+                {tracksClicks && <TD center>{r.link_click_count || r.click_count || '—'}</TD>}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {filtered.length > 500 && (
+          <div style={{padding:12,textAlign:'center',color:MUTED,fontSize:12,borderTop:`0.5px solid ${BORDER}`}}>
+            Showing first 500 of {filtered.length.toLocaleString()}. Export to see them all.
+          </div>
+        )}
+      </div>
     )}
   </div>);
 }
@@ -1808,9 +1929,13 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
                           <Btn small variant="amber" onClick={()=>{setModalData(c);setModal('drip');}}>Schedule drip</Btn>
                           <Btn small variant="primary" onClick={()=>sendNow(c.id)}>Send now</Btn>
                         </>}
+                        {c.status==='scheduled' && c.daily_limit>0 && (
+                          <Btn small onClick={()=>onViewReport(c)}>View progress</Btn>
+                        )}
                         {isSending&&<>
                           <Btn small variant="amber" onClick={()=>togglePause(c.id)}>{c.status==='paused'?'Resume':'Pause'}</Btn>
                           <Btn small variant="danger" onClick={()=>cancelCampaign(c.id)}>Cancel</Btn>
+                          <Btn small onClick={()=>onViewReport(c)}>View progress</Btn>
                         </>}
                         {isSent&&<Btn small onClick={()=>onViewReport(c)}>View report</Btn>}
                         {c.status==='cancelled'&&<>

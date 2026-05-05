@@ -1328,6 +1328,79 @@ router.get('/campaigns/:id/report', (req, res) => {
   });
 });
 
+// GET /api/email/campaigns/:id/recipients
+// Per-recipient view across the campaign's whole list. For each subscriber
+// returns whether they've been sent yet, when, and any open/click/unsub status.
+// Used by the "Recipients" panel in the campaign report — works for both
+// in-flight drips ("who got it so far, who's still queued") and completed sends
+// ("who opened, who didn't").
+//
+// Optional ?status=sent|queued|opened|not-opened|clicked filters the list.
+router.get('/campaigns/:id/recipients', (req, res) => {
+  const campaign = db.prepare('SELECT * FROM email_campaigns WHERE id=?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Not found' });
+
+  // Outer join lets us include subscribers who haven't been sent yet.
+  // Per-subscriber click count via correlated subquery.
+  const rows = db.prepare(`
+    SELECT
+      s.id           as subscriber_id,
+      s.email,
+      s.name,
+      s.first_name,
+      s.status       as subscriber_status,
+      es.id          as send_id,
+      es.message_id,
+      es.status      as send_status,
+      es.sent_at,
+      es.opened_at,
+      es.clicked_at,
+      es.bounced_at,
+      es.open_count,
+      es.click_count,
+      (SELECT COUNT(*) FROM email_link_clicks lc WHERE lc.campaign_id = ? AND lc.subscriber_id = s.id) as link_click_count
+    FROM email_subscribers s
+    LEFT JOIN email_sends es ON es.subscriber_id = s.id AND es.campaign_id = ?
+    WHERE s.list_id = ?
+    ORDER BY
+      CASE WHEN es.sent_at IS NULL THEN 1 ELSE 0 END,
+      es.sent_at DESC,
+      s.email ASC
+  `).all(req.params.id, req.params.id, campaign.list_id);
+
+  // Apply filter — done in JS rather than SQL because the bucket logic is
+  // small and easier to reason about here.
+  const filter = req.query.status;
+  const all = rows.map(r => ({
+    ...r,
+    bucket: r.send_id == null ? 'queued'
+          : r.opened_at       ? 'opened'
+          : r.bounced_at      ? 'bounced'
+          : r.send_status === 'failed' ? 'failed'
+          : 'sent_no_open',
+  }));
+  let visible = all;
+  if (filter === 'sent')        visible = all.filter(r => r.send_id != null);
+  else if (filter === 'queued') visible = all.filter(r => r.send_id == null);
+  else if (filter === 'opened') visible = all.filter(r => r.opened_at != null);
+  else if (filter === 'not-opened') visible = all.filter(r => r.send_id != null && r.opened_at == null);
+  else if (filter === 'clicked') visible = all.filter(r => r.clicked_at != null || r.link_click_count > 0);
+  else if (filter === 'bounced') visible = all.filter(r => r.bounced_at != null || r.subscriber_status === 'bounced');
+
+  // Summary counts (always over all, not the filtered set)
+  const summary = {
+    total: all.length,
+    sent: all.filter(r => r.send_id != null).length,
+    queued: all.filter(r => r.send_id == null).length,
+    opened: all.filter(r => r.opened_at != null).length,
+    clicked: all.filter(r => r.clicked_at != null || r.link_click_count > 0).length,
+    bounced: all.filter(r => r.bounced_at != null).length,
+    failed: all.filter(r => r.send_status === 'failed').length,
+  };
+
+  res.json({ campaign_id: req.params.id, summary, recipients: visible });
+});
+
 // ── EXPORTS ───────────────────────────────────────────────────────────────────
 
 router.get('/campaigns/:id/export/:type', (req, res) => {
@@ -1365,6 +1438,35 @@ router.get('/campaigns/:id/export/:type', (req, res) => {
       FROM email_subscribers es
       WHERE es.list_id=? AND es.status='bounced'
     `).all(campaign.list_id);
+  } else if (type === 'recipients') {
+    // Everyone the campaign has been sent to so far. For an in-flight drip
+    // this answers "who's actually received the email at this point".
+    rows = db.prepare(`
+      SELECT s.name, s.email,
+        CASE
+          WHEN esnd.bounced_at IS NOT NULL THEN 'Bounced'
+          WHEN esnd.opened_at  IS NOT NULL THEN 'Sent (opened)'
+          WHEN esnd.status = 'failed'      THEN 'Send failed'
+          ELSE 'Sent'
+        END as status,
+        esnd.sent_at
+      FROM email_subscribers s
+      JOIN email_sends esnd ON esnd.subscriber_id = s.id
+      WHERE esnd.campaign_id = ?
+      ORDER BY esnd.sent_at DESC
+    `).all(req.params.id);
+  } else if (type === 'queued') {
+    // Everyone on the list who hasn't been sent yet. Useful while a drip is
+    // mid-flight to see who's still queued.
+    rows = db.prepare(`
+      SELECT s.name, s.email, 'Queued' as status
+      FROM email_subscribers s
+      WHERE s.list_id = ? AND s.status = 'subscribed'
+        AND NOT EXISTS (
+          SELECT 1 FROM email_sends esnd WHERE esnd.campaign_id = ? AND esnd.subscriber_id = s.id
+        )
+      ORDER BY s.email ASC
+    `).all(campaign.list_id, req.params.id);
   }
 
   const csv = header + rows.map(r => `"${r.name||''}","${r.email}","${r.status}"`).join('\n');
