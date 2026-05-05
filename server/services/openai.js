@@ -301,36 +301,34 @@ For text posts and video scripts, carousel_slides must be null.`
     }
   ];
 
-  onProgress('Claude is researching LinkedIn trends and reading the RAG document...');
+  onProgress('Claude is writing posts — this takes 2-3 minutes, please wait...');
 
-  let response;
+  // Use streaming to avoid the SDK 10-minute non-streaming timeout.
+  // stream.finalMessage() collects all streamed chunks and returns the complete message.
+  let fullResponse;
   try {
-    response = await anthropic.messages.create({
+    const stream = anthropic.messages.stream({
       model: 'claude-sonnet-4-5',
       max_tokens: 64000,
       system: [
         {
           type: 'text',
           text: STAGE3_SYSTEM_PROMPT,
-          // Cache the system prompt — reused across all calls in this campaign
           cache_control: { type: 'ephemeral' }
         }
       ],
-      tools: [
-        {
-          type: 'web_search_20250305',
-          name: 'web_search'
-        }
-      ],
-      messages: [
-        { role: 'user', content: userContent }
-      ]
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+      messages: [{ role: 'user', content: userContent }]
+    }, {
+      headers: { 'anthropic-beta': 'web-search-2025-03-05' }
     });
+
+    fullResponse = await stream.finalMessage();
+    console.log('[claude] generatePosts stream complete — stop_reason:', fullResponse.stop_reason);
   } catch (err) {
-    // If web search fails (e.g. not available on this key), retry without it
-    console.warn('[claude] Web search failed, retrying without search tool:', err.message);
-    onProgress('Web search unavailable — generating from RAG only...');
-    response = await anthropic.messages.create({
+    console.warn('[claude] Streaming with web search failed, retrying without:', err.message);
+    onProgress('Generating posts from RAG (no live search)...');
+    const stream = anthropic.messages.stream({
       model: 'claude-sonnet-4-5',
       max_tokens: 64000,
       system: [
@@ -340,62 +338,17 @@ For text posts and video scripts, carousel_slides must be null.`
           cache_control: { type: 'ephemeral' }
         }
       ],
-      messages: [
-        { role: 'user', content: userContent }
-      ]
+      messages: [{ role: 'user', content: userContent }]
     });
-  }
-
-  // Handle tool use — Claude may do web searches before responding
-  // We need to handle the full agentic loop
-  let fullResponse = response;
-  let messages = [{ role: 'user', content: userContent }];
-
-  while (fullResponse.stop_reason === 'tool_use') {
-    onProgress('Claude is searching the web for LinkedIn algorithm data...');
-
-    const toolUseBlock = fullResponse.content.find(b => b.type === 'tool_use');
-    if (!toolUseBlock) break;
-
-    // Add assistant message with tool use
-    messages.push({ role: 'assistant', content: fullResponse.content });
-
-    // Add tool result (web search results come back automatically in extended thinking)
-    // For web_search_20250305, we need to provide a tool_result
-    messages.push({
-      role: 'user',
-      content: [{
-        type: 'tool_result',
-        tool_use_id: toolUseBlock.id,
-        content: 'Search completed. Use the results to inform your post generation.'
-      }]
-    });
-
-    fullResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-5',
-      max_tokens: 64000,
-      system: [
-        {
-          type: 'text',
-          text: STAGE3_SYSTEM_PROMPT,
-          cache_control: { type: 'ephemeral' }
-        }
-      ],
-      tools: [
-        {
-          type: 'web_search_20250305',
-          name: 'web_search'
-        }
-      ],
-      messages
-    });
+    fullResponse = await stream.finalMessage();
+    console.log('[claude] generatePosts fallback stream complete — stop_reason:', fullResponse.stop_reason);
   }
 
   // Extract the final text response
   const textBlock = fullResponse.content.find(b => b.type === 'text');
   if (!textBlock) throw new Error('Claude returned no text content');
 
-  onProgress('✓ Claude finished writing — parsing posts...');
+  onProgress('Claude finished writing — parsing posts...');
 
   // Strip any markdown fences if present
   const raw = textBlock.text.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
