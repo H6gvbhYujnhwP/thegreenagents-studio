@@ -331,8 +331,26 @@ export default function CampaignProgress({ campaignId, onComplete }) {
 
           {/* Done banner */}
           {isDone && (
-            <div style={{ background: LIGHT, border: `1px solid ${BORDER}`, borderRadius: 10, padding: '12px 16px', marginBottom: 20, fontSize: 13, fontWeight: 600, color: DARK }}>
-              ✓ {campaign.posts_deployed} drafts sent to Supergrow — waiting for client approval in Kanban
+            <div style={{
+              background: LIGHT, border: `1px solid ${BORDER}`, borderRadius: 10,
+              padding: '12px 16px', marginBottom: 20,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12
+            }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: DARK }}>
+                ✓ {campaign.posts_deployed} drafts sent to Supergrow — waiting for client approval in Kanban
+              </span>
+              <button
+                onClick={handleDeploy}
+                disabled={deploying}
+                style={{
+                  fontSize: 12, fontWeight: 500, padding: '6px 14px',
+                  background: deploying ? '#9FE1CB' : '#fff',
+                  color: DARK, border: `1px solid ${BORDER}`,
+                  borderRadius: 7, cursor: deploying ? 'not-allowed' : 'pointer', flexShrink: 0
+                }}
+              >
+                {deploying ? 'Re-sending...' : 'Re-send all to Supergrow'}
+              </button>
             </div>
           )}
 
@@ -426,7 +444,7 @@ export default function CampaignProgress({ campaignId, onComplete }) {
                     )}
 
                     {/* Action buttons */}
-                    {isAwaiting && !isEditing && (
+                    {(isAwaiting || isDone) && !isEditing && (
                       <div style={{ display: 'flex', gap: 6, marginTop: 10, borderTop: '1px solid #f0f0ec', paddingTop: 10 }}>
                         <button onClick={() => startEdit(i, post.linkedin_post_text)} disabled={isBusy}
                           style={{ flex: 1, fontSize: 11, padding: '5px 0', background: '#f5f5f3', border: '1px solid #ddd', borderRadius: 6, cursor: isBusy ? 'not-allowed' : 'pointer', color: '#333' }}>
