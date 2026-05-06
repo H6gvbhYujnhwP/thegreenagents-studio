@@ -5,6 +5,16 @@ import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { listWorkspaces } from '../services/supergrow.js';
 import { extractTextFromBuffer } from '../utils/extractText.js';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+
+const s3 = new S3Client({
+  region: 'auto',
+  endpoint: process.env.R2_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY
+  }
+});
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -174,6 +184,40 @@ router.delete('/:id', requireAuth, (req, res) => {
   db.prepare('DELETE FROM campaigns WHERE client_id = ?').run(req.params.id);
   db.prepare('DELETE FROM clients WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
+});
+
+// ─── Upload logo for a client ─────────────────────────────────────────────────
+router.post('/:id/logo', requireAuth, upload.single('logo'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No logo file uploaded' });
+
+  const allowed = ['image/png', 'image/jpeg', 'image/jpg', 'image/svg+xml', 'image/webp'];
+  if (!allowed.includes(req.file.mimetype)) {
+    return res.status(400).json({ error: 'Logo must be PNG, JPG, SVG, or WebP' });
+  }
+
+  const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(req.params.id);
+  if (!client) return res.status(404).json({ error: 'Client not found' });
+
+  try {
+    const ext = req.file.originalname.split('.').pop().toLowerCase();
+    const key = `logos/${req.params.id}/logo-${uuid()}.${ext}`;
+
+    await s3.send(new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET_NAME,
+      Key: key,
+      Body: req.file.buffer,
+      ContentType: req.file.mimetype
+    }));
+
+    const logoUrl = `${process.env.R2_PUBLIC_URL}/${key}`;
+    db.prepare('UPDATE clients SET logo_url = ?, updated_at = datetime(\'now\') WHERE id = ?')
+      .run(logoUrl, req.params.id);
+
+    res.json({ ok: true, logo_url: logoUrl });
+  } catch (err) {
+    console.error('[clients] Logo upload failed:', err.message);
+    res.status(500).json({ error: `Logo upload failed: ${err.message}` });
+  }
 });
 
 export default router;

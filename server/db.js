@@ -49,6 +49,9 @@ db.exec(`
   );
 `);
 
+// ── Logo column migration (added for logo overlay feature) ──────────────────
+db.exec(`ALTER TABLE clients ADD COLUMN logo_url TEXT`);
+
 // ── Email module tables ───────────────────────────────────────────────────────
 // email_clients is completely separate from the LinkedIn 'clients' table
 db.exec(`

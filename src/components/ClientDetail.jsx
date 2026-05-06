@@ -13,6 +13,8 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
   const [newRag, setNewRag]                     = useState(null);
   const [uploadingRag, setUploadingRag]         = useState(false);
   const [deleting, setDeleting]                 = useState(false);
+  const [logoUploading, setLogoUploading]       = useState(false);
+  const [logoFile, setLogoFile]                 = useState(null);
   const [activeTab, setActiveTab]               = useState('campaigns');
   const [showCampaignModal, setShowCampaignModal] = useState(false);
 
@@ -52,6 +54,18 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
     setStarting(false);
     if (res.ok) setActiveCampaignId(data.campaignId);
     else alert(data.error || 'Failed to start campaign');
+  }
+
+  async function uploadLogo() {
+    if (!logoFile) return;
+    setLogoUploading(true);
+    const fd = new FormData();
+    fd.append('logo', logoFile);
+    const res = await fetch(`/api/clients/${clientId}/logo`, { method: 'POST', body: fd });
+    setLogoFile(null);
+    setLogoUploading(false);
+    if (res.ok) load();
+    else { const err = await res.json(); alert(err.error || 'Logo upload failed'); }
   }
 
   async function uploadNewRag() {
@@ -166,6 +180,37 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
                   </div>
                 )}
                 {!client.rag_content && <div style={{ fontSize: 11, color: '#E24B4A', marginTop: 6 }}>RAG document required before running a campaign</div>}
+              </div>
+
+              {/* Logo section */}
+              <div style={{ marginTop: 20, borderTop: '0.5px solid #f0f0ec', paddingTop: 16 }}>
+                <div style={{ fontSize: 12, color: '#555', marginBottom: 8, fontWeight: 500 }}>Brand logo</div>
+                <div style={{ fontSize: 11, color: '#888', marginBottom: 10, lineHeight: 1.5 }}>
+                  PNG with transparent background recommended. The logo will be composited into the bottom-right corner of every generated image with an auto-contrasting background patch.
+                </div>
+                {client.logo_url ? (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#f5f5f3', borderRadius: 7, padding: '8px 12px' }}>
+                    <img src={client.logo_url} alt="Brand logo" style={{ height: 36, maxWidth: 140, objectFit: 'contain' }} />
+                    <label style={{ fontSize: 11, color: '#888', cursor: 'pointer' }}>
+                      Replace
+                      <input type="file" accept=".png,.jpg,.jpeg,.svg,.webp" onChange={e => setLogoFile(e.target.files[0])} style={{ display: 'none' }} />
+                    </label>
+                  </div>
+                ) : (
+                  <label style={{ display: 'block', border: '0.5px dashed #d0d0cc', borderRadius: 7, padding: '10px 12px', textAlign: 'center', cursor: 'pointer', fontSize: 12, color: '#888' }}>
+                    Upload logo (PNG, JPG, SVG, WebP)
+                    <input type="file" accept=".png,.jpg,.jpeg,.svg,.webp" onChange={e => setLogoFile(e.target.files[0])} style={{ display: 'none' }} />
+                  </label>
+                )}
+                {logoFile && (
+                  <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 12, color: GREEN }}>{logoFile.name}</span>
+                    <button onClick={uploadLogo} disabled={logoUploading} style={{ fontSize: 11, padding: '3px 10px', background: GREEN, color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer' }}>
+                      {logoUploading ? 'Uploading...' : 'Upload'}
+                    </button>
+                    <button onClick={() => setLogoFile(null)} style={{ fontSize: 11, padding: '3px 8px', background: 'none', border: '0.5px solid #d0d0cc', borderRadius: 6, cursor: 'pointer', color: '#888' }}>x</button>
+                  </div>
+                )}
               </div>
             </div>
           </div>
