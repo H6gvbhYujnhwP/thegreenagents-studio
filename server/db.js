@@ -556,6 +556,306 @@ db.exec(`
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Customer portal — schema (Phase 5)
+//
+// A customer-facing portal lives at /c/<slug>. Each email_client gets a slug,
+// optional link to a LinkedIn-side `clients` row, and a set of users who can
+// sign in to review LinkedIn posts, read replies, and see campaign stats.
+//
+// All migrations below are ADDITIVE only — never DROP. Safe to re-run on every
+// boot. Backfill of slugs for existing email_clients runs once.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── 14a. email_clients.slug — URL-safe customer identifier ───────────────────
+// Used in /c/<slug> portal URL. Generated from the client's name on insert
+// (see routes/email.js POST /clients), unique. We migrate existing rows here
+// once so portals work for clients that were created before this column existed.
+{
+  const cols = db.prepare('PRAGMA table_info(email_clients)').all().map(r => r.name);
+  if (!cols.includes('slug')) {
+    db.exec(`ALTER TABLE email_clients ADD COLUMN slug TEXT`);
+    console.log('[db] migration: added slug to email_clients');
+  }
+
+  // Backfill slugs for any rows that don't have one yet. Slug rules:
+  //   - lowercase, ASCII-only
+  //   - whitespace and any non-[a-z0-9] runs collapsed to a single dash
+  //   - leading/trailing dashes trimmed
+  //   - on collision, append -2, -3, ...  (per Wez's locked-in pre-decision)
+  const baseSlug = (name) => {
+    return String(name || '')
+      .normalize('NFKD').replace(/[\u0300-\u036f]/g, '') // strip diacritics
+      .replace(/[^\x00-\x7f]/g, '')                       // drop remaining non-ASCII
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')                        // collapse runs to single dash
+      .replace(/^-+|-+$/g, '');                           // trim ends
+  };
+  const uniqueSlug = (name, excludeId) => {
+    let candidate = baseSlug(name) || 'client';  // fallback if name was all non-ASCII
+    let n = 1;
+    const stmt = db.prepare(
+      `SELECT id FROM email_clients WHERE slug = ? AND id != ? LIMIT 1`
+    );
+    while (stmt.get(candidate, excludeId || '')) {
+      n += 1;
+      candidate = `${baseSlug(name) || 'client'}-${n}`;
+    }
+    return candidate;
+  };
+  // Export uniqueSlug so routes/email.js can use the same algorithm on insert.
+  // (Attaching to the db object — slightly hacky but avoids a separate module.)
+  db._portalUniqueSlug = uniqueSlug;
+
+  const needSlug = db.prepare(
+    `SELECT id, name FROM email_clients WHERE slug IS NULL OR slug = ''`
+  ).all();
+  if (needSlug.length > 0) {
+    const update = db.prepare(`UPDATE email_clients SET slug = ? WHERE id = ?`);
+    const tx = db.transaction(rows => {
+      for (const r of rows) update.run(uniqueSlug(r.name, r.id), r.id);
+    });
+    tx(needSlug);
+    console.log(`[db] migration: backfilled slug for ${needSlug.length} existing email_client(s)`);
+  }
+
+  // Unique index — partial so historic rows that somehow ended up with NULL
+  // slug don't block this. After backfill above there shouldn't be any, but
+  // belt and braces.
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_email_clients_slug
+      ON email_clients(slug) WHERE slug IS NOT NULL
+  `);
+}
+
+// ── 14b. email_clients.linkedin_client_id — link to LinkedIn-side `clients` ──
+// Nullable. When set, the customer portal's LinkedIn Posts tab pulls posts
+// from that LinkedIn client's most recent campaign in stage='awaiting_approval'.
+// When NULL, the portal's LinkedIn Posts tab shows "Not required — this
+// service isn't part of your current plan."
+//
+// UNIQUE so the same LinkedIn account can't be linked to two email-side
+// customers by mistake (which would cause customer A to see customer B's posts).
+// Partial index — NULL allowed for the common email-only case.
+{
+  const cols = db.prepare('PRAGMA table_info(email_clients)').all().map(r => r.name);
+  if (!cols.includes('linkedin_client_id')) {
+    db.exec(`ALTER TABLE email_clients ADD COLUMN linkedin_client_id TEXT`);
+    console.log('[db] migration: added linkedin_client_id to email_clients');
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_email_clients_linkedin_client_id
+      ON email_clients(linkedin_client_id) WHERE linkedin_client_id IS NOT NULL
+  `);
+}
+
+// ── 14b-2. email_clients.service_email_enabled — explicit cold-email toggle ──
+// Per-customer subscription flag for cold email. The portal's Inbox and
+// Campaigns tabs check this: enabled → show real data; disabled → show
+// "Not required" message.
+//
+// Set explicitly by admin via a dropdown in the customer-edit modal. Never
+// inferred from data (e.g. "do they have campaigns?"). The portal trusts
+// this flag rather than guessing from row counts.
+//
+// Default 1 (subscribed) — every existing customer uses cold email today,
+// so existing rows are correctly defaulted. New customers Wez creates from
+// scratch default to subscribed too. Admin toggles to 0 for LinkedIn-only
+// customers later.
+//
+// Future services (Facebook Posts, Instagram, etc.) follow the same pattern:
+// either a `<service>_id` column for "linked to specific account" services,
+// or a `service_<name>_enabled` flag for "yes/no subscription" services.
+// No generic services table — each service has its own column for what it
+// actually needs to store.
+{
+  const cols = db.prepare('PRAGMA table_info(email_clients)').all().map(r => r.name);
+  if (!cols.includes('service_email_enabled')) {
+    db.exec(`ALTER TABLE email_clients ADD COLUMN service_email_enabled INTEGER NOT NULL DEFAULT 1`);
+    console.log('[db] migration: added service_email_enabled to email_clients');
+  }
+}
+
+// ── 14c. client_users — portal users scoped per email_client ─────────────────
+// Two different email_clients can both have a user called "admin" — usernames
+// are scoped per (email_client_id, username). Roles are 'admin' (can manage
+// other portal users) or 'viewer'.
+//
+// password_hash is bcrypt with cost factor 12+ (set in routes/portal-auth.js).
+// last_login_at is updated by the login route on every successful sign-in;
+// used by the "Your password is temporary" banner — if NULL, show banner.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS client_users (
+    id TEXT PRIMARY KEY,
+    email_client_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    email TEXT,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'viewer',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_login_at TEXT,
+    FOREIGN KEY (email_client_id) REFERENCES email_clients(id)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_client_users_client_username
+    ON client_users(email_client_id, username);
+  CREATE INDEX IF NOT EXISTS idx_client_users_email
+    ON client_users(email_client_id, email);
+`);
+
+// ── 14d. client_sessions — SQLite-backed session storage ─────────────────────
+// id IS the session token (random 32-byte base64url string set by login route).
+// Survives Render restarts unlike an in-memory Map.
+//
+// Idle timeout 7 days, absolute timeout 30 days — both enforced at session-check
+// time in the route layer:
+//   - On every request, push expires_at forward to (now + 7 days), but never
+//     past created_at + 30 days. When now > expires_at OR now > created_at+30d,
+//     the session is dead.
+//
+// Cleanup of expired sessions happens lazily in the route layer (delete on
+// check-failure) — no cron needed.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS client_sessions (
+    id TEXT PRIMARY KEY,
+    client_user_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (client_user_id) REFERENCES client_users(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_client_sessions_user
+    ON client_sessions(client_user_id);
+  CREATE INDEX IF NOT EXISTS idx_client_sessions_expires
+    ON client_sessions(expires_at);
+`);
+
+// ── 14e. password_resets — single-use reset tokens, 1h TTL ───────────────────
+// id IS the reset token (random 32-byte base64url string). Email sent via SES
+// includes /c/<slug>/reset?token=<id>. Mark used_at when redeemed so the same
+// token can't be replayed.
+//
+// On successful reset: kill ALL sessions for the user (including any new one
+// the reset flow itself creates) — per Wez's pre-decision, the user has to
+// sign in fresh after reset.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS password_resets (
+    id TEXT PRIMARY KEY,
+    client_user_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (client_user_id) REFERENCES client_users(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_password_resets_user
+    ON password_resets(client_user_id);
+`);
+
+// ── 14f. client_login_attempts — brute-force lockout window ──────────────────
+// Per Wez's locked-in default: 10 failed attempts within a 15-min window locks
+// the username for 15 minutes. We track per (email_client_id, username) so
+// customer A's attacker can't lock customer B's identical "admin" username.
+//
+// Each failed login appends a row with attempted_at=now. Lockout check on
+// login: COUNT(*) WHERE attempted_at > now-15min — if >= 10, reject with
+// generic "Too many attempts, try again in 15 minutes."
+//
+// On successful login we delete this user's rows so the counter resets.
+// Old rows (> 15 min) are also pruned opportunistically on every login attempt.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS client_login_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email_client_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    attempted_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_client_login_attempts_lookup
+    ON client_login_attempts(email_client_id, username, attempted_at);
+`);
+
+// ── 14g. client_post_regens — daily soft cap on Gemini regen calls ───────────
+// Per Wez's spec: 30 regens per customer (email_client) per day. Each successful
+// /api/portal/posts/:id/regenerate call appends a row. The check on a new regen:
+// COUNT(*) WHERE email_client_id=? AND created_at >= datetime('now','-1 day').
+// Soft cap returns a 429 with a clear "you've used 30/30 today, try again
+// tomorrow" message.
+//
+// Old rows (> 24h) are kept for now in case we want a daily-volume report
+// later — they're tiny.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS client_post_regens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email_client_id TEXT NOT NULL,
+    client_user_id TEXT,
+    campaign_id TEXT,
+    post_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_client_post_regens_client_created
+    ON client_post_regens(email_client_id, created_at);
+`);
+
+// ── 14h. email_outbound — outbound replies sent from the portal ──────────────
+// When a customer replies to an inbox message via the portal's compose form,
+// the SES send is recorded here. Threading headers (In-Reply-To, References)
+// are derived from the reply's message_id at send time.
+//
+// We don't reuse email_sends because that table is keyed by (campaign, subscriber)
+// and these outbound messages aren't part of a campaign — they're free-form
+// replies. Separate table keeps the schema honest.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS email_outbound (
+    id TEXT PRIMARY KEY,
+    email_client_id TEXT NOT NULL,
+    in_reply_to_reply_id TEXT,         /* the email_replies row this is a reply to */
+    client_user_id TEXT,                /* which portal user clicked Send */
+    from_address TEXT NOT NULL,
+    to_address TEXT NOT NULL,
+    cc_address TEXT,
+    subject TEXT,
+    body_text TEXT,
+    body_html TEXT,
+    message_id TEXT,                    /* SES MessageId, for future threading */
+    in_reply_to_header TEXT,            /* the In-Reply-To header value we sent */
+    references_header TEXT,             /* the References header value we sent */
+    sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+    error TEXT,                         /* populated if SES send failed */
+    FOREIGN KEY (email_client_id) REFERENCES email_clients(id),
+    FOREIGN KEY (in_reply_to_reply_id) REFERENCES email_replies(id),
+    FOREIGN KEY (client_user_id) REFERENCES client_users(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_email_outbound_client_sent
+    ON email_outbound(email_client_id, sent_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_email_outbound_reply
+    ON email_outbound(in_reply_to_reply_id);
+`);
+
+// ── 14i. Per-post approval state (lives INSIDE campaigns.posts_json) ─────────
+//
+// IMPORTANT: There is no separate posts table. Posts live as a JSON array
+// inside the LinkedIn `campaigns` table (column posts_json). Per Wez's
+// pre-decision, customer-portal approval state goes in the SAME bundle as
+// every other per-post field (linkedin_post_text, image_url, app_url, etc.),
+// not in a sidecar table.
+//
+// The fields added to each post object inside posts_json:
+//   - client_approved_at        : ISO timestamp when customer approved this post
+//   - client_approved_by_user_id: which client_users row clicked approve
+//
+// No DB migration needed for this — the columns are inside JSON. Documented
+// here so future readers know where to look. The portal route layer
+// (routes/portal.js, next chat chunk) reads/writes these fields by parsing
+// posts_json, mutating the relevant array entry, and writing back.
+//
+// On "Approve all" success and full Supergrow push, the LinkedIn campaign's
+// stage flips from 'awaiting_approval' to 'deployed'. The portal then hides
+// the batch (next call to GET /api/portal/posts returns empty list because
+// no awaiting_approval campaigns remain).
+//
+// PARTIAL FAILURE policy: if Supergrow accepts some queue_post calls but
+// errors on a later one, the stage stays at 'awaiting_approval'. Posts that
+// queued successfully are marked client_approved_at; the failed and remaining
+// posts stay unapproved. The portal still shows the batch so the customer/Wez
+// can retry the rest. The audit log captures the partial-failure state.
+
 // Reset any stuck algorithm analysis runs on startup
 // Also clear any partial/garbage brief (valid brief starts with # LinkedIn Algorithm)
 db.prepare("UPDATE linkedin_settings SET brief_running = 0 WHERE id = 1").run();
