@@ -146,8 +146,9 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
   const avgLuminance = totalLuminance / pixelCount;
 
   // Dark corner → white patch; Light corner → dark patch
+  // Use high opacity so logos of any colour stand out clearly
   const useDarkPatch = avgLuminance > 128;
-  const patchRgba    = useDarkPatch ? 'rgba(15,15,15,0.85)' : 'rgba(255,255,255,0.90)';
+  const patchRgba    = useDarkPatch ? 'rgba(10,10,10,0.92)' : 'rgba(255,255,255,0.95)';
 
   const patchSvg = `<svg width="${patchW}" height="${patchH}">
     <rect width="${patchW}" height="${patchH}" rx="6" ry="6" fill="${patchRgba}"/>

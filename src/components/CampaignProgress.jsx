@@ -153,7 +153,7 @@ export default function CampaignProgress({ campaignId, onComplete }) {
 
   async function handleRegenImage(postIndex) {
     setCard(postIndex, { regenImage: true });
-    setLogs(l => [...l, `Regenerating image for post ${postIndex + 1}…`]);
+    // No log entry here — avoids triggering scrollIntoView on the log terminal
     try {
       const res = await fetch(`/api/campaigns/${campaignId}/regenerate-image/${postIndex}`, { method: 'POST' });
       if (!res.ok) {
@@ -385,8 +385,8 @@ export default function CampaignProgress({ campaignId, onComplete }) {
                       </div>
                     )}
                     {(isAwaiting || isDone) && !isBusy && (
-                      <button onClick={() => handleRegenImage(i)} title="Regenerate image"
-                        style={{ position: 'absolute', bottom: 8, right: 8, background: 'rgba(255,255,255,0.92)', border: '1px solid #ddd', borderRadius: 6, padding: '4px 8px', fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, color: '#333' }}>
+                      <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleRegenImage(i); }} title="Regenerate image"
+                        style={{ position: 'absolute', bottom: 8, left: 8, background: 'rgba(255,255,255,0.92)', border: '1px solid #ddd', borderRadius: 6, padding: '4px 8px', fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, color: '#333' }}>
                         New image
                       </button>
                     )}
