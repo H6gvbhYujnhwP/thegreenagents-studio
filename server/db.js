@@ -1049,6 +1049,49 @@ db.exec(`
   }
 }
 
+// 14o. logo_url on email_clients — portal customers can have their own logo
+// uploaded directly from the admin Manage panel. Synchronised with the
+// LinkedIn-side `clients.logo_url` when a customer is linked to a LinkedIn
+// account: uploading on either side propagates to the other so customer
+// branding stays consistent across views.
+{
+  const cols = db.prepare('PRAGMA table_info(email_clients)').all().map(r => r.name);
+  if (!cols.includes('logo_url')) {
+    db.exec(`ALTER TABLE email_clients ADD COLUMN logo_url TEXT`);
+    console.log('[db] migration: added logo_url to email_clients');
+  }
+  // Initial sync: copy LinkedIn logos to portal customers that are linked
+  // to a LinkedIn account but don't yet have their own logo. One-shot — only
+  // fills in NULLs, never overwrites a portal-uploaded logo. Uses the
+  // customer_services link if available, else the legacy linkedin_client_id.
+  const linkedRows = db.prepare(`
+    SELECT
+      ec.id AS portal_id,
+      COALESCE(
+        (SELECT linked_external_id FROM customer_services
+          WHERE email_client_id = ec.id AND service_key = 'linkedin'),
+        ec.linkedin_client_id
+      ) AS linked_id
+    FROM email_clients ec
+    WHERE ec.logo_url IS NULL
+  `).all();
+  if (linkedRows.length > 0) {
+    const get = db.prepare(`SELECT logo_url FROM clients WHERE id = ?`);
+    const upd = db.prepare(`UPDATE email_clients SET logo_url = ? WHERE id = ?`);
+    let copied = 0;
+    db.transaction(rows => {
+      for (const r of rows) {
+        if (!r.linked_id) continue;
+        const lc = get.get(r.linked_id);
+        if (lc?.logo_url) { upd.run(lc.logo_url, r.portal_id); copied++; }
+      }
+    })(linkedRows);
+    if (copied > 0) {
+      console.log(`[db] migration: copied LinkedIn logo to ${copied} portal customer(s) on initial sync`);
+    }
+  }
+}
+
 // Reset any stuck algorithm analysis runs on startup
 // Also clear any partial/garbage brief (valid brief starts with # LinkedIn Algorithm)
 db.prepare("UPDATE linkedin_settings SET brief_running = 0 WHERE id = 1").run();

@@ -23,6 +23,8 @@ import { Router } from 'express';
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
 import { v4 as uuid } from 'uuid';
+import multer from 'multer';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 
@@ -31,6 +33,20 @@ const BCRYPT_COST = 12;
 
 // All routes below require admin auth — apply once at the router level.
 router.use(requireAuth);
+
+// Cloudflare R2 client — mirrors routes/clients.js setup so logos for portal
+// customers and LinkedIn customers all live in the same bucket. Uses the
+// existing R2_* env vars; no new infrastructure required.
+const s3 = new S3Client({
+  region: 'auto',
+  endpoint: process.env.R2_ENDPOINT,
+  credentials: {
+    accessKeyId:     process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  },
+});
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+const ALLOWED_LOGO_MIME = ['image/png', 'image/jpeg', 'image/jpg', 'image/svg+xml', 'image/webp'];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -105,6 +121,7 @@ function projectCustomer(row) {
     name:              row.name,
     slug:              row.slug,
     color:             row.color,
+    logo_url:          row.logo_url || null,
     portal_enabled:    !!row.portal_enabled,
     portal_user_count: userCount,
     services:          buildCustomerServices(row.id),
@@ -120,6 +137,59 @@ function projectUser(row) {
     created_at:    row.created_at,
     last_login_at: row.last_login_at,
   };
+}
+
+/**
+ * Find the LinkedIn `clients` row id linked to a portal customer, if any.
+ * Reads from customer_services first (the new source of truth) and falls
+ * back to the legacy linkedin_client_id column if needed.
+ */
+function getLinkedLinkedinClientId(emailClientId) {
+  const row = db.prepare(`
+    SELECT linked_external_id FROM customer_services
+    WHERE email_client_id = ? AND service_key = 'linkedin'
+  `).get(emailClientId);
+  if (row?.linked_external_id) return row.linked_external_id;
+  const legacy = db.prepare(`
+    SELECT linkedin_client_id FROM email_clients WHERE id = ?
+  `).get(emailClientId);
+  return legacy?.linkedin_client_id || null;
+}
+
+/**
+ * Find every email_clients row whose customer_services or legacy column
+ * points at the given LinkedIn client id. Used to propagate a LinkedIn-side
+ * logo update to any portal customers that share that LinkedIn account.
+ *
+ * In normal operation only zero or one row matches (UNIQUE index prevents
+ * cross-customer linking) but the query handles the multi-row case defensively.
+ */
+function findPortalCustomersLinkedTo(linkedinClientId) {
+  return db.prepare(`
+    SELECT DISTINCT ec.id FROM email_clients ec
+    LEFT JOIN customer_services cs
+      ON cs.email_client_id = ec.id AND cs.service_key = 'linkedin'
+    WHERE cs.linked_external_id = ?
+       OR ec.linkedin_client_id = ?
+  `).all(linkedinClientId, linkedinClientId).map(r => r.id);
+}
+
+/**
+ * Upload an image buffer to R2 and return the public URL. Common code
+ * shared by both portal-admin and clients logo upload routes (this file
+ * also exports it via the helper module pattern, but for simplicity it
+ * lives here and clients.js will get the same behaviour via a small edit).
+ */
+async function uploadLogoToR2(file, scope, ownerId) {
+  const ext = (file.originalname.split('.').pop() || 'png').toLowerCase();
+  const key = `logos/${scope}/${ownerId}/logo-${uuid()}.${ext}`;
+  await s3.send(new PutObjectCommand({
+    Bucket:      process.env.R2_BUCKET_NAME,
+    Key:         key,
+    Body:        file.buffer,
+    ContentType: file.mimetype,
+  }));
+  return `${process.env.R2_PUBLIC_URL}/${key}`;
 }
 
 /**
@@ -187,13 +257,19 @@ router.get('/service-options/:service_key', (req, res) => {
     ? 'AND (t.portal_enabled = 0 OR cs.email_client_id IS NOT NULL)'
     : '';
 
+  // Self-link treatment: if a customer_services row has email_client_id =
+  // linked_external_id, that's a "self-link" (portal customer points at its
+  // own email record by default). Treat self-links as unlinked for picker
+  // purposes — they shouldn't show as "already linked to <name>" because the
+  // owning customer can re-link them at will. Only cross-customer links
+  // (where someone else has claimed this record) count as "already linked".
   const rows = db.prepare(`
     SELECT
       t.id,
       t.name,
-      cs.email_client_id      AS linked_to_id,
-      ec.name                 AS linked_to_name,
-      ec.slug                 AS linked_to_slug
+      CASE WHEN cs.email_client_id = cs.linked_external_id THEN NULL ELSE cs.email_client_id END AS linked_to_id,
+      CASE WHEN cs.email_client_id = cs.linked_external_id THEN NULL ELSE ec.name              END AS linked_to_name,
+      CASE WHEN cs.email_client_id = cs.linked_external_id THEN NULL ELSE ec.slug              END AS linked_to_slug
     FROM ${svc.link_table} t
     LEFT JOIN customer_services cs
       ON cs.service_key        = ?
@@ -476,6 +552,69 @@ router.get('/eligible-customers', (req, res) => {
     ORDER BY name COLLATE NOCASE ASC
   `).all();
   res.json(rows);
+});
+
+// ─── 13. POST /api/portal-admin/customers/:id/logo ────────────────────────────
+// Upload a logo for a portal customer. Stored in R2 under logos/portal/<id>/.
+// Cross-sync: if this portal customer is linked to a LinkedIn account, the
+// uploaded URL is also written to that LinkedIn `clients` row's logo_url so
+// the LinkedIn admin view stays consistent.
+//
+// Allowed types: PNG, JPG, SVG, WebP. Max size 20 MB (mirrors the existing
+// LinkedIn logo upload).
+router.post('/customers/:id/logo', upload.single('logo'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No logo file uploaded' });
+  if (!ALLOWED_LOGO_MIME.includes(req.file.mimetype)) {
+    return res.status(400).json({ error: 'Logo must be PNG, JPG, SVG, or WebP' });
+  }
+  const customer = db.prepare(`SELECT * FROM email_clients WHERE id = ?`).get(req.params.id);
+  if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+  let logoUrl;
+  try {
+    logoUrl = await uploadLogoToR2(req.file, 'portal', req.params.id);
+  } catch (err) {
+    console.error('[portal-admin] Logo upload failed:', err.message);
+    return res.status(500).json({ error: `Logo upload failed: ${err.message}` });
+  }
+
+  // Update the portal customer's logo. Then propagate to any linked LinkedIn
+  // record so uploads from either side keep both in sync (option Z behaviour
+  // — last write wins on both sides, which is fine in practice).
+  db.transaction(() => {
+    db.prepare(`UPDATE email_clients SET logo_url = ? WHERE id = ?`).run(logoUrl, req.params.id);
+    const linkedinId = getLinkedLinkedinClientId(req.params.id);
+    if (linkedinId) {
+      db.prepare(`
+        UPDATE clients SET logo_url = ?, updated_at = datetime('now') WHERE id = ?
+      `).run(logoUrl, linkedinId);
+    }
+  })();
+
+  const updated = db.prepare(`SELECT * FROM email_clients WHERE id = ?`).get(req.params.id);
+  res.json({ ok: true, customer: projectCustomer(updated) });
+});
+
+// ─── 14. DELETE /api/portal-admin/customers/:id/logo ──────────────────────────
+// Clear the portal customer's logo. Also clears the linked LinkedIn record's
+// logo to keep them in sync (option Z behaviour). The R2 object stays
+// behind — costs nothing and saves a "but I want it back" recovery moment.
+router.delete('/customers/:id/logo', (req, res) => {
+  const customer = db.prepare(`SELECT * FROM email_clients WHERE id = ?`).get(req.params.id);
+  if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+  db.transaction(() => {
+    db.prepare(`UPDATE email_clients SET logo_url = NULL WHERE id = ?`).run(req.params.id);
+    const linkedinId = getLinkedLinkedinClientId(req.params.id);
+    if (linkedinId) {
+      db.prepare(`
+        UPDATE clients SET logo_url = NULL, updated_at = datetime('now') WHERE id = ?
+      `).run(linkedinId);
+    }
+  })();
+
+  const updated = db.prepare(`SELECT * FROM email_clients WHERE id = ?`).get(req.params.id);
+  res.json({ ok: true, customer: projectCustomer(updated) });
 });
 
 export default router;

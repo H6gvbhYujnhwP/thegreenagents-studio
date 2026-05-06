@@ -230,10 +230,110 @@ function ManagePanel({ customerId, onClose }) {
       </div>
 
       <ServicesPanel customer={customer} onUpdated={(updated) => setData(d => ({ ...d, customer: updated }))} />
+      <LogoPanel customer={customer} onUpdated={(updated) => setData(d => ({ ...d, customer: updated }))} />
       <UsersPanel customer={customer} users={users} onChange={loadAll} />
       <PortalUrlPanel portalUrl={portalUrl} userCount={users.length} />
       <DangerZonePanel customer={customer} onUpdated={onClose} />
     </div>
+  );
+}
+
+// ── Logo panel ──────────────────────────────────────────────────────────────
+// Upload, preview, or remove the customer's logo. Uploads sync to the linked
+// LinkedIn account if one is set (and vice versa, when uploaded from the
+// LinkedIn side). PNG / JPG / SVG / WebP up to 20 MB.
+function LogoPanel({ customer, onUpdated }) {
+  const [busy, setBusy] = useState(false);
+  const [err,  setErr]  = useState('');
+
+  const linkedToLinkedin = customer.services.find(s => s.service_key === 'linkedin')?.subscribed;
+
+  async function upload(file) {
+    if (!file) return;
+    setBusy(true); setErr('');
+    try {
+      const fd = new FormData();
+      fd.append('logo', file);
+      const r = await fetch(`/api/portal-admin/customers/${customer.id}/logo`, {
+        method: 'POST',
+        body: fd,
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      onUpdated(d.customer);
+    } catch (e) {
+      setErr(e.message);
+    }
+    setBusy(false);
+  }
+
+  async function clear() {
+    if (!confirm(`Remove ${customer.name}'s logo?\n\nThe customer's portal header will fall back to initials. ${linkedToLinkedin ? 'This also removes the logo from the linked LinkedIn account.' : ''}`)) return;
+    setBusy(true); setErr('');
+    try {
+      const r = await fetch(`/api/portal-admin/customers/${customer.id}/logo`, { method: 'DELETE' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      onUpdated(d.customer);
+    } catch (e) {
+      setErr(e.message);
+    }
+    setBusy(false);
+  }
+
+  return (
+    <Card title="Logo" subtitle={
+      linkedToLinkedin
+        ? <>Shown in the customer's portal header. Synchronised with the linked LinkedIn account — uploading on either side updates both. PNG, JPG, SVG, or WebP. Up to 20&nbsp;MB.</>
+        : <>Shown in the customer's portal header. PNG, JPG, SVG, or WebP. Up to 20&nbsp;MB. Falls back to initials if not set.</>
+    }>
+      <div style={{
+        display:'flex', alignItems:'center', gap:18,
+        padding:'12px 14px', background:'#fafaf8', borderRadius:6,
+        border:`0.5px solid ${BORDER}`,
+      }}>
+        {/* Preview — same 60x60 footprint whether logo set or not */}
+        <div style={{
+          width:60, height:60, borderRadius:8,
+          background: customer.logo_url ? '#fff' : (customer.color || '#1D9E75'),
+          border: customer.logo_url ? `0.5px solid ${BORDER}` : 'none',
+          display:'flex', alignItems:'center', justifyContent:'center',
+          color:'white', fontSize:20, fontWeight:500, flexShrink:0,
+          overflow:'hidden',
+        }}>
+          {customer.logo_url
+            ? <img src={customer.logo_url} alt={`${customer.name} logo`}
+                style={{ maxWidth:'100%', maxHeight:'100%', objectFit:'contain' }} />
+            : (customer.name || '?').trim().slice(0, 2).toUpperCase()
+          }
+        </div>
+
+        <div style={{ flex:1 }}>
+          <div style={{ fontSize:12, color:TEXT, marginBottom:4 }}>
+            {customer.logo_url
+              ? <>Logo uploaded. <a href={customer.logo_url} target="_blank" rel="noopener noreferrer" style={{ color:BLUE, fontSize:11, textDecoration:'none' }}>View full size ↗</a></>
+              : <>No logo uploaded — currently showing initials.</>}
+          </div>
+
+          <div style={{ display:'flex', gap:8 }}>
+            <label style={{ ...btnPrimary(busy), display:'inline-block', padding:'8px 14px' }}>
+              {busy ? 'Uploading…' : (customer.logo_url ? 'Replace logo' : 'Upload logo')}
+              <input type="file"
+                accept="image/png,image/jpeg,image/svg+xml,image/webp"
+                disabled={busy}
+                onChange={e => upload(e.target.files?.[0])}
+                style={{ display:'none' }}
+              />
+            </label>
+            {customer.logo_url && (
+              <button onClick={clear} disabled={busy} style={btnSecondary(busy)}>Remove</button>
+            )}
+          </div>
+
+          {err && <div style={{ color:DANGER, fontSize:12, marginTop:8 }}>{err}</div>}
+        </div>
+      </div>
+    </Card>
   );
 }
 

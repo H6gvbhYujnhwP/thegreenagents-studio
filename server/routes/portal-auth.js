@@ -125,6 +125,7 @@ function projectClient(row) {
     slug:         row.slug,
     name:         row.name,
     color:        row.color,
+    logo_url:     row.logo_url || null,
     logo_initial: (row.name || '?').trim().slice(0, 2).toUpperCase(),
     logo_color:   row.color,
   };

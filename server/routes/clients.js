@@ -213,6 +213,22 @@ router.post('/:id/logo', requireAuth, upload.single('logo'), async (req, res) =>
     db.prepare('UPDATE clients SET logo_url = ?, updated_at = datetime(\'now\') WHERE id = ?')
       .run(logoUrl, req.params.id);
 
+    // Cross-sync: if any portal customer is linked to this LinkedIn client
+    // (via customer_services or the legacy linkedin_client_id column), copy
+    // the new logo across so the customer's portal header stays consistent.
+    // Inline rather than imported helper to keep the change minimal — the
+    // mirror logic lives properly in portal-admin.js.
+    db.prepare(`
+      UPDATE email_clients
+      SET logo_url = ?
+      WHERE id IN (
+        SELECT email_client_id FROM customer_services
+        WHERE service_key = 'linkedin' AND linked_external_id = ?
+        UNION
+        SELECT id FROM email_clients WHERE linkedin_client_id = ?
+      )
+    `).run(logoUrl, req.params.id, req.params.id);
+
     res.json({ ok: true, logo_url: logoUrl });
   } catch (err) {
     console.error('[clients] Logo upload failed:', err.message);
