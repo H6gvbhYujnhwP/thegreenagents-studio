@@ -2605,24 +2605,42 @@ function MailboxDetail({inbox, onRefresh}){
       setTimeout(()=>setPollMsg(null), 8000);
     }
   }
-  // Resync — reset the IMAP cursor so the next poll re-runs the 30-day backfill.
-  // Used when an inbox connected pre-Phase-3.1.5 is showing an empty inbox.
-  async function resyncNow(){
-    if(!confirm('Resync this mailbox?\n\nThis re-fetches the last 30 days of mail from Gmail. Existing emails won\'t be duplicated. Use this if the inbox looks emptier than it should.')) return;
-    setPolling(true);
-    setPollMsg(null);
-    const r=await fetch(`/api/email/mailboxes/${inbox.id}/resync`,{method:'POST'});
-    const d=await r.json();
-    setPolling(false);
-    if(d.ok){
+  // Resync — destructive: deletes local replies for this mailbox and re-pulls
+  // from IMAP. Anything no longer in the IMAP inbox is permanently lost from
+  // the Studio. Gated behind a typed-confirmation modal so it can't be hit
+  // by accident.
+  const [resyncModal, setResyncModal] = useState(null);  // null | { typed, revertUnsubs, busy, error }
+  function openResyncModal() {
+    setResyncModal({ typed: '', revertUnsubs: false, busy: false, error: null });
+  }
+  async function confirmResync() {
+    if (!resyncModal) return;
+    setResyncModal(m => ({ ...m, busy: true, error: null }));
+    try {
+      const r = await fetch(`/api/email/mailboxes/${inbox.id}/resync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revertAutoUnsubs: !!resyncModal.revertUnsubs }),
+      });
+      const d = await r.json();
+      if (!d.ok) {
+        setResyncModal(m => ({ ...m, busy: false, error: d.error || 'Resync failed' }));
+        return;
+      }
+      setResyncModal(null);
       loadReplies();
       onRefresh();
-      const f=d.fetched||0, s=d.scanned||0;
-      setPollMsg({ok:true, text:`Resync complete — fetched ${f} email${f===1?'':'s'} (scanned ${s})`});
-      setTimeout(()=>setPollMsg(null), 6000);
-    } else {
-      setPollMsg({ok:false, text:d.error||'Resync failed'});
-      setTimeout(()=>setPollMsg(null), 8000);
+      const fetched = d.poll?.fetched || 0;
+      const scanned = d.poll?.scanned || 0;
+      const purged = d.replies_deleted || 0;
+      const reverted = d.auto_unsubs_reverted || 0;
+      const parts = [`purged ${purged}`];
+      if (reverted > 0) parts.push(`reverted ${reverted} auto-unsub${reverted === 1 ? '' : 's'}`);
+      parts.push(`fetched ${fetched} (scanned ${scanned})`);
+      setPollMsg({ ok: true, text: `Resync complete — ${parts.join(', ')}` });
+      setTimeout(() => setPollMsg(null), 7000);
+    } catch (err) {
+      setResyncModal(m => ({ ...m, busy: false, error: err.message }));
     }
   }
 
@@ -2676,9 +2694,9 @@ function MailboxDetail({inbox, onRefresh}){
       <Btn small onClick={checkNow} disabled={polling}>{polling?'Checking…':'Check now'}</Btn>
       <Btn small onClick={classifyPending} disabled={polling||classifying} title="Run the AI classifier now on any unclassified emails. Otherwise it runs automatically every minute.">{classifying?'Classifying…':'Classify pending'}</Btn>
       <button
-        onClick={resyncNow}
+        onClick={openResyncModal}
         disabled={polling}
-        title="Reset the IMAP cursor and re-fetch the last 30 days. Use if the inbox looks empty when it shouldn't."
+        title="Wipe local replies for this mailbox and re-pull from IMAP. Anything no longer in your IMAP inbox is permanently lost."
         style={{
           background:'transparent',border:'none',padding:'4px 8px',fontSize:11,
           color:polling?MUTED:BLUE,cursor:polling?'default':'pointer',textDecoration:'underline',
@@ -2761,6 +2779,69 @@ function MailboxDetail({inbox, onRefresh}){
     </div>
 
     {openReplyId&&<ReplyDetailModal replyId={openReplyId} onClose={()=>setOpenReplyId(null)} onAction={()=>{loadReplies();onRefresh();}}/>}
+
+    {/* Resync confirmation modal. Typed-phrase gate (the mailbox email) so this
+        can't be hit accidentally. Optional checkbox to also revert auto-unsubs. */}
+    {resyncModal && (
+      <Modal title="Resync mailbox" onClose={() => !resyncModal.busy && setResyncModal(null)}>
+        <div style={{fontSize:13,color:TEXT,lineHeight:1.5,marginBottom:14}}>
+          This will <strong>permanently delete</strong> all locally stored replies for{' '}
+          <strong>{inbox.email_address}</strong> and re-pull from your IMAP inbox. Anything
+          no longer in IMAP is gone for good.
+        </div>
+        <div style={{
+          background:`${DANGER}10`, border:`0.5px solid ${DANGER}40`,
+          borderRadius:6, padding:10, fontSize:12, color:TEXT, marginBottom:14, lineHeight:1.5,
+        }}>
+          <strong style={{color:DANGER}}>Heads up:</strong> auto-unsubscribed prospects who genuinely
+          replied "remove me" stay unsubscribed by default. Tick the box below ONLY if you're
+          sure none of the wiped replies were legitimate opt-outs.
+        </div>
+
+        <label style={{display:'flex',alignItems:'flex-start',gap:8,marginBottom:14,cursor:'pointer',fontSize:12,color:TEXT}}>
+          <input type="checkbox"
+            checked={resyncModal.revertUnsubs}
+            disabled={resyncModal.busy}
+            onChange={e => setResyncModal(m => ({...m, revertUnsubs: e.target.checked}))}
+            style={{marginTop:2}}
+          />
+          <span>
+            Also revert auto-unsubscribes caused by these replies
+            <span style={{display:'block',color:MUTED,fontSize:11,marginTop:2}}>
+              Use this for the warmupinbox-era cleanup. Anyone manually re-subscribed since is unaffected.
+            </span>
+          </span>
+        </label>
+
+        <div style={{marginBottom:6,fontSize:12,color:MUTED}}>
+          Type <strong style={{color:TEXT}}>{inbox.email_address}</strong> to confirm:
+        </div>
+        <input type="text"
+          value={resyncModal.typed}
+          disabled={resyncModal.busy}
+          onChange={e => setResyncModal(m => ({...m, typed: e.target.value}))}
+          autoFocus
+          placeholder={inbox.email_address}
+          style={{
+            width:'100%',boxSizing:'border-box',padding:'8px 10px',fontSize:13,
+            border:`0.5px solid ${BORDER}`,borderRadius:6,outline:'none',
+            color:TEXT,background:CARD,
+          }}
+        />
+
+        {resyncModal.error && (
+          <div style={{color:DANGER,fontSize:12,marginTop:10}}>{resyncModal.error}</div>
+        )}
+
+        <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:18}}>
+          <Btn onClick={() => setResyncModal(null)} disabled={resyncModal.busy}>Cancel</Btn>
+          <Btn variant="primary"
+            onClick={confirmResync}
+            disabled={resyncModal.busy || resyncModal.typed.trim().toLowerCase() !== inbox.email_address.toLowerCase()}
+          >{resyncModal.busy ? 'Resyncing…' : 'Resync now'}</Btn>
+        </div>
+      </Modal>
+    )}
   </div>);
 }
 

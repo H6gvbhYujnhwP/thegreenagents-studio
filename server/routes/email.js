@@ -7,7 +7,7 @@ import { sendCampaign, getQuota, getVerifiedDomains } from '../services/ses.js';
 import { getLinkUrl, TRANSPARENT_GIF } from '../services/tracking.js';
 import { getTouchCountsBulk, shouldTrackRecipient } from '../services/touch-count.js';
 import { encrypt, selfTest as cryptoSelfTest } from '../services/crypto-vault.js';
-import { testImapCredentials, pollSingleInbox, resyncInbox } from '../services/imap-poller.js';
+import { testImapCredentials, pollSingleInbox } from '../services/imap-poller.js';
 import { parseFirstName, parseAndCacheList, templateUsesFirstName, renderTemplate } from '../services/name-parser.js';
 import { classifyPendingOnce, classifyOneReply } from '../services/classify-replies.js';
 import dns from 'dns';
@@ -1765,20 +1765,108 @@ router.post('/mailboxes/:id/poll', async (req, res) => {
   res.json(result);
 });
 
-// POST /api/email/mailboxes/:id/resync — reset the poll cursor so the next poll
-// re-runs the 30-day backfill from scratch. For mailboxes connected before the
-// Phase 3.1.5 backfill behaviour was added, or any time the inbox view looks empty
-// when the underlying mailbox isn't. Does NOT delete existing replies; dedupe by
-// message_id prevents duplicates on re-fetch.
+// POST /api/email/mailboxes/:id/resync — full destructive resync.
+//
+// What this does, in order:
+//   1. Deletes every email_replies row for this mailbox (the local copies).
+//   2. Optionally reverts any auto-unsubscribes that those replies caused —
+//      ONLY if revertAutoUnsubs=true is in the body. Default false because
+//      silently re-subscribing people who replied "remove me" is a CAN-SPAM /
+//      GDPR risk. The UI defaults the checkbox to off.
+//   3. Resets last_uid=0 so the next IMAP poll re-fetches from scratch.
+//   4. Triggers an immediate poll so the UI refreshes without waiting.
+//   5. Audit-logs the whole thing with counts.
+//
+// Anything no longer in the IMAP inbox is permanently lost from the Studio.
+// This is the user's explicit choice — the button has a typed-confirmation
+// modal in front of it.
 router.post('/mailboxes/:id/resync', async (req, res) => {
-  const reset = resyncInbox(req.params.id);
-  if (!reset.ok) return res.status(404).json(reset);
-  db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id)
-              VALUES (?, 'user', 'resync_mailbox', 'mailbox', ?)`)
-    .run(uuid(), req.params.id);
-  // Trigger an immediate poll so the user sees results without waiting 3 min
+  const inbox = db.prepare('SELECT * FROM email_inboxes WHERE id=?').get(req.params.id);
+  if (!inbox) return res.status(404).json({ ok: false, error: 'Mailbox not found' });
+
+  const revertAutoUnsubs = !!req.body?.revertAutoUnsubs;
+
+  // 1. Find replies that caused auto-unsubs — needed both for the revert step
+  // (if requested) and for the audit-log metadata (always).
+  const replyIds = db.prepare('SELECT id FROM email_replies WHERE inbox_id = ?')
+    .all(req.params.id).map(r => r.id);
+  const replyCount = replyIds.length;
+
+  let revertedSubscribers = 0;
+  const touchedListIds = new Set();
+
+  const tx = db.transaction(() => {
+    if (revertAutoUnsubs && replyIds.length > 0) {
+      // Find every subscriber that was auto-unsubbed because of one of these replies.
+      // The audit log row recorded the link (reply_id column).
+      const placeholders = replyIds.map(() => '?').join(',');
+      const affected = db.prepare(`
+        SELECT DISTINCT target_id as subscriber_id
+        FROM email_audit_log
+        WHERE action = 'auto_unsubscribe'
+          AND target_type = 'subscriber'
+          AND reply_id IN (${placeholders})
+      `).all(...replyIds);
+
+      // Only revert subscribers that are still in 'unsubscribed' status. If they've
+      // been manually re-subscribed since, leave them alone.
+      const revertStmt = db.prepare(`
+        UPDATE email_subscribers
+        SET status = 'subscribed', unsubscribed_at = NULL
+        WHERE id = ? AND status = 'unsubscribed'
+      `);
+      const revertAuditStmt = db.prepare(`INSERT INTO email_audit_log
+        (id, actor, action, target_type, target_id, metadata)
+        VALUES (?, 'system', 'resync_revert_auto_unsubscribe', 'subscriber', ?, ?)`);
+      const getListId = db.prepare('SELECT list_id FROM email_subscribers WHERE id = ?');
+      for (const row of affected) {
+        const r = revertStmt.run(row.subscriber_id);
+        if (r.changes > 0) {
+          revertedSubscribers++;
+          revertAuditStmt.run(uuid(), row.subscriber_id,
+            JSON.stringify({ inbox_id: req.params.id, reason: 'mailbox resync' }));
+          const lst = getListId.get(row.subscriber_id);
+          if (lst?.list_id) touchedListIds.add(lst.list_id);
+        }
+      }
+      // Recompute subscriber_count on every list that had a revert.
+      const updateListCount = db.prepare(
+        "UPDATE email_lists SET subscriber_count = (SELECT COUNT(*) FROM email_subscribers WHERE list_id = ? AND status = 'subscribed') WHERE id = ?"
+      );
+      for (const lid of touchedListIds) updateListCount.run(lid, lid);
+    }
+
+    // 2. Wipe local replies for this mailbox. Done after the auto-unsub revert
+    // so the audit log link still exists when we look it up.
+    db.prepare('DELETE FROM email_replies WHERE inbox_id = ?').run(req.params.id);
+
+    // 3. Reset poll cursor. Next poll fetches from scratch.
+    db.prepare('UPDATE email_inboxes SET last_uid = 0, last_error = NULL WHERE id = ?').run(req.params.id);
+
+    // 4. Audit log the resync itself.
+    db.prepare(`INSERT INTO email_audit_log
+      (id, actor, action, target_type, target_id, metadata)
+      VALUES (?, 'user', 'resync_mailbox_purge', 'mailbox', ?, ?)`).run(
+      uuid(), req.params.id,
+      JSON.stringify({
+        replies_deleted: replyCount,
+        auto_unsubs_reverted: revertedSubscribers,
+        revert_requested: revertAutoUnsubs,
+      })
+    );
+  });
+  tx();
+
+  console.log(`[poller] ${inbox.email_address}: full resync — purged ${replyCount} replies, reverted ${revertedSubscribers} auto-unsubs (revert_requested=${revertAutoUnsubs})`);
+
+  // 5. Immediately re-poll so the user sees results without waiting 3 minutes.
   const result = await pollSingleInbox(req.params.id);
-  res.json(result);
+  res.json({
+    ok: true,
+    replies_deleted: replyCount,
+    auto_unsubs_reverted: revertedSubscribers,
+    poll: result,
+  });
 });
 
 // GET /api/email/mailboxes/:id/replies — list replies for one inbox
