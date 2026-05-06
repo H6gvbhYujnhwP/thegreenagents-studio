@@ -384,10 +384,10 @@ export default function CampaignProgress({ campaignId, onComplete }) {
                         <span style={{ fontSize: 11, color: DARK, fontWeight: 500 }}>Generating…</span>
                       </div>
                     )}
-                    {isAwaiting && !isBusy && (
+                    {(isAwaiting || isDone) && !isBusy && (
                       <button onClick={() => handleRegenImage(i)} title="Regenerate image"
                         style={{ position: 'absolute', bottom: 8, right: 8, background: 'rgba(255,255,255,0.92)', border: '1px solid #ddd', borderRadius: 6, padding: '4px 8px', fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, color: '#333' }}>
-                        🔄 New image
+                        New image
                       </button>
                     )}
                   </div>
