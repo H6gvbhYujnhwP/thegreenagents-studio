@@ -26,7 +26,7 @@ export async function generateImage(imagePrompt, client = {}, post = {}) {
     : 'Standard LinkedIn post image.';
 
   const brandSignatureRule = hasLogo
-    ? `7. BOTTOM RIGHT CORNER: Leave the bottom-right 200x70px area relatively clear (no text, no important design elements) — a logo will be composited there in post-processing.`
+    ? `7. BOTTOM RIGHT CORNER: Leave the bottom-right 320x140px area relatively clear (no text, no important design elements) — a logo will be composited there in post-processing.`
     : `7. BRAND SIGNATURE: The text "${brandName}" MUST appear clearly at the bottom right in a clean professional font. If background is dark use white text; if light use dark text.`;
 
   const nanoBananaPrompt = `Generate a LinkedIn post visual in the NANO BANNA style for ${brandName}.
@@ -113,9 +113,9 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
   const baseImage   = sharp(imageBuffer);
   const { width, height } = await baseImage.metadata();
 
-  const LOGO_MAX_W = 140;
-  const LOGO_MAX_H = 50;
-  const PADDING    = 12;
+  const LOGO_MAX_W = 280;
+  const LOGO_MAX_H = 100;
+  const PADDING    = 16;
 
   const logoResized = await sharp(logoBuffer)
     .resize(LOGO_MAX_W, LOGO_MAX_H, { fit: 'inside', withoutEnlargement: true })
