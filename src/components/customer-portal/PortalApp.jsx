@@ -115,31 +115,49 @@ function aggregateStats(campaigns) {
 export default function PortalApp({ slug }) {
   // null = checking session, false = need login, object = authenticated user
   const [authUser, setAuthUser] = useState(null);
-  const [client, setClient]     = useState(null);
+  const [client,   setClient]   = useState(null);
+  const [services, setServices] = useState(null);
 
-  // Mock auth check. In the backend chat this calls /api/portal/auth/check.
+  // If the URL has ?reset=<token>, we're on the reset-password leg of the flow.
+  // The reset screen takes priority over login/dashboard until the user either
+  // submits successfully (returns to login) or navigates away.
+  const [resetToken] = useState(() => {
+    const m = window.location.search.match(/[?&]reset=([^&]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  });
+
+  // Real auth check — calls /api/portal/auth/check which validates the
+  // HttpOnly session cookie set by the login route.
   useEffect(() => {
-    // TODO(backend): replace with `fetch('/api/portal/auth/check')`
-    const stored = localStorage.getItem(`portalUser:${slug}`);
-    if (stored) {
-      try {
-        setAuthUser(JSON.parse(stored));
-        setClient(mockClient);
-      } catch { setAuthUser(false); }
-    } else {
-      setAuthUser(false);
-    }
-  }, [slug]);
+    if (resetToken) { setAuthUser(false); return; }  // skip; reset screen will mount
+    fetch('/api/portal/auth/check', { credentials: 'include' })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d && d.user) {
+          setAuthUser(d.user);
+          setClient(d.client);
+          setServices(d.services);
+        } else {
+          setAuthUser(false);
+        }
+      })
+      .catch(() => setAuthUser(false));
+  }, [slug, resetToken]);
 
-  function handleLogin(user) {
-    localStorage.setItem(`portalUser:${slug}`, JSON.stringify(user));
+  function handleLogin({ user, client, services }) {
     setAuthUser(user);
-    setClient(mockClient);
+    setClient(client);
+    setServices(services);
   }
-  function handleLogout() {
-    localStorage.removeItem(`portalUser:${slug}`);
+  async function handleLogout() {
+    try { await fetch('/api/portal/auth/logout', { method:'POST', credentials:'include' }); } catch {}
     setAuthUser(false);
     setClient(null);
+    setServices(null);
+  }
+
+  if (resetToken) {
+    return <PortalResetPassword slug={slug} token={resetToken} />;
   }
 
   if (authUser === null) {
@@ -155,7 +173,7 @@ export default function PortalApp({ slug }) {
     return <PortalLogin slug={slug} onLogin={handleLogin} />;
   }
 
-  return <PortalChrome user={authUser} client={client} onLogout={handleLogout} />;
+  return <PortalChrome user={authUser} client={client} services={services} onLogout={handleLogout} />;
 }
 
 // ── LOGIN ────────────────────────────────────────────────────────────────────
@@ -164,12 +182,22 @@ function PortalLogin({ slug, onLogin }) {
   const [password, setPassword] = useState('');
   const [busy, setBusy]         = useState(false);
   const [err, setErr]           = useState('');
+  const [clientName, setClientName] = useState('');
+  const [showForgot, setShowForgot] = useState(false);
 
-  // Mock client lookup so we can show the customer name in the subtitle even
-  // before login. Backend will resolve this from /api/portal/by-slug/:slug.
-  const clientName = useMemo(() => {
-    if (slug === mockClient.slug) return mockClient.name;
-    return slug.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' ');
+  // Resolve the slug → client name from /api/portal/by-slug/:slug. If the
+  // slug doesn't match any client, fall back to a Title-Case rendering of
+  // the slug so the page still looks reasonable. We don't show an explicit
+  // "client not found" error here because that would let an attacker probe
+  // for valid slugs from outside the portal.
+  useEffect(() => {
+    fetch(`/api/portal/by-slug/${encodeURIComponent(slug)}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d && d.client_name) setClientName(d.client_name);
+        else setClientName(slug.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' '));
+      })
+      .catch(() => setClientName(slug));
   }, [slug]);
 
   async function submit(e) {
@@ -179,16 +207,24 @@ function PortalLogin({ slug, onLogin }) {
       return;
     }
     setBusy(true); setErr('');
-    // TODO(backend): replace this block with
-    //   const r = await fetch('/api/portal/auth/login', {
-    //     method:'POST', headers:{'Content-Type':'application/json'},
-    //     body: JSON.stringify({ slug, username, password })
-    //   });
-    //   const d = await r.json();
-    //   if (!d.ok) { setErr(d.error || 'Invalid credentials'); setBusy(false); return; }
-    //   onLogin(d.user);
-    await new Promise(r => setTimeout(r, 500));
-    onLogin({ ...mockUser, username });
+    try {
+      const r = await fetch('/api/portal/auth/login', {
+        method:'POST',
+        credentials:'include',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ slug, username, password }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) {
+        setErr(d.error || 'Invalid credentials');
+        setBusy(false);
+        return;
+      }
+      onLogin({ user: d.user, client: d.client, services: d.services });
+    } catch (e2) {
+      setErr('Network error — try again.');
+      setBusy(false);
+    }
   }
 
   return (
@@ -233,9 +269,166 @@ function PortalLogin({ slug, onLogin }) {
           marginTop:12,
         }}>{busy ? 'Signing in…' : 'Sign in'}</button>
 
-        <a onClick={() => alert('Password reset will email you a reset link. (Wired up in next chat.)')}
+        <a onClick={() => setShowForgot(true)}
           style={{ display:'block', textAlign:'center', marginTop:14, fontSize:12, color:BLUE, cursor:'pointer' }}
         >Forgot password?</a>
+      </form>
+
+      {showForgot && <ForgotPasswordModal slug={slug} onClose={() => setShowForgot(false)} />}
+    </div>
+  );
+}
+
+// ── FORGOT-PASSWORD MODAL ────────────────────────────────────────────────────
+// Asks for an email, posts to /api/portal/auth/forgot-password, and shows a
+// confirmation message regardless of whether the email matched a real user
+// (the backend always returns 200 to avoid leaking whether an email exists).
+function ForgotPasswordModal({ slug, onClose }) {
+  const [email, setEmail] = useState('');
+  const [busy, setBusy]   = useState(false);
+  const [done, setDone]   = useState(false);
+
+  async function submit() {
+    if (!email.trim()) return;
+    setBusy(true);
+    try {
+      await fetch('/api/portal/auth/forgot-password', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ slug, email: email.trim() }),
+      });
+    } catch {}
+    setBusy(false);
+    setDone(true);
+  }
+
+  return (
+    <Modal title="Reset your password" onClose={onClose}>
+      {done ? (
+        <div>
+          <p style={{ fontSize:13, color:TEXT, lineHeight:1.5, margin:'0 0 16px' }}>
+            If an account exists for <strong>{email}</strong>, we've sent a reset link to it.
+            Check your inbox in the next minute or two — the link is valid for 1 hour.
+          </p>
+          <div style={{ display:'flex', justifyContent:'flex-end' }}>
+            <BtnPrimary onClick={onClose}>Done</BtnPrimary>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <p style={{ fontSize:13, color:TEXT, lineHeight:1.5, margin:'0 0 14px' }}>
+            Enter the email address tied to your portal account. We'll send a reset link.
+          </p>
+          <Field label="Email address">
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)}
+              autoFocus disabled={busy} style={loginInputStyle()}
+              placeholder="you@yourcompany.co.uk"
+            />
+          </Field>
+          <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginTop:14 }}>
+            <BtnSecondary onClick={onClose} disabled={busy}>Cancel</BtnSecondary>
+            <BtnPrimary onClick={submit} disabled={busy || !email.trim()}>
+              {busy ? 'Sending…' : 'Send reset link'}
+            </BtnPrimary>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// ── RESET-PASSWORD SCREEN ────────────────────────────────────────────────────
+// Mounted when the URL is /c/<slug>?reset=<token>. Validates locally that
+// the new password meets minimum length, then posts to the backend. On success,
+// strips the ?reset= query and reloads to land on the login page so the user
+// signs in fresh (per the locked-in pre-decision: reset kills all sessions).
+function PortalResetPassword({ slug, token }) {
+  const [pw1, setPw1]   = useState('');
+  const [pw2, setPw2]   = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr]   = useState('');
+  const [done, setDone] = useState(false);
+
+  async function submit(e) {
+    e?.preventDefault();
+    if (pw1.length < 8) { setErr('Password must be at least 8 characters'); return; }
+    if (pw1 !== pw2)    { setErr('Passwords don\'t match'); return; }
+    setBusy(true); setErr('');
+    try {
+      const r = await fetch('/api/portal/auth/reset-password', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ token, new: pw1 }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) {
+        setErr(d.error || 'Could not reset password.');
+        setBusy(false);
+        return;
+      }
+      setDone(true);
+    } catch {
+      setErr('Network error — try again.');
+      setBusy(false);
+    }
+  }
+
+  function goToLogin() {
+    // Strip the ?reset= param and reload so PortalApp lands on PortalLogin.
+    window.location.href = `/c/${encodeURIComponent(slug)}`;
+  }
+
+  return (
+    <div style={{ minHeight:'100vh', background:BG, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
+      <form onSubmit={submit} style={{
+        maxWidth:400, width:'100%', padding:'32px 28px',
+        background:CARD, borderRadius:12, border:`0.5px solid ${BORDER}`,
+      }}>
+        <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:24 }}>
+          <div style={{
+            width:36, height:36, borderRadius:8, background:TGA_GREEN_HI,
+            color:'white', display:'flex', alignItems:'center', justifyContent:'center',
+            fontSize:16, fontWeight:500,
+          }}>G</div>
+          <div>
+            <div style={{ fontSize:18, fontWeight:500, color:TEXT }}>Set a new password</div>
+            <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>The Green Agents Studio portal</div>
+          </div>
+        </div>
+
+        {done ? (
+          <div>
+            <div style={{
+              padding:'10px 12px', background:GREEN_BG, color:GREEN,
+              borderRadius:8, fontSize:13, marginBottom:16, lineHeight:1.5,
+            }}>
+              Password updated. Sign in with your new password to continue.
+            </div>
+            <button type="button" onClick={goToLogin} style={{
+              width:'100%', padding:10, fontSize:13, fontWeight:500,
+              background: TGA_GREEN_HI, color:'white',
+              border:'none', borderRadius:8, cursor:'pointer',
+            }}>Go to sign in</button>
+          </div>
+        ) : (
+          <>
+            <Field label="New password (8+ characters)">
+              <input type="password" value={pw1} onChange={e => setPw1(e.target.value)}
+                autoFocus disabled={busy} style={loginInputStyle()} />
+            </Field>
+            <Field label="Confirm new password">
+              <input type="password" value={pw2} onChange={e => setPw2(e.target.value)}
+                disabled={busy} style={loginInputStyle()} />
+            </Field>
+            {err && <div style={{ color:DANGER, fontSize:12, marginTop:6 }}>{err}</div>}
+            <button type="submit" disabled={busy} style={{
+              width:'100%', padding:10, fontSize:13, fontWeight:500,
+              background: busy ? TGA_GREEN_LO : TGA_GREEN_HI, color:'white',
+              border:'none', borderRadius:8, cursor: busy ? 'default' : 'pointer',
+              marginTop:12,
+            }}>{busy ? 'Updating…' : 'Set new password'}</button>
+          </>
+        )}
       </form>
     </div>
   );
@@ -259,8 +452,15 @@ function loginInputStyle() {
 }
 
 // ── CHROME (sidebar + header + page router) ──────────────────────────────────
-function PortalChrome({ user, client, onLogout }) {
-  const [page, setPage] = useState('posts');  // posts | inbox | campaigns | settings
+function PortalChrome({ user, client, services, onLogout }) {
+  const [page, setPage] = useState('posts');  // posts | inbox | campaigns | settings | facebook (future)
+
+  // The portal sidebar always shows EVERY service (per Wez's locked-in
+  // pre-decision — discoverability over hidden tabs). What changes is what
+  // each tab renders inside, based on the `services` object from the server.
+  // The `services` object has three states per service: 'enabled' /
+  // 'not_required' / 'coming_soon'. ServiceGate handles the latter two.
+  const svc = services || { email:'enabled', linkedin:'enabled', facebook:'coming_soon' };
 
   return (
     <div style={{ display:'flex', height:'100vh', background:BG, fontFamily:'-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }}>
@@ -283,10 +483,17 @@ function PortalChrome({ user, client, onLogout }) {
         </div>
 
         <div>
-          <div style={navSectionStyle()}>Workspace</div>
+          <div style={navSectionStyle()}>Social posts</div>
           <NavItem label="LinkedIn Posts" active={page==='posts'}     onClick={() => setPage('posts')} />
+          {/* Facebook Posts ships when the column lands. Already in the services
+              map as 'coming_soon' so the gate panel is ready. Uncomment when
+              the admin can link a Facebook page to the customer:
+          <NavItem label="Facebook Posts" active={page==='facebook'}  onClick={() => setPage('facebook')} />
+          */}
+          <div style={navSectionStyle()}>Email</div>
           <NavItem label="Inbox"          active={page==='inbox'}     onClick={() => setPage('inbox')} />
           <NavItem label="Campaigns"      active={page==='campaigns'} onClick={() => setPage('campaigns')} />
+          <div style={navSectionStyle()}>Account</div>
           <NavItem label="Settings"       active={page==='settings'}  onClick={() => setPage('settings')} />
         </div>
 
@@ -318,13 +525,88 @@ function PortalChrome({ user, client, onLogout }) {
           }}>{user.email || user.username}</div>
         </header>
 
+        {/* First-login banner — shown until the user changes their password.
+            Backend sets must_change_password=true when last_login_at is NULL.
+            After they hit Change password in Settings, must_change_password
+            stays true until /auth/check returns the latest user row (next
+            render after the change-password call). */}
+        {user.must_change_password && (
+          <div style={{
+            background:AMBER_BG, color:AMBER, fontSize:12, padding:'10px 22px',
+            borderBottom:`0.5px solid ${BORDER}`, lineHeight:1.5,
+          }}>
+            <strong style={{ fontWeight:500 }}>Your password is temporary.</strong>
+            {' '}Please <a onClick={() => setPage('settings')} style={{ color:AMBER, textDecoration:'underline', cursor:'pointer' }}>change it now</a> in Settings.
+          </div>
+        )}
+
         <div style={{ flex:1, overflow:'auto', padding:'20px 22px' }}>
-          {page === 'posts'     && <PortalPosts />}
-          {page === 'inbox'     && <PortalInbox />}
-          {page === 'campaigns' && <PortalCampaigns />}
-          {page === 'settings'  && <PortalSettings user={user} />}
+          {page === 'posts' && (
+            <ServiceGate state={svc.linkedin} serviceName="LinkedIn Posts">
+              <PortalPosts />
+            </ServiceGate>
+          )}
+          {page === 'inbox' && (
+            <ServiceGate state={svc.email} serviceName="Inbox">
+              <PortalInbox />
+            </ServiceGate>
+          )}
+          {page === 'campaigns' && (
+            <ServiceGate state={svc.email} serviceName="Campaigns">
+              <PortalCampaigns />
+            </ServiceGate>
+          )}
+          {page === 'facebook' && (
+            <ServiceGate state={svc.facebook} serviceName="Facebook Posts">
+              {/* Real <PortalFacebook /> component when the service ships. */}
+              <div />
+            </ServiceGate>
+          )}
+          {page === 'settings'  && <PortalSettings user={user} services={svc} />}
         </div>
       </main>
+    </div>
+  );
+}
+
+// ── SERVICE GATE ─────────────────────────────────────────────────────────────
+// Wraps each service tab so customers who aren't subscribed see a calm
+// "Not required" message instead of empty data. Three states from the
+// services object on /api/portal/auth/check:
+//   'enabled'      — render children (the real tab contents)
+//   'not_required' — show "this service isn't part of your current plan"
+//   'coming_soon'  — show "coming soon — we'll let you know when ready"
+// New services get a dropdown in the admin customer-edit modal that flips
+// between enabled and not_required for that customer.
+function ServiceGate({ state, serviceName, children }) {
+  if (state === 'enabled') return children;
+
+  const isComingSoon = state === 'coming_soon';
+  return (
+    <div>
+      <h2 style={pageTitle()}>{serviceName}</h2>
+      <div style={{
+        marginTop:18, padding:'40px 32px', background:CARD,
+        borderRadius:8, border:`0.5px dashed ${BORDER}`,
+        textAlign:'center',
+      }}>
+        <div style={{
+          display:'inline-block', padding:'5px 11px', fontSize:11,
+          background: isComingSoon ? BLUE_BG : '#f4f1e8',
+          color:      isComingSoon ? BLUE    : MUTED,
+          borderRadius:4, fontWeight:500, marginBottom:14,
+        }}>{isComingSoon ? 'Coming soon' : 'Not required'}</div>
+        <div style={{ fontSize:14, color:TEXT, marginBottom:8, fontWeight:500 }}>
+          {isComingSoon
+            ? `${serviceName} isn't live yet`
+            : `${serviceName} isn't part of your current plan`}
+        </div>
+        <div style={{ fontSize:13, color:MUTED, lineHeight:1.5, maxWidth:440, margin:'0 auto' }}>
+          {isComingSoon
+            ? "We'll let you know as soon as it's ready. No action needed from you in the meantime."
+            : <>Contact The Green Agents if you'd like to add this service to your account.</>}
+        </div>
+      </div>
     </div>
   );
 }
@@ -824,7 +1106,7 @@ function PortalCampaigns() {
 }
 
 // ── SETTINGS PAGE ────────────────────────────────────────────────────────────
-function PortalSettings({ user }) {
+function PortalSettings({ user, services }) {
   const [pw1, setPw1]       = useState('');
   const [pw2, setPw2]       = useState('');
   const [pwOld, setPwOld]   = useState('');
@@ -836,11 +1118,26 @@ function PortalSettings({ user }) {
     if (pw1 !== pw2) { setPwMsg({ ok:false, text:'New passwords don\'t match' }); return; }
     if (pw1.length < 8) { setPwMsg({ ok:false, text:'Password must be at least 8 characters' }); return; }
     setSavingPw(true); setPwMsg(null);
-    // TODO(backend): POST /api/portal/auth/change-password { old, new }
-    await new Promise(r => setTimeout(r, 500));
-    setSavingPw(false);
-    setPwOld(''); setPw1(''); setPw2('');
-    setPwMsg({ ok:true, text:'Password updated.' });
+    try {
+      const r = await fetch('/api/portal/auth/change-password', {
+        method:'POST',
+        credentials:'include',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ old: pwOld, new: pw1 }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) {
+        setPwMsg({ ok:false, text: d.error || 'Could not update password' });
+        setSavingPw(false);
+        return;
+      }
+      setSavingPw(false);
+      setPwOld(''); setPw1(''); setPw2('');
+      setPwMsg({ ok:true, text:'Password updated. Other sessions have been signed out.' });
+    } catch {
+      setSavingPw(false);
+      setPwMsg({ ok:false, text:'Network error — try again.' });
+    }
   }
 
   return (
