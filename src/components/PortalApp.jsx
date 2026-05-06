@@ -1,0 +1,1004 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Customer portal — front-end only (mock data). Renders when the URL path
+// starts with /c/<customer-slug>. App.jsx detects this and mounts <PortalApp/>
+// instead of the admin Studio.
+//
+// All data is FAKE in this file. The next chat wires real APIs by replacing
+// the `mockClient`, `mockPosts`, etc. constants with fetch calls to
+// /api/portal/* endpoints. The component shapes don't change.
+//
+// Sections:
+//   - utility constants & tiny helpers
+//   - PortalApp: the route shell + auth gate
+//   - PortalLogin: login form
+//   - PortalChrome: shared sidebar + header layout used by every authenticated page
+//   - PortalPosts: LinkedIn posts grid + edit modal + regen confirmation
+//   - PortalInbox: replies table + reply detail + compose
+//   - PortalCampaigns: read-only campaign list with stats
+//   - PortalSettings: change password, manage users, view branding
+// ─────────────────────────────────────────────────────────────────────────────
+import React, { useState, useEffect, useMemo } from 'react';
+
+// Brand colours — match the admin Studio for visual consistency.
+const TGA_GREEN     = '#0e3b2d';
+const TGA_GREEN_HI  = '#14a37e';
+const TGA_GREEN_LO  = '#7fbfa1';
+const TEXT          = '#1a1a1a';
+const MUTED         = '#5f5e5a';
+const TERTIARY_TEXT = '#888780';
+const BORDER        = '#e5e3dd';
+const CARD          = '#ffffff';
+const BG            = '#f5f5f3';
+const BLUE          = '#185FA5';
+const BLUE_BG       = '#E6F1FB';
+const DANGER        = '#A32D2D';
+const GREEN         = '#0F6E56';
+const GREEN_BG      = '#E1F5EE';
+const AMBER         = '#854F0B';
+const AMBER_BG      = '#FAEEDA';
+
+// ── MOCK DATA ────────────────────────────────────────────────────────────────
+// These get replaced with fetch calls in the backend chat. The shapes here
+// are what the API will need to return.
+
+const mockClient = {
+  slug: 'tower-leasing',
+  name: 'Tower Leasing',
+  audience: 'Asset finance · authority brand',
+  logo_initial: 'TL',
+  logo_color: '#1a4d8c',
+};
+
+const mockUser = {
+  id: 'u_1',
+  username: 'andrea-tower',
+  email: 'andrea@tower.co.uk',
+  role: 'admin',
+};
+
+const mockPosts = Array.from({ length: 12 }).map((_, i) => ({
+  id: `post_${i + 1}`,
+  order: i + 1,
+  scheduled_for: ['Tue 08:00', 'Thu 08:30', 'Fri 09:00', 'Mon 08:00', 'Wed 09:30',
+                  'Thu 08:00', 'Mon 09:00', 'Wed 08:30', 'Fri 09:00', 'Tue 08:30',
+                  'Thu 09:00', 'Mon 08:30'][i],
+  category: ['Authority', 'Authority', 'Education', 'Commercial', 'Education',
+             'Authority', 'Commercial', 'Education', 'Authority', 'Commercial',
+             'Education', 'Authority'][i],
+  title: ['Cost of delay — real numbers',
+          'Banks assess SMEs like spreadsheets',
+          'How asset finance actually works',
+          'Objection handling — debt is risky',
+          'Six-month window to act',
+          'Hidden cost of waiting',
+          'When leasing beats cash',
+          'Reading the fine print',
+          'What the FD won\'t tell you',
+          'A simple test before you sign',
+          'The depreciation curve',
+          'One question to ask your accountant'][i],
+  body: 'A manufacturing business I spoke to last month had a packaging line that kept jamming.\n\nThree months of overtime. Missed delivery windows. A major client starting to look elsewhere.\n\nThey could have replaced it for £80k. They didn\'t. The cost of delay was £500k.\n\nMost SMEs underestimate the cost of doing nothing. The real risk isn\'t the new investment — it\'s the lost revenue from holding off.',
+  image_color: ['#1a3a4d', '#4d2a1a', '#2a4d2a', '#4d1a3a', '#3a4d1a',
+                '#1a4d3a', '#4d3a1a', '#1a3a4d', '#3a1a4d', '#4d1a2a',
+                '#1a4d2a', '#2a1a4d'][i],
+  approved: i < 3,  // first 3 are approved in the demo
+}));
+
+const mockReplies = [
+  { id: 'r1', from_name: 'Nikhil Mundada', from_addr: 'nik@fronthunt-australia.com', subject: 'Streamlining your home sale process — quick question', snippet: 'Thanks for reaching out — could you share a bit more about how this would integrate with our existing CRM?', received_at: '2026-04-29T10:23:00Z', classification: 'positive', auto_unsubscribed: false, campaign_title: 'Q1 Asset finance authority', step_number: 2 },
+  { id: 'r2', from_name: 'Jinsong Guo',     from_addr: 'jinsong@unlimidata.co',       subject: 'Logo design process — a few clarifications needed', snippet: 'Yes, very interested. Can we book in a 20 minute call this week?', received_at: '2026-04-29T08:11:00Z', classification: 'positive', auto_unsubscribed: false, campaign_title: 'Q1 Asset finance authority', step_number: 1 },
+  { id: 'r3', from_name: 'Cole',             from_addr: 'cole@formspree.io',          subject: 'Route your submissions with form rules', snippet: 'Please remove me from this list. Not interested.', received_at: '2026-05-03T14:50:00Z', classification: 'hard_negative', auto_unsubscribed: true, campaign_title: 'Q1 Asset finance authority', step_number: 1 },
+  { id: 'r4', from_name: 'Google',           from_addr: 'no-reply@accounts.google.com',subject: 'Security alert', snippet: 'A new sign-in was detected on your Google account.', received_at: '2026-05-06T07:33:00Z', classification: 'neutral', auto_unsubscribed: false, campaign_title: null, step_number: null },
+  { id: 'r5', from_name: 'Lauren Squitieri', from_addr: 'lauren@joincubesoftware.com', subject: 'Boost your lead game — automated emails', snippet: 'Out of office until 8 May.', received_at: '2026-04-30T09:00:00Z', classification: 'auto_reply', auto_unsubscribed: false, campaign_title: 'Q1 Asset finance authority', step_number: 1 },
+];
+
+const mockCampaigns = [
+  { id: 'c1', title: 'Q1 Asset finance authority', status: 'sending', sent: 412, queued: 123, opens: 12, clicks: 3, replies: 7, tracking_off: false, started_at: '2026-04-12' },
+  { id: 'c2', title: 'Q4 Construction sector',     status: 'sent',    sent: 535, queued: 0,   opens: 0,  clicks: 0, replies: 9, tracking_off: true,  started_at: '2026-01-08' },
+  { id: 'c3', title: 'Hospitality decision-maker outreach', status: 'sent', sent: 300, queued: 0, opens: 0, clicks: 0, replies: 8, tracking_off: true,  started_at: '2025-11-20' },
+];
+
+// Aggregate stats — what the dashboard headline shows.
+function aggregateStats(campaigns) {
+  const sent = campaigns.reduce((a, c) => a + c.sent, 0);
+  const trackable = campaigns.filter(c => !c.tracking_off).reduce((a, c) => a + c.sent, 0);
+  const opens = campaigns.reduce((a, c) => a + c.opens, 0);
+  const clicks = campaigns.reduce((a, c) => a + c.clicks, 0);
+  const replies = campaigns.reduce((a, c) => a + c.replies, 0);
+  const untracked = sent - trackable;
+  const openRate  = trackable > 0 ? Math.round((opens / trackable) * 1000) / 10 : 0;
+  const clickRate = trackable > 0 ? Math.round((clicks / trackable) * 1000) / 10 : 0;
+  return { sent, trackable, opens, clicks, replies, untracked, openRate, clickRate };
+}
+
+// ── ROOT ─────────────────────────────────────────────────────────────────────
+export default function PortalApp({ slug }) {
+  // null = checking session, false = need login, object = authenticated user
+  const [authUser, setAuthUser] = useState(null);
+  const [client, setClient]     = useState(null);
+
+  // Mock auth check. In the backend chat this calls /api/portal/auth/check.
+  useEffect(() => {
+    // TODO(backend): replace with `fetch('/api/portal/auth/check')`
+    const stored = localStorage.getItem(`portalUser:${slug}`);
+    if (stored) {
+      try {
+        setAuthUser(JSON.parse(stored));
+        setClient(mockClient);
+      } catch { setAuthUser(false); }
+    } else {
+      setAuthUser(false);
+    }
+  }, [slug]);
+
+  function handleLogin(user) {
+    localStorage.setItem(`portalUser:${slug}`, JSON.stringify(user));
+    setAuthUser(user);
+    setClient(mockClient);
+  }
+  function handleLogout() {
+    localStorage.removeItem(`portalUser:${slug}`);
+    setAuthUser(false);
+    setClient(null);
+  }
+
+  if (authUser === null) {
+    return (
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100vh', background:BG }}>
+        <div style={{ width:32, height:32, border:`3px solid ${TGA_GREEN_HI}`, borderTopColor:'transparent', borderRadius:'50%', animation:'spin 0.8s linear infinite' }} />
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    return <PortalLogin slug={slug} onLogin={handleLogin} />;
+  }
+
+  return <PortalChrome user={authUser} client={client} onLogout={handleLogout} />;
+}
+
+// ── LOGIN ────────────────────────────────────────────────────────────────────
+function PortalLogin({ slug, onLogin }) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy]         = useState(false);
+  const [err, setErr]           = useState('');
+
+  // Mock client lookup so we can show the customer name in the subtitle even
+  // before login. Backend will resolve this from /api/portal/by-slug/:slug.
+  const clientName = useMemo(() => {
+    if (slug === mockClient.slug) return mockClient.name;
+    return slug.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' ');
+  }, [slug]);
+
+  async function submit(e) {
+    e?.preventDefault();
+    if (!username || !password) {
+      setErr('Username and password required');
+      return;
+    }
+    setBusy(true); setErr('');
+    // TODO(backend): replace this block with
+    //   const r = await fetch('/api/portal/auth/login', {
+    //     method:'POST', headers:{'Content-Type':'application/json'},
+    //     body: JSON.stringify({ slug, username, password })
+    //   });
+    //   const d = await r.json();
+    //   if (!d.ok) { setErr(d.error || 'Invalid credentials'); setBusy(false); return; }
+    //   onLogin(d.user);
+    await new Promise(r => setTimeout(r, 500));
+    onLogin({ ...mockUser, username });
+  }
+
+  return (
+    <div style={{ minHeight:'100vh', background:BG, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
+      <form onSubmit={submit} style={{
+        maxWidth:400, width:'100%', padding:'32px 28px',
+        background:CARD, borderRadius:12, border:`0.5px solid ${BORDER}`,
+      }}>
+        <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:28 }}>
+          <div style={{
+            width:36, height:36, borderRadius:8, background:TGA_GREEN_HI,
+            color:'white', display:'flex', alignItems:'center', justifyContent:'center',
+            fontSize:16, fontWeight:500,
+          }}>G</div>
+          <div>
+            <div style={{ fontSize:18, fontWeight:500, color:TEXT }}>The Green Agents</div>
+            <div style={{ fontSize:12, color:MUTED, marginTop:2 }}>Studio · {clientName} portal</div>
+          </div>
+        </div>
+
+        <Field label="Username">
+          <input type="text" value={username} onChange={e => setUsername(e.target.value)}
+            autoFocus disabled={busy}
+            placeholder="your username"
+            style={loginInputStyle()}
+          />
+        </Field>
+
+        <Field label="Password">
+          <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+            disabled={busy}
+            style={loginInputStyle()}
+          />
+        </Field>
+
+        {err && <div style={{ color:DANGER, fontSize:12, marginTop:8 }}>{err}</div>}
+
+        <button type="submit" disabled={busy} style={{
+          width:'100%', padding:10, fontSize:13, fontWeight:500,
+          background: busy ? TGA_GREEN_LO : TGA_GREEN_HI, color:'white',
+          border:'none', borderRadius:8, cursor: busy ? 'default' : 'pointer',
+          marginTop:12,
+        }}>{busy ? 'Signing in…' : 'Sign in'}</button>
+
+        <a onClick={() => alert('Password reset will email you a reset link. (Wired up in next chat.)')}
+          style={{ display:'block', textAlign:'center', marginTop:14, fontSize:12, color:BLUE, cursor:'pointer' }}
+        >Forgot password?</a>
+      </form>
+    </div>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <div style={{ marginBottom:12 }}>
+      <label style={{ display:'block', fontSize:12, color:MUTED, marginBottom:4 }}>{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function loginInputStyle() {
+  return {
+    width:'100%', boxSizing:'border-box', padding:'9px 10px', fontSize:13,
+    border:`0.5px solid ${BORDER}`, borderRadius:8, outline:'none',
+    color:TEXT, background:CARD,
+  };
+}
+
+// ── CHROME (sidebar + header + page router) ──────────────────────────────────
+function PortalChrome({ user, client, onLogout }) {
+  const [page, setPage] = useState('posts');  // posts | inbox | campaigns | settings
+
+  return (
+    <div style={{ display:'flex', height:'100vh', background:BG, fontFamily:'-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }}>
+      {/* Sidebar */}
+      <aside style={{
+        width:200, background:TGA_GREEN, color:TGA_GREEN_LO,
+        padding:'20px 14px', display:'flex', flexDirection:'column', gap:24,
+        flexShrink:0,
+      }}>
+        <div style={{ display:'flex', alignItems:'center', gap:9 }}>
+          <div style={{
+            width:28, height:28, borderRadius:6, background:TGA_GREEN_HI,
+            color:'white', display:'flex', alignItems:'center', justifyContent:'center',
+            fontSize:13, fontWeight:500,
+          }}>G</div>
+          <div>
+            <div style={{ fontSize:13, fontWeight:500, color:'white', lineHeight:1.2 }}>The Green Agents</div>
+            <div style={{ fontSize:11, color:TGA_GREEN_LO }}>Studio</div>
+          </div>
+        </div>
+
+        <div>
+          <div style={navSectionStyle()}>Workspace</div>
+          <NavItem label="LinkedIn Posts" active={page==='posts'}     onClick={() => setPage('posts')} />
+          <NavItem label="Inbox"          active={page==='inbox'}     onClick={() => setPage('inbox')} />
+          <NavItem label="Campaigns"      active={page==='campaigns'} onClick={() => setPage('campaigns')} />
+          <NavItem label="Settings"       active={page==='settings'}  onClick={() => setPage('settings')} />
+        </div>
+
+        <div style={{ flex:1 }} />
+
+        <div onClick={onLogout} style={{ fontSize:12, color:TGA_GREEN_LO, padding:'6px 8px', cursor:'pointer' }}>
+          Sign out
+        </div>
+      </aside>
+
+      {/* Workspace */}
+      <main style={{ flex:1, display:'flex', flexDirection:'column', minWidth:0 }}>
+        <header style={{
+          padding:'14px 22px', borderBottom:`0.5px solid ${BORDER}`,
+          display:'flex', alignItems:'center', gap:14, background:CARD,
+        }}>
+          <div style={{
+            width:38, height:38, borderRadius:7, background:client?.logo_color || '#1a4d8c',
+            color:'white', display:'flex', alignItems:'center', justifyContent:'center',
+            fontSize:14, fontWeight:500, flexShrink:0,
+          }}>{client?.logo_initial || 'C'}</div>
+          <div>
+            <div style={{ fontSize:15, fontWeight:500, color:TEXT }}>{client?.name}</div>
+            <div style={{ fontSize:11, color:MUTED }}>{client?.audience}</div>
+          </div>
+          <div style={{
+            marginLeft:'auto', padding:'5px 10px', fontSize:11, color:MUTED,
+            border:`0.5px solid ${BORDER}`, borderRadius:999,
+          }}>{user.email || user.username}</div>
+        </header>
+
+        <div style={{ flex:1, overflow:'auto', padding:'20px 22px' }}>
+          {page === 'posts'     && <PortalPosts />}
+          {page === 'inbox'     && <PortalInbox />}
+          {page === 'campaigns' && <PortalCampaigns />}
+          {page === 'settings'  && <PortalSettings user={user} />}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function navSectionStyle() {
+  return {
+    fontSize:10, textTransform:'uppercase', letterSpacing:'0.08em',
+    color:TGA_GREEN_LO, margin:'0 0 8px', padding:'0 8px',
+  };
+}
+
+function NavItem({ label, active, onClick }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div onClick={onClick}
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      style={{
+        display:'flex', alignItems:'center', gap:8, padding:'7px 8px', fontSize:13,
+        color: active ? 'white' : TGA_GREEN_LO,
+        background: active ? 'rgba(255,255,255,0.08)' : (hover ? 'rgba(255,255,255,0.04)' : 'transparent'),
+        borderRadius:6, cursor:'pointer', userSelect:'none',
+      }}
+    >{label}</div>
+  );
+}
+
+// ── POSTS PAGE ───────────────────────────────────────────────────────────────
+function PortalPosts() {
+  const [posts, setPosts] = useState(mockPosts);
+  const [editing, setEditing] = useState(null);  // post object being edited
+  const [regenConfirm, setRegenConfirm] = useState(null);  // post object pending regen
+
+  const approvedCount = posts.filter(p => p.approved).length;
+  const allApproved = approvedCount === posts.length;
+
+  function approveOne(id) {
+    setPosts(prev => prev.map(p => p.id === id ? { ...p, approved: true } : p));
+    // TODO(backend): POST /api/portal/posts/:id/approve
+  }
+  function approveAllRemaining() {
+    if (!confirm(`Approve all ${posts.length - approvedCount} remaining posts?`)) return;
+    setPosts(prev => prev.map(p => ({ ...p, approved: true })));
+    // TODO(backend): POST /api/portal/campaigns/:id/posts/approve-all
+  }
+  function saveEdit(id, newBody, newTitle) {
+    setPosts(prev => prev.map(p => p.id === id ? { ...p, body: newBody, title: newTitle, approved: true } : p));
+    setEditing(null);
+    // TODO(backend): PUT /api/portal/posts/:id  body: { title, body }
+    //   server marks the post approved=true on save (per the spec — edit + save = ready)
+  }
+  function regenPost(id) {
+    setPosts(prev => prev.map(p => p.id === id ? {
+      ...p,
+      title: 'Regenerating…',
+      body:  '(new content will appear in a few seconds)',
+      approved: false,
+    } : p));
+    setRegenConfirm(null);
+    // TODO(backend): POST /api/portal/posts/:id/regenerate
+    //   - returns { post: { ...new fields } }
+    //   - this triggers Gemini text + image regen
+    //   - on success, replace the post in state
+    setTimeout(() => {
+      setPosts(prev => prev.map(p => p.id === id ? {
+        ...p,
+        title: 'Fresh take — fully regenerated',
+        body:  'New text and a new image have been generated. Review and approve when ready.',
+      } : p));
+    }, 1200);
+  }
+
+  return (
+    <div>
+      <h2 style={pageTitle()}>LinkedIn Posts — review &amp; approve</h2>
+      <p style={pageSub()}>
+        {posts.length} posts ready for your review. Edit text, regenerate any post, or approve.
+        Order shown is the order they'll publish.
+      </p>
+
+      {/* Approval progress bar */}
+      <div style={{
+        display:'flex', alignItems:'center', gap:10, padding:'10px 14px',
+        background: allApproved ? GREEN_BG : BLUE_BG,
+        color:      allApproved ? GREEN    : BLUE,
+        borderRadius:8, marginBottom:16, fontSize:12,
+      }}>
+        <strong style={{ fontWeight:500 }}>{approvedCount} of {posts.length} approved.</strong>
+        {!allApproved && <span>Once all {posts.length} are approved, posts go live in this order.</span>}
+        {allApproved  && <span>All posts approved — they'll go live in the scheduled order.</span>}
+        {!allApproved && (
+          <button onClick={approveAllRemaining} style={{
+            marginLeft:'auto', padding:'6px 12px', background:TGA_GREEN_HI, color:'white',
+            border:'none', borderRadius:6, fontSize:12, cursor:'pointer', fontWeight:500,
+          }}>Approve all remaining</button>
+        )}
+      </div>
+
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+        {posts.map(p => (
+          <PostCard key={p.id} post={p}
+            onEdit={() => setEditing(p)}
+            onRegen={() => setRegenConfirm(p)}
+            onApprove={() => approveOne(p.id)}
+          />
+        ))}
+      </div>
+
+      {editing && (
+        <EditPostModal
+          post={editing}
+          onClose={() => setEditing(null)}
+          onSave={saveEdit}
+        />
+      )}
+
+      {regenConfirm && (
+        <Modal title="Regenerate this post?" onClose={() => setRegenConfirm(null)}>
+          <p style={{ fontSize:13, color:TEXT, lineHeight:1.5, margin:'0 0 16px' }}>
+            This discards the current text and image and generates fresh ones using AI. The post
+            will need re-approval. This can't be undone.
+          </p>
+          <div style={{ display:'flex', justifyContent:'flex-end', gap:8 }}>
+            <BtnSecondary onClick={() => setRegenConfirm(null)}>Cancel</BtnSecondary>
+            <BtnPrimary onClick={() => regenPost(regenConfirm.id)}>Regenerate</BtnPrimary>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function PostCard({ post, onEdit, onRegen, onApprove }) {
+  return (
+    <div style={{
+      background:CARD, borderRadius:8, border:`0.5px solid ${BORDER}`, overflow:'hidden',
+    }}>
+      <div style={{
+        aspectRatio:'1.91/1', background:post.image_color, color:'#d0e6f0',
+        display:'flex', alignItems:'center', justifyContent:'center', fontSize:11,
+        position:'relative',
+      }}>
+        <span style={{
+          position:'absolute', top:8, left:8,
+          background:'rgba(0,0,0,0.4)', color:'white', padding:'1px 6px',
+          borderRadius:3, fontSize:10,
+        }}>image</span>
+      </div>
+      <div style={{ padding:'11px 12px' }}>
+        <div style={{
+          display:'flex', justifyContent:'space-between', alignItems:'center',
+          marginBottom:4, fontSize:11, color:MUTED,
+        }}>
+          <span style={{
+            padding:'1px 6px', background:BLUE_BG, color:BLUE,
+            borderRadius:4, fontSize:10, fontWeight:500,
+          }}>Post {post.order} of 12</span>
+          <span>{post.scheduled_for}</span>
+        </div>
+        <p style={{ fontSize:13, fontWeight:500, margin:'0 0 4px', lineHeight:1.3, color:TEXT }}>{post.title}</p>
+        <p style={{
+          fontSize:11, color:MUTED, lineHeight:1.4, margin:'0 0 10px',
+          display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden',
+        }}>{post.body.split('\n')[0]}</p>
+        <div style={{ display:'flex', gap:5 }}>
+          <button onClick={onEdit} style={cardBtn()}>Edit</button>
+          <button onClick={onRegen} style={cardBtn(DANGER)}>Regen</button>
+          {post.approved
+            ? <button disabled style={{ ...cardBtn(), background:TGA_GREEN_HI, color:'white', borderColor:TGA_GREEN_HI, cursor:'default' }}>✓ Approved</button>
+            : <button onClick={onApprove} style={cardBtn()}>Approve</button>
+          }
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function cardBtn(color) {
+  return {
+    flex:1, padding:5, fontSize:11, border:`0.5px solid ${BORDER}`,
+    background:'transparent', color: color || TEXT, borderRadius:5, cursor:'pointer',
+  };
+}
+
+// ── EDIT MODAL ───────────────────────────────────────────────────────────────
+function EditPostModal({ post, onClose, onSave }) {
+  const [title, setTitle] = useState(post.title);
+  const [body, setBody]   = useState(post.body);
+
+  return (
+    <Modal title="Edit post" onClose={onClose} wide>
+      <div style={{ display:'grid', gridTemplateColumns:'180px 1fr', gap:18 }}>
+        <div>
+          <div style={{ fontSize:11, color:MUTED, marginBottom:6 }}>Image (read-only)</div>
+          <div style={{
+            aspectRatio:'1.91/1', background:post.image_color, borderRadius:6,
+            display:'flex', alignItems:'center', justifyContent:'center',
+            color:'#d0e6f0', fontSize:11,
+          }}>image</div>
+          <div style={{ fontSize:11, color:TERTIARY_TEXT, marginTop:8, lineHeight:1.4 }}>
+            Want a new image? Cancel and click <strong style={{ color:TEXT }}>Regen</strong> on the
+            post — that regenerates both text and image.
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize:11, color:MUTED, marginBottom:4 }}>Title</div>
+          <input value={title} onChange={e => setTitle(e.target.value)} autoFocus
+            style={{ ...loginInputStyle(), marginBottom:14 }}
+          />
+          <div style={{ fontSize:11, color:MUTED, marginBottom:4 }}>Body</div>
+          <textarea value={body} onChange={e => setBody(e.target.value)}
+            style={{
+              ...loginInputStyle(),
+              fontFamily:'inherit', minHeight:240, resize:'vertical', lineHeight:1.5,
+            }}
+          />
+          <div style={{ fontSize:11, color:TERTIARY_TEXT, marginTop:6 }}>
+            Saving marks this post approved. To go back to draft, click <strong style={{ color:TEXT }}>Regen</strong> instead.
+          </div>
+        </div>
+      </div>
+      <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginTop:18 }}>
+        <BtnSecondary onClick={onClose}>Cancel</BtnSecondary>
+        <BtnPrimary onClick={() => onSave(post.id, body, title)}>Save &amp; approve</BtnPrimary>
+      </div>
+    </Modal>
+  );
+}
+
+// ── INBOX PAGE ───────────────────────────────────────────────────────────────
+function PortalInbox() {
+  const stats = aggregateStats(mockCampaigns);
+  const [openReply, setOpenReply] = useState(null);
+  const [composing, setComposing] = useState(null);  // reply object being replied to
+
+  return (
+    <div>
+      <h2 style={pageTitle()}>Email campaigns</h2>
+      <p style={pageSub()}>Across all campaigns sent for your account.</p>
+
+      {/* Stats */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:10, marginBottom:16 }}>
+        <StatCard label="Sent"    value={stats.sent.toLocaleString()} />
+        <StatCard label="Opens"   value={stats.opens}   sub={`${stats.openRate}% across ${stats.trackable.toLocaleString()} trackable`} />
+        <StatCard label="Clicks"  value={stats.clicks}  sub={`${stats.clickRate}% across ${stats.trackable.toLocaleString()} trackable`} />
+        <StatCard label="Replies" value={stats.replies} sub={`${mockReplies.filter(r => r.classification==='positive').length} marked positive`} />
+      </div>
+
+      {/* Trackability note */}
+      {stats.untracked > 0 && (
+        <div style={{
+          padding:'10px 12px', background:BLUE_BG, color:BLUE,
+          borderRadius:8, fontSize:12, marginBottom:16, lineHeight:1.5,
+        }}>
+          <strong style={{ fontWeight:500 }}>{stats.untracked.toLocaleString()} sends had tracking disabled to maximise inbox deliverability.</strong>
+          {' '}Open and click rates above are calculated from the {stats.trackable.toLocaleString()} trackable sends.
+        </div>
+      )}
+
+      {/* Replies table */}
+      <div style={{
+        background:CARD, borderRadius:8, border:`0.5px solid ${BORDER}`, overflow:'hidden',
+      }}>
+        <div style={{
+          fontSize:11, color:MUTED, textTransform:'uppercase', letterSpacing:'0.06em',
+          padding:'14px 14px 8px', borderBottom:`0.5px solid ${BORDER}`,
+        }}>Recent replies — click to read &amp; reply</div>
+        {mockReplies.map(r => (
+          <ReplyRow key={r.id} reply={r} onClick={() => setOpenReply(r)} />
+        ))}
+      </div>
+
+      {openReply && !composing && (
+        <ReplyDetailModal reply={openReply}
+          onClose={() => setOpenReply(null)}
+          onCompose={() => setComposing(openReply)}
+        />
+      )}
+      {composing && (
+        <ComposeReplyModal reply={composing}
+          onClose={() => setComposing(null)}
+          onSend={(payload) => {
+            alert(`(Demo) Send: ${payload.body.slice(0,60)}...\nCC: ${payload.cc || '(none)'}`);
+            setComposing(null);
+            setOpenReply(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value, sub }) {
+  return (
+    <div style={{ padding:'12px 14px', background:'#f1efe8', borderRadius:8 }}>
+      <p style={{ fontSize:11, color:MUTED, textTransform:'uppercase', letterSpacing:'0.04em', margin:'0 0 4px' }}>{label}</p>
+      <p style={{ fontSize:20, fontWeight:500, margin:0, color:TEXT }}>{value}</p>
+      {sub && <p style={{ fontSize:11, color:MUTED, margin:'2px 0 0' }}>{sub}</p>}
+    </div>
+  );
+}
+
+function ReplyRow({ reply, onClick }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div onClick={onClick}
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      style={{
+        display:'grid', gridTemplateColumns:'220px 1fr 90px 90px',
+        gap:10, alignItems:'center', padding:'10px 14px',
+        borderBottom:`0.5px solid ${BORDER}`, fontSize:12, cursor:'pointer',
+        background: hover ? '#fafaf8' : 'transparent',
+      }}
+    >
+      <div style={{ fontWeight:500, color:TEXT, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+        {reply.from_name}
+        <div style={{ fontWeight:400, color:TERTIARY_TEXT, fontSize:11 }}>{reply.from_addr}</div>
+      </div>
+      <div style={{ color:MUTED, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+        <div style={{ color:TEXT, marginBottom:2 }}>{reply.subject}</div>
+        <div>{reply.snippet}</div>
+      </div>
+      <ClassifyBadge reply={reply} />
+      <div style={{ color:TERTIARY_TEXT, fontSize:11, textAlign:'right' }}>{relTime(reply.received_at)}</div>
+    </div>
+  );
+}
+
+function ClassifyBadge({ reply }) {
+  if (reply.auto_unsubscribed) return <span style={{ ...badgeStyle(), background:AMBER_BG, color:AMBER }}>Unsub'd</span>;
+  if (reply.classification === 'positive') return <span style={{ ...badgeStyle(), background:GREEN_BG, color:GREEN }}>Prospect</span>;
+  if (reply.classification === 'auto_reply') return <span style={{ ...badgeStyle(), background:'#f4f1e8', color:MUTED }}>OOO</span>;
+  return <span style={{ ...badgeStyle(), background:'#f4f1e8', color:MUTED }}>Neutral</span>;
+}
+
+function badgeStyle() {
+  return {
+    fontSize:10, padding:'2px 7px', borderRadius:4, textAlign:'center',
+    fontWeight:500, display:'inline-block',
+  };
+}
+
+// ── REPLY DETAIL MODAL ───────────────────────────────────────────────────────
+function ReplyDetailModal({ reply, onClose, onCompose }) {
+  return (
+    <Modal title="Reply" onClose={onClose} wide>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:14 }}>
+        <div>
+          <div style={{ fontSize:14, fontWeight:500, color:TEXT }}>{reply.from_name}</div>
+          <div style={{ fontSize:12, color:MUTED }}>{reply.from_addr}</div>
+        </div>
+        <ClassifyBadge reply={reply} />
+      </div>
+      <div style={{ fontSize:13, color:TEXT, marginBottom:6 }}>{reply.subject}</div>
+      <div style={{ fontSize:11, color:MUTED, marginBottom:14 }}>
+        Received {relTime(reply.received_at)}
+        {reply.campaign_title && <> · in reply to <em>{reply.campaign_title}</em>{reply.step_number ? ` (step ${reply.step_number})` : ''}</>}
+      </div>
+      <div style={{
+        padding:14, background:'#fafaf8', borderRadius:6, fontSize:13,
+        color:TEXT, lineHeight:1.6, marginBottom:18, whiteSpace:'pre-wrap',
+      }}>{reply.snippet}{'\n\n— End of message —'}</div>
+      <div style={{ display:'flex', justifyContent:'flex-end', gap:8 }}>
+        <BtnSecondary onClick={onClose}>Close</BtnSecondary>
+        <BtnPrimary onClick={onCompose}>Reply</BtnPrimary>
+      </div>
+    </Modal>
+  );
+}
+
+// ── COMPOSE REPLY ────────────────────────────────────────────────────────────
+function ComposeReplyModal({ reply, onClose, onSend }) {
+  const [cc, setCc]     = useState('');
+  const [body, setBody] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  function send() {
+    if (!body.trim()) return;
+    setBusy(true);
+    // TODO(backend): POST /api/portal/replies/:id/send  body: { cc, body }
+    //   - server uses SES with proper In-Reply-To / References headers
+    //   - server stores the sent reply in email_sends or a new email_outbound table
+    //   - on success returns { ok: true }
+    setTimeout(() => onSend({ cc: cc.trim(), body }), 400);
+  }
+
+  return (
+    <Modal title={`Reply to ${reply.from_name}`} onClose={() => !busy && onClose()} wide>
+      <div style={{ fontSize:11, color:MUTED, marginBottom:10 }}>
+        To: <strong style={{ color:TEXT, fontWeight:500 }}>{reply.from_addr}</strong> ·
+        {' '}Subject: <strong style={{ color:TEXT, fontWeight:500 }}>Re: {reply.subject}</strong>
+      </div>
+
+      <Field label="CC (optional)">
+        <input type="text" value={cc} onChange={e => setCc(e.target.value)}
+          placeholder="someone@yourcompany.co.uk"
+          disabled={busy}
+          style={loginInputStyle()}
+        />
+      </Field>
+
+      <Field label="Your reply">
+        <textarea value={body} onChange={e => setBody(e.target.value)}
+          autoFocus disabled={busy}
+          placeholder="Type your reply…"
+          style={{
+            ...loginInputStyle(),
+            fontFamily:'inherit', minHeight:200, resize:'vertical', lineHeight:1.5,
+          }}
+        />
+      </Field>
+
+      <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginTop:14 }}>
+        <BtnSecondary onClick={onClose} disabled={busy}>Cancel</BtnSecondary>
+        <BtnPrimary onClick={send} disabled={busy || !body.trim()}>{busy ? 'Sending…' : 'Send reply'}</BtnPrimary>
+      </div>
+    </Modal>
+  );
+}
+
+// ── CAMPAIGNS PAGE (read-only) ───────────────────────────────────────────────
+function PortalCampaigns() {
+  const stats = aggregateStats(mockCampaigns);
+
+  return (
+    <div>
+      <h2 style={pageTitle()}>Campaigns</h2>
+      <p style={pageSub()}>Read-only view of every email campaign we've run for your account.</p>
+
+      {/* Aggregate strip — same numbers as Inbox dashboard, shown here for context */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:10, marginBottom:16 }}>
+        <StatCard label="Total campaigns"  value={mockCampaigns.length} />
+        <StatCard label="Total sent"       value={stats.sent.toLocaleString()} />
+        <StatCard label="Replies received" value={stats.replies} />
+        <StatCard label="Currently sending" value={mockCampaigns.filter(c => c.status === 'sending').length} />
+      </div>
+
+      <div style={{
+        background:CARD, borderRadius:8, border:`0.5px solid ${BORDER}`, overflow:'hidden',
+      }}>
+        <div style={{
+          display:'grid', gridTemplateColumns:'2fr 100px 80px 80px 80px 80px 100px',
+          gap:10, alignItems:'center', padding:'10px 14px',
+          borderBottom:`0.5px solid ${BORDER}`,
+          fontSize:11, color:MUTED, textTransform:'uppercase', letterSpacing:'0.04em',
+        }}>
+          <div>Campaign</div>
+          <div>Status</div>
+          <div style={{ textAlign:'right' }}>Sent</div>
+          <div style={{ textAlign:'right' }}>Opens</div>
+          <div style={{ textAlign:'right' }}>Clicks</div>
+          <div style={{ textAlign:'right' }}>Replies</div>
+          <div style={{ textAlign:'right' }}>Started</div>
+        </div>
+        {mockCampaigns.map(c => (
+          <div key={c.id} style={{
+            display:'grid', gridTemplateColumns:'2fr 100px 80px 80px 80px 80px 100px',
+            gap:10, alignItems:'center', padding:'10px 14px',
+            borderBottom:`0.5px solid ${BORDER}`, fontSize:12, color:TEXT,
+          }}>
+            <div style={{ fontWeight:500 }}>{c.title}</div>
+            <div>
+              <span style={{
+                ...badgeStyle(),
+                background: c.status === 'sending' ? BLUE_BG : '#f4f1e8',
+                color:      c.status === 'sending' ? BLUE : MUTED,
+              }}>{c.status === 'sending' ? 'Sending' : 'Sent'}</span>
+            </div>
+            <div style={{ textAlign:'right' }}>{c.sent.toLocaleString()}</div>
+            <div style={{ textAlign:'right', color: c.tracking_off ? TERTIARY_TEXT : TEXT }}>
+              {c.tracking_off ? '—' : c.opens}
+            </div>
+            <div style={{ textAlign:'right', color: c.tracking_off ? TERTIARY_TEXT : TEXT }}>
+              {c.tracking_off ? '—' : c.clicks}
+            </div>
+            <div style={{ textAlign:'right', color: c.replies > 0 ? GREEN : TEXT, fontWeight: c.replies > 0 ? 500 : 400 }}>
+              {c.replies}
+            </div>
+            <div style={{ textAlign:'right', color:MUTED, fontSize:11 }}>
+              {new Date(c.started_at).toLocaleDateString('en-GB', { day:'numeric', month:'short' })}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {mockCampaigns.some(c => c.tracking_off) && (
+        <div style={{
+          marginTop:12, padding:'10px 12px', background:BLUE_BG, color:BLUE,
+          borderRadius:8, fontSize:12, lineHeight:1.5,
+        }}>
+          <strong style={{ fontWeight:500 }}>—</strong>{' '}
+          means open/click tracking was disabled for that campaign to maximise inbox deliverability.
+          Reply numbers are still accurate for those campaigns.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── SETTINGS PAGE ────────────────────────────────────────────────────────────
+function PortalSettings({ user }) {
+  const [pw1, setPw1]       = useState('');
+  const [pw2, setPw2]       = useState('');
+  const [pwOld, setPwOld]   = useState('');
+  const [savingPw, setSavingPw] = useState(false);
+  const [pwMsg, setPwMsg]   = useState(null);
+
+  async function changePassword() {
+    if (!pwOld || !pw1 || !pw2) { setPwMsg({ ok:false, text:'All fields required' }); return; }
+    if (pw1 !== pw2) { setPwMsg({ ok:false, text:'New passwords don\'t match' }); return; }
+    if (pw1.length < 8) { setPwMsg({ ok:false, text:'Password must be at least 8 characters' }); return; }
+    setSavingPw(true); setPwMsg(null);
+    // TODO(backend): POST /api/portal/auth/change-password { old, new }
+    await new Promise(r => setTimeout(r, 500));
+    setSavingPw(false);
+    setPwOld(''); setPw1(''); setPw2('');
+    setPwMsg({ ok:true, text:'Password updated.' });
+  }
+
+  return (
+    <div>
+      <h2 style={pageTitle()}>Settings</h2>
+      <p style={pageSub()}>Manage your account and your organisation's users.</p>
+
+      <SettingsCard title="Change password">
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+          <Field label="Current password">
+            <input type="password" value={pwOld} onChange={e => setPwOld(e.target.value)} disabled={savingPw} style={loginInputStyle()} />
+          </Field>
+          <div />
+          <Field label="New password">
+            <input type="password" value={pw1} onChange={e => setPw1(e.target.value)} disabled={savingPw} style={loginInputStyle()} />
+          </Field>
+          <Field label="Confirm new password">
+            <input type="password" value={pw2} onChange={e => setPw2(e.target.value)} disabled={savingPw} style={loginInputStyle()} />
+          </Field>
+        </div>
+        {pwMsg && (
+          <div style={{ fontSize:12, color: pwMsg.ok ? GREEN : DANGER, marginBottom:10 }}>{pwMsg.text}</div>
+        )}
+        <BtnPrimary onClick={changePassword} disabled={savingPw}>{savingPw ? 'Saving…' : 'Update password'}</BtnPrimary>
+      </SettingsCard>
+
+      {user.role === 'admin' && (
+        <SettingsCard title="Organisation users">
+          <p style={{ fontSize:12, color:MUTED, margin:'0 0 12px' }}>
+            People at your company who can sign in to this portal. Only admins can add or remove users.
+          </p>
+          <div style={{ border:`0.5px solid ${BORDER}`, borderRadius:6, overflow:'hidden' }}>
+            <UserRow username="andrea-tower"  email="andrea@tower.co.uk" role="admin"  isYou />
+            <UserRow username="ben-marketing" email="ben@tower.co.uk"    role="viewer" />
+          </div>
+          <div style={{ marginTop:12 }}>
+            <BtnSecondary onClick={() => alert('(Demo) Add-user flow goes here.')}>+ Add user</BtnSecondary>
+          </div>
+        </SettingsCard>
+      )}
+
+      <SettingsCard title="Branding">
+        <p style={{ fontSize:12, color:MUTED, margin:'0 0 12px' }}>
+          Your logo and audience profile are managed by The Green Agents. Contact us if you need them updated.
+        </p>
+        <div style={{ display:'flex', alignItems:'center', gap:14, padding:'10px 12px', border:`0.5px solid ${BORDER}`, borderRadius:6 }}>
+          <div style={{
+            width:48, height:48, borderRadius:8, background:'#1a4d8c', color:'white',
+            display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, fontWeight:500,
+          }}>TL</div>
+          <div>
+            <div style={{ fontSize:13, fontWeight:500, color:TEXT }}>Tower Leasing</div>
+            <div style={{ fontSize:11, color:MUTED }}>Asset finance · authority brand</div>
+          </div>
+        </div>
+      </SettingsCard>
+    </div>
+  );
+}
+
+function SettingsCard({ title, children }) {
+  return (
+    <div style={{
+      background:CARD, borderRadius:8, border:`0.5px solid ${BORDER}`,
+      padding:'16px 18px', marginBottom:12,
+    }}>
+      <div style={{ fontSize:13, fontWeight:500, color:TEXT, marginBottom:12 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function UserRow({ username, email, role, isYou }) {
+  return (
+    <div style={{
+      display:'grid', gridTemplateColumns:'1fr 1fr 80px 80px',
+      gap:10, alignItems:'center', padding:'10px 12px',
+      borderBottom:`0.5px solid ${BORDER}`, fontSize:12,
+    }}>
+      <div>
+        <span style={{ color:TEXT, fontWeight:500 }}>{username}</span>
+        {isYou && <span style={{ color:TERTIARY_TEXT, fontSize:11, marginLeft:6 }}>(you)</span>}
+      </div>
+      <div style={{ color:MUTED }}>{email}</div>
+      <div>
+        <span style={{
+          ...badgeStyle(),
+          background: role === 'admin' ? BLUE_BG : '#f4f1e8',
+          color:      role === 'admin' ? BLUE : MUTED,
+        }}>{role}</span>
+      </div>
+      <div style={{ textAlign:'right' }}>
+        {!isYou && (
+          <a onClick={() => alert('(Demo) Remove user flow.')} style={{ color:DANGER, fontSize:11, cursor:'pointer' }}>Remove</a>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── SHARED PRIMITIVES ────────────────────────────────────────────────────────
+function pageTitle() { return { fontSize:18, fontWeight:500, margin:'0 0 4px', color:TEXT }; }
+function pageSub()   { return { fontSize:12, color:MUTED, margin:'0 0 16px' }; }
+
+function Modal({ title, onClose, children, wide }) {
+  return (
+    <div onClick={onClose} style={{
+      position:'fixed', inset:0, background:'rgba(0,0,0,0.45)',
+      display:'flex', alignItems:'center', justifyContent:'center',
+      zIndex:50, padding:20,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background:CARD, borderRadius:12, padding:'22px 26px',
+        maxWidth: wide ? 720 : 460, width:'100%',
+        maxHeight:'90vh', overflow:'auto',
+      }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
+          <h3 style={{ fontSize:15, fontWeight:500, margin:0, color:TEXT }}>{title}</h3>
+          <button onClick={onClose} style={{
+            background:'transparent', border:'none', fontSize:20, color:MUTED,
+            cursor:'pointer', lineHeight:1, padding:0,
+          }}>×</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function BtnPrimary({ children, onClick, disabled }) {
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      padding:'8px 14px', fontSize:13, fontWeight:500,
+      background: disabled ? TGA_GREEN_LO : TGA_GREEN_HI,
+      color:'white', border:'none', borderRadius:6,
+      cursor: disabled ? 'default' : 'pointer',
+    }}>{children}</button>
+  );
+}
+function BtnSecondary({ children, onClick, disabled }) {
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      padding:'8px 14px', fontSize:13,
+      background:CARD, color:TEXT, border:`0.5px solid ${BORDER}`, borderRadius:6,
+      cursor: disabled ? 'default' : 'pointer',
+    }}>{children}</button>
+  );
+}
+
+function relTime(iso) {
+  if (!iso) return '';
+  const ms = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}d ago`;
+  return new Date(iso).toLocaleDateString('en-GB', { day:'numeric', month:'short' });
+}

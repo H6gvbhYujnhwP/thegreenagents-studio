@@ -111,7 +111,7 @@ export default function Dashboard({ onLogout }) {
 
       <div style={{ flex:1, overflow:'auto', padding:28 }}>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:24 }}>
-          <h1 style={{ fontSize:20, fontWeight:500, color:'#1a1a1a' }}>Supergrow</h1>
+          <h1 style={{ fontSize:20, fontWeight:500, color:'#1a1a1a' }}>LinkedIn Posts</h1>
           <div style={{ display:'flex', gap:8 }}>
             <button
               onClick={briefRunning ? null : runAnalysis}

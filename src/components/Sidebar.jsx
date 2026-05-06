@@ -39,7 +39,7 @@ export default function Sidebar({ onLogout, activeView, onNavigate }) {
       <div style={{ flex:1, paddingTop:10 }}>
 
         <div style={SECTION}>Social Media Posts</div>
-        <NavItem id="clients" label="Supergrow" active={activeView==='clients'} onNavigate={onNavigate} icon={<UsersIcon />} />
+        <NavItem id="clients" label="LinkedIn Posts" active={activeView==='clients'} onNavigate={onNavigate} icon={<UsersIcon />} />
 
         <hr style={DIVIDER} />
 
