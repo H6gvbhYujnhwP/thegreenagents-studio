@@ -4,15 +4,20 @@
  * Mounted at /api/portal-admin in server/index.js. All routes require the
  * existing admin Bearer-token (requireAuth middleware) — these are NOT used
  * by the customer-facing portal. The admin uses these to:
- *   - List all email_clients (customers) with portal stats
- *   - Toggle service subscriptions (Email enabled, LinkedIn linked, etc.)
+ *   - List portal customers and create new ones
+ *   - Toggle service subscriptions for each customer
  *   - Manage portal users for each customer (add / remove / reset password)
- *   - List LinkedIn-side `clients` for the LinkedIn-link dropdown
+ *   - Read the services catalogue (drives the admin Manage UI)
+ *   - Read pickable options for each service that links to an external table
  *
  * Note the path: /api/portal-admin (NOT /api/portal). The fetch interceptor
  * in src/App.jsx excludes /api/portal/* from the admin Bearer token because
  * those are customer-portal routes. /api/portal-admin/* is a separate prefix
  * that DOES get the Bearer token, since it's admin-only.
+ *
+ * GENERIC SERVICES MODEL: services are not hardcoded here. The `services` DB
+ * table is the source of truth — adding a new service (e.g. SEO, Google Ads)
+ * is an INSERT into `services`, no changes to this file.
  */
 import { Router } from 'express';
 import crypto from 'crypto';
@@ -29,11 +34,6 @@ router.use(requireAuth);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Generate a memorable temporary password — 12 chars, mixed case + digits, no
- * confusable characters (0/O, 1/l/I). Wez sees this once and reads it to the
- * customer over the phone, so easier to communicate than "$2b$12$abc...".
- */
 function genTempPassword() {
   const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789abcdefghjkmnpqrstuvwxyz';
   let out = '';
@@ -43,33 +43,67 @@ function genTempPassword() {
 }
 
 /**
- * Public projection of an email_clients row with portal stats. The stats
- * (user count, has linkedin link) help the admin grid show "0 users" warnings
- * etc. without N+1 queries from the frontend.
+ * Whitelist of tables that services may declare as their `link_table`. Any
+ * value coming from the `services` catalogue is checked against this set
+ * before being interpolated into a SQL query. Add new tables here when a
+ * future service needs to reference them (e.g. 'facebook_ad_accounts').
  */
+const ALLOWED_LINK_TABLES = new Set(['clients']);
+
+function fetchLinkedName(linkTable, externalId) {
+  if (!linkTable || !externalId) return null;
+  if (!ALLOWED_LINK_TABLES.has(linkTable)) return null;
+  try {
+    const row = db.prepare(`SELECT name FROM ${linkTable} WHERE id = ?`).get(externalId);
+    return row ? row.name : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Per-customer services array for admin UI rendering. One entry per service
+ * in the catalogue (subscribed or not). Used by the Manage panel to draw
+ * dropdowns dynamically — no hardcoded service list on the frontend.
+ */
+function buildCustomerServices(emailClientId) {
+  const rows = db.prepare(`
+    SELECT s.service_key, s.display_name, s.description, s.state,
+           s.link_table, s.link_label, s.sort_order,
+           cs.linked_external_id,
+           CASE WHEN cs.email_client_id IS NULL THEN 0 ELSE 1 END AS subscribed
+    FROM services s
+    LEFT JOIN customer_services cs
+      ON cs.service_key = s.service_key AND cs.email_client_id = ?
+    WHERE s.state != 'retired'
+    ORDER BY s.sort_order ASC
+  `).all(emailClientId);
+
+  return rows.map(r => ({
+    service_key:           r.service_key,
+    display_name:          r.display_name,
+    description:           r.description,
+    state:                 r.state,
+    link_table:            r.link_table,
+    link_label:            r.link_label,
+    subscribed:            !!r.subscribed,
+    linked_external_id:    r.linked_external_id || null,
+    linked_external_name:  fetchLinkedName(r.link_table, r.linked_external_id),
+  }));
+}
+
 function projectCustomer(row) {
   const userCount = db.prepare(
     `SELECT COUNT(*) AS n FROM client_users WHERE email_client_id = ?`
   ).get(row.id).n;
-
-  // Resolve linked LinkedIn client name (if any) so the frontend can display
-  // it without a second lookup.
-  let linkedinClientName = null;
-  if (row.linkedin_client_id) {
-    const lc = db.prepare(`SELECT name FROM clients WHERE id = ?`).get(row.linkedin_client_id);
-    linkedinClientName = lc ? lc.name : '(deleted LinkedIn client)';
-  }
-
   return {
-    id:                       row.id,
-    name:                     row.name,
-    slug:                     row.slug,
-    color:                    row.color,
-    portal_user_count:        userCount,
-    service_email_enabled:    !!row.service_email_enabled,
-    linkedin_client_id:       row.linkedin_client_id || null,
-    linkedin_client_name:     linkedinClientName,
-    // facebook_page_id: row.facebook_page_id || null,   // when shipped
+    id:                row.id,
+    name:              row.name,
+    slug:              row.slug,
+    color:             row.color,
+    portal_enabled:    !!row.portal_enabled,
+    portal_user_count: userCount,
+    services:          buildCustomerServices(row.id),
   };
 }
 
@@ -84,90 +118,244 @@ function projectUser(row) {
   };
 }
 
-// ─── 1. GET /api/portal-admin/customers ───────────────────────────────────────
-// List all email_clients with portal stats. Used by the Portal Customers
-// admin page as the main list view.
+/**
+ * Sync the legacy email_clients columns (service_email_enabled,
+ * linkedin_client_id) from the customer_services source of truth. Called
+ * after every service change so anything still reading the legacy columns
+ * stays correct.
+ *
+ * When the legacy columns are eventually dropped (a future cleanup chat),
+ * this helper goes too.
+ */
+function syncLegacyColumns(emailClientId) {
+  const emailRow = db.prepare(
+    `SELECT 1 FROM customer_services WHERE email_client_id = ? AND service_key = 'email'`
+  ).get(emailClientId);
+  const linkedinRow = db.prepare(
+    `SELECT linked_external_id FROM customer_services WHERE email_client_id = ? AND service_key = 'linkedin'`
+  ).get(emailClientId);
+  db.prepare(`
+    UPDATE email_clients
+    SET service_email_enabled = ?,
+        linkedin_client_id    = ?
+    WHERE id = ?
+  `).run(emailRow ? 1 : 0, linkedinRow?.linked_external_id || null, emailClientId);
+}
+
+// ─── 1. GET /api/portal-admin/services ────────────────────────────────────────
+// Returns the catalogue of services. The admin Manage panel uses this to render
+// the list of dropdowns (one per service). Adding a service to the system
+// becomes "INSERT INTO services" — the admin UI picks it up automatically.
+router.get('/services', (req, res) => {
+  const rows = db.prepare(`
+    SELECT service_key, display_name, description, state, link_table, link_label, sort_order
+    FROM services
+    WHERE state != 'retired'
+    ORDER BY sort_order ASC
+  `).all();
+  res.json(rows);
+});
+
+// ─── 2. GET /api/portal-admin/service-options/:service_key ────────────────────
+// Picker options for a service that has a link_table. Returns the rows of
+// that external table that the admin can pick from, plus a flag for any that
+// are already linked elsewhere (so the dropdown can grey those out).
+//
+// For services with link_table = NULL (plain on/off services), returns [].
+router.get('/service-options/:service_key', (req, res) => {
+  const svc = db.prepare(
+    `SELECT service_key, link_table FROM services WHERE service_key = ?`
+  ).get(req.params.service_key);
+  if (!svc) return res.status(404).json({ error: 'Unknown service' });
+  if (!svc.link_table) return res.json([]);
+  if (!ALLOWED_LINK_TABLES.has(svc.link_table)) {
+    return res.status(500).json({ error: `Service link_table "${svc.link_table}" is not whitelisted` });
+  }
+  const rows = db.prepare(`
+    SELECT
+      t.id,
+      t.name,
+      cs.email_client_id      AS linked_to_id,
+      ec.name                 AS linked_to_name,
+      ec.slug                 AS linked_to_slug
+    FROM ${svc.link_table} t
+    LEFT JOIN customer_services cs
+      ON cs.service_key        = ?
+     AND cs.linked_external_id = t.id
+    LEFT JOIN email_clients ec ON ec.id = cs.email_client_id
+    ORDER BY t.name COLLATE NOCASE ASC
+  `).all(svc.service_key);
+  res.json(rows.map(r => ({
+    id:             r.id,
+    name:           r.name,
+    linked_to_id:   r.linked_to_id   || null,
+    linked_to_name: r.linked_to_name || null,
+    linked_to_slug: r.linked_to_slug || null,
+  })));
+});
+
+// ─── 3. GET /api/portal-admin/customers ───────────────────────────────────────
+// List portal customers (portal_enabled = 1). Cold-email customers without
+// a portal don't appear here.
 router.get('/customers', (req, res) => {
   const rows = db.prepare(`
-    SELECT * FROM email_clients ORDER BY name COLLATE NOCASE ASC
+    SELECT * FROM email_clients WHERE portal_enabled = 1
+    ORDER BY name COLLATE NOCASE ASC
   `).all();
   res.json(rows.map(projectCustomer));
 });
 
-// ─── 2. GET /api/portal-admin/customers/:id ───────────────────────────────────
-// Single-customer detail view (services + users in one payload to avoid
-// flicker when opening the manage panel).
+// ─── 4. POST /api/portal-admin/customers ──────────────────────────────────────
+// Create a brand-new portal customer (the "+ New portal customer" button on
+// the Customer Portal admin page). Body: { name }.
+//
+// Defaults:
+//   - portal_enabled = 1
+//   - service_email_enabled = 0   (legacy column; new portal customers default
+//                                  to no cold-email service)
+//   - No customer_services rows   (admin opts into services in Manage panel)
+//   - slug auto-generated         (db._portalUniqueSlug helper)
+router.post('/customers', (req, res) => {
+  const { name } = req.body || {};
+  if (!name || !String(name).trim()) {
+    return res.status(400).json({ error: 'Name is required' });
+  }
+  const trimmedName = String(name).trim();
+  const id = uuid();
+  const slug = db._portalUniqueSlug
+    ? db._portalUniqueSlug(trimmedName, id)
+    : trimmedName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
+  db.prepare(`
+    INSERT INTO email_clients
+      (id, name, color, slug, portal_enabled, service_email_enabled)
+    VALUES (?, ?, ?, ?, 1, 0)
+  `).run(id, trimmedName, '#1D9E75', slug);
+
+  const row = db.prepare(`SELECT * FROM email_clients WHERE id = ?`).get(id);
+  res.json(projectCustomer(row));
+});
+
+// ─── 5. GET /api/portal-admin/customers/:id ───────────────────────────────────
+// Single-customer detail (customer + portal users) for the Manage panel.
 router.get('/customers/:id', (req, res) => {
   const row = db.prepare(`SELECT * FROM email_clients WHERE id = ?`).get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
-
   const users = db.prepare(`
     SELECT * FROM client_users WHERE email_client_id = ? ORDER BY username ASC
   `).all(req.params.id);
-
   res.json({
     customer: projectCustomer(row),
-    users: users.map(projectUser),
+    users:    users.map(projectUser),
   });
 });
 
-// ─── 3. PUT /api/portal-admin/customers/:id/services ──────────────────────────
-// body: { service_email_enabled?: boolean, linkedin_client_id?: string|null }
-// Updates one or both service-subscription flags. Frontend sends only the
-// fields that changed to keep the audit trail clean if we add one later.
+// ─── 6. PUT /api/portal-admin/customers/:id ───────────────────────────────────
+// Update top-level customer fields. Currently just portal_enabled.
+// Disabling portal_enabled does NOT delete services or users — it just hides
+// the customer from the Customer Portal admin list. Re-enabling brings them back.
+router.put('/customers/:id', (req, res) => {
+  const cur = db.prepare(`SELECT * FROM email_clients WHERE id = ?`).get(req.params.id);
+  if (!cur) return res.status(404).json({ error: 'Not found' });
+  const body = req.body || {};
+  const updates = [];
+  const params = [];
+  if ('portal_enabled' in body) {
+    updates.push('portal_enabled = ?');
+    params.push(body.portal_enabled ? 1 : 0);
+  }
+  if (updates.length === 0) {
+    return res.status(400).json({ error: 'No fields to update' });
+  }
+  params.push(req.params.id);
+  db.prepare(`UPDATE email_clients SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+  const updated = db.prepare(`SELECT * FROM email_clients WHERE id = ?`).get(req.params.id);
+  res.json(projectCustomer(updated));
+});
+
+// ─── 7. PUT /api/portal-admin/customers/:id/services ──────────────────────────
+// Update one or more service subscriptions. Body shape:
+//   {
+//     services: {
+//       <service_key>: {
+//         subscribed: bool,
+//         linked_external_id?: string|null   (only relevant for services with link_table)
+//       }
+//     }
+//   }
 //
-// Validates that linkedin_client_id (if provided non-null) actually exists
-// in the LinkedIn `clients` table — otherwise returns 400. The UNIQUE index
-// on email_clients.linkedin_client_id catches the "already linked elsewhere"
-// case at SQLite level; we surface that as a friendly 409.
+// Per-service behaviour:
+//   subscribed: false → DELETE the customer_services row (if any)
+//   subscribed: true  → INSERT or UPDATE the row. For services with link_table,
+//                       linked_external_id is required and must reference a
+//                       valid row in that table.
 router.put('/customers/:id/services', (req, res) => {
   const cur = db.prepare(`SELECT * FROM email_clients WHERE id = ?`).get(req.params.id);
   if (!cur) return res.status(404).json({ error: 'Not found' });
 
-  const body = req.body || {};
-  const updates = [];
-  const params = [];
-
-  if ('service_email_enabled' in body) {
-    updates.push('service_email_enabled = ?');
-    params.push(body.service_email_enabled ? 1 : 0);
+  const requested = (req.body && req.body.services) || {};
+  if (typeof requested !== 'object' || Array.isArray(requested)) {
+    return res.status(400).json({ error: 'Body must be { services: { <key>: {...} } }' });
   }
 
-  if ('linkedin_client_id' in body) {
-    const lcId = body.linkedin_client_id;
-    if (lcId !== null && lcId !== '') {
-      // Verify the LinkedIn client exists.
-      const lc = db.prepare(`SELECT id FROM clients WHERE id = ?`).get(lcId);
-      if (!lc) return res.status(400).json({ error: 'LinkedIn client not found' });
-      updates.push('linkedin_client_id = ?');
-      params.push(lcId);
-    } else {
-      updates.push('linkedin_client_id = NULL');
+  const allServices = db.prepare(`SELECT * FROM services`).all();
+  const byKey = new Map(allServices.map(s => [s.service_key, s]));
+
+  // Validate every requested key BEFORE writing anything.
+  for (const [key, val] of Object.entries(requested)) {
+    const svc = byKey.get(key);
+    if (!svc) return res.status(400).json({ error: `Unknown service: ${key}` });
+    if (svc.state === 'retired') return res.status(400).json({ error: `Service ${key} is retired` });
+    if (svc.state === 'coming_soon' && val.subscribed) {
+      return res.status(400).json({ error: `Service ${key} is not yet live — cannot subscribe customers` });
+    }
+    if (val.subscribed && svc.link_table) {
+      if (!val.linked_external_id) {
+        return res.status(400).json({ error: `${svc.display_name} requires a linked record (pick one from the dropdown)` });
+      }
+      if (!ALLOWED_LINK_TABLES.has(svc.link_table)) {
+        return res.status(500).json({ error: `Internal: link_table "${svc.link_table}" not whitelisted` });
+      }
+      const exists = db.prepare(`SELECT 1 FROM ${svc.link_table} WHERE id = ?`).get(val.linked_external_id);
+      if (!exists) return res.status(400).json({ error: `Selected ${svc.link_label || 'record'} no longer exists` });
     }
   }
 
-  if (updates.length === 0) {
-    return res.status(400).json({ error: 'No service fields provided' });
-  }
-
-  params.push(req.params.id);
   try {
-    db.prepare(`UPDATE email_clients SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+    db.transaction(() => {
+      for (const [key, val] of Object.entries(requested)) {
+        const svc = byKey.get(key);
+        if (!val.subscribed) {
+          db.prepare(`
+            DELETE FROM customer_services
+            WHERE email_client_id = ? AND service_key = ?
+          `).run(req.params.id, key);
+          continue;
+        }
+        const linkedId = svc.link_table ? val.linked_external_id : null;
+        db.prepare(`
+          INSERT INTO customer_services (email_client_id, service_key, linked_external_id, enabled_by)
+          VALUES (?, ?, ?, 'admin')
+          ON CONFLICT(email_client_id, service_key)
+          DO UPDATE SET linked_external_id = excluded.linked_external_id
+        `).run(req.params.id, key, linkedId);
+      }
+    })();
   } catch (e) {
-    if (String(e.message).includes('UNIQUE') && String(e.message).includes('linkedin_client_id')) {
+    if (String(e.message).includes('UNIQUE') && String(e.message).includes('linked_external_id')) {
       return res.status(409).json({
-        error: 'That LinkedIn account is already linked to another customer. Unlink it there first.'
+        error: 'That record is already linked to another customer for this service. Unlink it there first.'
       });
     }
     throw e;
   }
 
+  syncLegacyColumns(req.params.id);
   const updated = db.prepare(`SELECT * FROM email_clients WHERE id = ?`).get(req.params.id);
   res.json(projectCustomer(updated));
 });
 
-// ─── 4. GET /api/portal-admin/customers/:id/users ─────────────────────────────
-// List portal users for a customer.
+// ─── 8. GET /api/portal-admin/customers/:id/users ─────────────────────────────
 router.get('/customers/:id/users', (req, res) => {
   const customer = db.prepare(`SELECT id FROM email_clients WHERE id = ?`).get(req.params.id);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -177,13 +365,8 @@ router.get('/customers/:id/users', (req, res) => {
   res.json(rows.map(projectUser));
 });
 
-// ─── 5. POST /api/portal-admin/customers/:id/users ────────────────────────────
-// body: { username, email?, role: 'admin' | 'viewer' }
-// Creates a portal user with a generated 12-char temporary password. The
-// response includes the temp password ONCE (plaintext) so Wez can give it
-// to the customer. After this response is sent, the password is unrecoverable
-// — only the bcrypt hash is stored. last_login_at stays NULL so the portal's
-// "Your password is temporary" banner shows on first sign-in.
+// ─── 9. POST /api/portal-admin/customers/:id/users ────────────────────────────
+// Create a portal user with a generated 12-char temporary password.
 router.post('/customers/:id/users', async (req, res) => {
   const customer = db.prepare(`SELECT id FROM email_clients WHERE id = ?`).get(req.params.id);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -220,13 +403,11 @@ router.post('/customers/:id/users', async (req, res) => {
   const row = db.prepare(`SELECT * FROM client_users WHERE id = ?`).get(id);
   res.json({
     user: projectUser(row),
-    temporary_password: tempPw,   // ONLY returned at creation time. Never stored plaintext.
+    temporary_password: tempPw,
   });
 });
 
-// ─── 6. DELETE /api/portal-admin/users/:id ────────────────────────────────────
-// Removes a portal user. Also clears their sessions, password resets, and
-// failed-login records so the table cleanup is tidy.
+// ─── 10. DELETE /api/portal-admin/users/:id ───────────────────────────────────
 router.delete('/users/:id', (req, res) => {
   const row = db.prepare(`SELECT id, email_client_id, username FROM client_users WHERE id = ?`).get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
@@ -242,17 +423,7 @@ router.delete('/users/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// ─── 7. POST /api/portal-admin/users/:id/reset-password ───────────────────────
-// Admin sets a new temporary password for a portal user (used when a customer
-// forgets theirs and wants Wez to reset it out-of-band rather than going
-// through the email reset link).
-//
-// Side effects:
-//   - All existing sessions for the user are killed (forces fresh sign-in
-//     with the new temp password).
-//   - last_login_at is reset to NULL so the "Your password is temporary"
-//     banner appears again on next sign-in.
-//   - Any pending email-link reset tokens are invalidated.
+// ─── 11. POST /api/portal-admin/users/:id/reset-password ──────────────────────
 router.post('/users/:id/reset-password', async (req, res) => {
   const row = db.prepare(`SELECT * FROM client_users WHERE id = ?`).get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
@@ -277,31 +448,17 @@ router.post('/users/:id/reset-password', async (req, res) => {
   });
 });
 
-// ─── 8. GET /api/portal-admin/linkedin-clients ────────────────────────────────
-// List LinkedIn-side `clients` for the "LinkedIn account" dropdown in the
-// Services panel. Includes a flag indicating which ones are already linked
-// to another email_client so the dropdown can grey those out (or omit them).
-router.get('/linkedin-clients', (req, res) => {
+// ─── 12. GET /api/portal-admin/eligible-customers ─────────────────────────────
+// email_clients NOT yet portal-enabled. Used by the "Enable existing customer"
+// flow on the admin page — alternative to "+ New portal customer" when the
+// company already exists as an email_client.
+router.get('/eligible-customers', (req, res) => {
   const rows = db.prepare(`
-    SELECT
-      c.id,
-      c.name,
-      c.brand,
-      ec.id   AS linked_to_id,
-      ec.name AS linked_to_name,
-      ec.slug AS linked_to_slug
-    FROM clients c
-    LEFT JOIN email_clients ec ON ec.linkedin_client_id = c.id
-    ORDER BY c.name COLLATE NOCASE ASC
+    SELECT id, name, slug FROM email_clients
+    WHERE portal_enabled = 0
+    ORDER BY name COLLATE NOCASE ASC
   `).all();
-  res.json(rows.map(r => ({
-    id:             r.id,
-    name:           r.name,
-    brand:          r.brand,
-    linked_to_id:   r.linked_to_id   || null,
-    linked_to_name: r.linked_to_name || null,
-    linked_to_slug: r.linked_to_slug || null,
-  })));
+  res.json(rows);
 });
 
 export default router;

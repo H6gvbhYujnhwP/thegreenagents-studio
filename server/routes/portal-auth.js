@@ -72,19 +72,34 @@ function sqlPlusHours(hours) {
  *                    current plan." (per Wez's locked-in copy)
  *   'coming_soon'  — service exists in code but isn't live yet (e.g. Facebook).
  *
- * Adding a future service: extend the `client` columns (e.g. facebook_page_id)
- * and add a key here. The frontend reads this object verbatim so it never has
- * to "detect" anything.
+ * Driven by the `services` catalogue + `customer_services` join table — adding
+ * a new service is a row in `services`, no code change needed here. The output
+ * is always keyed by service.service_key so the frontend can do `services.email`
+ * etc. and still get the right answer.
+ *
+ * State logic, in order:
+ *   1. If services.state = 'coming_soon'   → 'coming_soon'   (regardless of subscription)
+ *   2. Else if customer_services row exists → 'enabled'
+ *   3. Else                                  → 'not_required'
  */
-function buildServicesObject(client) {
-  return {
-    email:    client.service_email_enabled ? 'enabled' : 'not_required',
-    linkedin: client.linkedin_client_id    ? 'enabled' : 'not_required',
-    // Facebook isn't shipped yet — placeholder for the next service we add.
-    // When the column lands, switch to:
-    //   facebook: client.facebook_page_id ? 'enabled' : 'not_required'
-    facebook: 'coming_soon',
-  };
+function buildServicesObject(clientId) {
+  const rows = db.prepare(`
+    SELECT s.service_key, s.state,
+           CASE WHEN cs.email_client_id IS NULL THEN 0 ELSE 1 END AS subscribed
+    FROM services s
+    LEFT JOIN customer_services cs
+      ON cs.service_key = s.service_key AND cs.email_client_id = ?
+    WHERE s.state != 'retired'
+    ORDER BY s.sort_order ASC
+  `).all(clientId);
+
+  const out = {};
+  for (const r of rows) {
+    if (r.state === 'coming_soon') out[r.service_key] = 'coming_soon';
+    else if (r.subscribed)         out[r.service_key] = 'enabled';
+    else                           out[r.service_key] = 'not_required';
+  }
+  return out;
 }
 
 /**
@@ -316,7 +331,7 @@ router.post('/auth/login', async (req, res) => {
     token,                          // returned for completeness; cookie is what's used
     user:     userOut,
     client:   projectClient(client),
-    services: buildServicesObject(client),
+    services: buildServicesObject(client.id),
   });
 });
 
@@ -342,13 +357,14 @@ router.get('/auth/check', (req, res) => {
   if (!out) return res.status(401).json({ error: 'Not signed in' });
 
   // resolveSession returns the bare client/user; we re-fetch the full client
-  // row so projectClient / buildServicesObject work as advertised.
+  // row so projectClient works on the latest values. Services are computed
+  // from the customer_services table by id, no need to pass the full row.
   const fullClient = db.prepare(`SELECT * FROM email_clients WHERE id = ?`).get(out.client.id);
   const fullUser   = db.prepare(`SELECT * FROM client_users  WHERE id = ?`).get(out.user.id);
   res.json({
     user:     projectUser(fullUser),
     client:   projectClient(fullClient),
-    services: buildServicesObject(fullClient),
+    services: buildServicesObject(fullClient.id),
   });
 });
 

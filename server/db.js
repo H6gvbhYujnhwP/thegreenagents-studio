@@ -856,6 +856,166 @@ db.exec(`
 // posts stay unapproved. The portal still shows the batch so the customer/Wez
 // can retry the rest. The audit log captures the partial-failure state.
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ── 14j-k. GENERIC SERVICES MODEL (Phase 5.5)
+//
+// Replaces the per-service columns on email_clients (service_email_enabled,
+// linkedin_client_id, future facebook_page_id, etc.) with two general-purpose
+// tables. Adding a new service in future becomes inserting a row in `services`
+// — no schema change, no per-service column, no per-service code branch.
+//
+// The legacy columns (service_email_enabled, linkedin_client_id) are KEPT for
+// now as a backwards-compat mirror — old code paths still work until they're
+// migrated to read from customer_services. A future cleanup chat can drop them
+// once nothing reads them.
+//
+// Two tables:
+//
+//   services            — catalogue of service types (one row per service we offer)
+//                         e.g. ('email', 'Email Inbox + Campaigns', 'live', NULL)
+//                              ('linkedin', 'LinkedIn Posts', 'live', 'clients')
+//                              ('facebook', 'Facebook Posts', 'coming_soon', NULL)
+//                              ('seo', 'SEO', 'live', NULL) — future
+//
+//   customer_services   — which customers subscribe to which services
+//                         (email_client_id, service_key, linked_external_id)
+//                         linked_external_id is nullable; used for services that
+//                         have their own customer table (LinkedIn → clients.id).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 14j. services catalogue.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS services (
+    service_key   TEXT PRIMARY KEY,        /* 'email', 'linkedin', 'facebook', 'seo', ... */
+    display_name  TEXT NOT NULL,            /* 'LinkedIn Posts' — what the customer sees */
+    description   TEXT,                     /* shown in admin UI under the dropdown */
+    state         TEXT NOT NULL DEFAULT 'live', /* 'live' | 'coming_soon' | 'retired' */
+    link_table    TEXT,                     /* SQL table name to pick external records from, NULL for plain on/off services */
+    link_label    TEXT,                     /* dropdown label when picking from link_table, e.g. 'LinkedIn account' */
+    sort_order    INTEGER NOT NULL DEFAULT 100,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`);
+
+// 14k. customer_services — one row per (customer, service) subscription.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS customer_services (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    email_client_id    TEXT NOT NULL,
+    service_key        TEXT NOT NULL,
+    linked_external_id TEXT,                /* nullable — id in service.link_table when applicable */
+    enabled_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    enabled_by         TEXT,                /* admin actor identifier (e.g. 'admin') for audit */
+    FOREIGN KEY (email_client_id) REFERENCES email_clients(id),
+    FOREIGN KEY (service_key)     REFERENCES services(service_key)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_services_unique
+    ON customer_services(email_client_id, service_key);
+  CREATE INDEX IF NOT EXISTS idx_customer_services_service
+    ON customer_services(service_key);
+  /* For services with linked_external_id, prevent the same external record
+     being linked to two customers. Partial UNIQUE — NULL means "no link". */
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_services_external_unique
+    ON customer_services(service_key, linked_external_id)
+    WHERE linked_external_id IS NOT NULL;
+`);
+
+// 14l. Seed the services catalogue with the three services we know about today.
+// INSERT OR IGNORE keeps it idempotent — re-running on every boot is safe and
+// future Wez can edit display_name / description in the DB if needed without
+// schema changes.
+{
+  const seedService = db.prepare(`
+    INSERT OR IGNORE INTO services
+      (service_key, display_name, description, state, link_table, link_label, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  const seeds = [
+    ['linkedin', 'LinkedIn Posts',
+      'Customers see their LinkedIn posts pending approval, drawn from the linked LinkedIn account.',
+      'live', 'clients', 'LinkedIn account', 10],
+    ['facebook', 'Facebook Posts',
+      'Coming soon — once Facebook posting is wired up, you\'ll be able to link a Facebook page here.',
+      'coming_soon', null, null, 20],
+    ['email', 'Email (Inbox + Campaigns)',
+      'Inbox replies and email-campaign stats from your cold-outreach system.',
+      'live', null, null, 30],
+  ];
+  for (const s of seeds) seedService.run(...s);
+}
+
+// 14m. Backfill customer_services from the legacy columns. Idempotent — uses
+// INSERT OR IGNORE on the unique (email_client_id, service_key) index, so
+// re-running on every boot doesn't double-up existing subscriptions.
+//
+// Important: we only backfill rows where the customer is currently considered
+// SUBSCRIBED. For email, that's service_email_enabled=1. For linkedin, it's
+// linkedin_client_id IS NOT NULL. Customers with the legacy "not subscribed"
+// state get no row in customer_services at all — that's the new representation
+// of "not_required" (absence of row, not a row with an off flag).
+{
+  // Email subscriptions.
+  const emailRows = db.prepare(`
+    SELECT id FROM email_clients
+    WHERE service_email_enabled = 1
+      AND id NOT IN (SELECT email_client_id FROM customer_services WHERE service_key = 'email')
+  `).all();
+  if (emailRows.length > 0) {
+    const ins = db.prepare(`
+      INSERT OR IGNORE INTO customer_services
+        (email_client_id, service_key, linked_external_id, enabled_by)
+      VALUES (?, 'email', NULL, 'backfill')
+    `);
+    const tx = db.transaction(rows => { for (const r of rows) ins.run(r.id); });
+    tx(emailRows);
+    console.log(`[db] migration: backfilled customer_services email rows for ${emailRows.length} customer(s)`);
+  }
+
+  // LinkedIn subscriptions — preserve the linked_external_id link.
+  const linkedinRows = db.prepare(`
+    SELECT id, linkedin_client_id FROM email_clients
+    WHERE linkedin_client_id IS NOT NULL
+      AND id NOT IN (SELECT email_client_id FROM customer_services WHERE service_key = 'linkedin')
+  `).all();
+  if (linkedinRows.length > 0) {
+    const ins = db.prepare(`
+      INSERT OR IGNORE INTO customer_services
+        (email_client_id, service_key, linked_external_id, enabled_by)
+      VALUES (?, 'linkedin', ?, 'backfill')
+    `);
+    const tx = db.transaction(rows => { for (const r of rows) ins.run(r.id, r.linkedin_client_id); });
+    tx(linkedinRows);
+    console.log(`[db] migration: backfilled customer_services linkedin rows for ${linkedinRows.length} customer(s)`);
+  }
+}
+
+// 14n. portal_enabled flag on email_clients — only customers explicitly
+// enabled-for-portal show up on the Customer Portal admin page. This separates
+// "I send cold email from this domain" from "this customer has a portal".
+//
+// Default 0 (not portal-enabled) so existing cold-email-only customers don't
+// suddenly appear on the Customer Portal list. The admin must opt each one in
+// via the new Manage panel toggle, OR create a brand-new portal customer via
+// the new "+ New portal customer" button.
+{
+  const cols = db.prepare('PRAGMA table_info(email_clients)').all().map(r => r.name);
+  if (!cols.includes('portal_enabled')) {
+    db.exec(`ALTER TABLE email_clients ADD COLUMN portal_enabled INTEGER NOT NULL DEFAULT 0`);
+    console.log('[db] migration: added portal_enabled to email_clients');
+  }
+  // Backfill: any email_client that already has at least one portal user
+  // is implicitly portal-enabled. This covers the test users you've created
+  // already so they don't disappear from the admin UI on next deploy.
+  const auto = db.prepare(`
+    UPDATE email_clients SET portal_enabled = 1
+    WHERE portal_enabled = 0
+      AND id IN (SELECT DISTINCT email_client_id FROM client_users)
+  `).run();
+  if (auto.changes > 0) {
+    console.log(`[db] migration: portal_enabled=1 set for ${auto.changes} customer(s) with existing portal users`);
+  }
+}
+
 // Reset any stuck algorithm analysis runs on startup
 // Also clear any partial/garbage brief (valid brief starts with # LinkedIn Algorithm)
 db.prepare("UPDATE linkedin_settings SET brief_running = 0 WHERE id = 1").run();

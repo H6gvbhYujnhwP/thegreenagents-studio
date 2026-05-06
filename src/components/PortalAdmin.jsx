@@ -1,22 +1,27 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // PortalAdmin.jsx — Admin section for managing the Customer Portal.
 //
-// Mounted by Dashboard.jsx when activeView === 'portal-customers'. Lists every
-// email_client (customer) with their portal stats. Click a row to open a
-// "manage" panel with three sections:
-//   1. Services — Email enabled (yes/no), LinkedIn account (dropdown), Facebook
-//      (greyed-out "coming soon").
-//   2. Portal users — table with role, last sign-in, Add/Remove/Reset password
-//      actions. Adding/resetting shows the new temporary password ONCE — Wez
-//      gives it to the customer out-of-band.
-//   3. Portal URL — copy-to-clipboard https://studio.thegreenagents.com/c/<slug>.
+// Mounted by Dashboard.jsx when activeView === 'portal-customers'.
 //
-// All API calls go to /api/portal-admin/* which is gated by the existing
-// admin Bearer token (requireAuth in middleware/auth.js).
+// Top-level page lists every customer where portal_enabled = 1. Two ways to
+// add to the list:
+//   - "+ New portal customer" — creates a fresh email_clients row with
+//     portal_enabled=1 and no services yet.
+//   - "Enable existing customer" — picks an email_clients row that exists but
+//     isn't portal-enabled yet (e.g. a cold-email-only domain you want to give
+//     a portal to) and flips portal_enabled=1.
+//
+// Click Manage on a row → detail panel with three sections:
+//   1. Services — dropdowns are RENDERED FROM THE SERVER. Services live in the
+//      `services` DB table; the admin reads them via /api/portal-admin/services
+//      and renders one dropdown per service. Adding a new service later is a
+//      DB insert, not a code change.
+//   2. Portal users — add/remove/reset-password. Adding or resetting shows the
+//      new temporary password ONCE.
+//   3. Portal URL — copy-to-clipboard https://studio.thegreenagents.com/c/<slug>.
 // ─────────────────────────────────────────────────────────────────────────────
 import React, { useState, useEffect } from 'react';
 
-// Match the existing admin colour palette (Dashboard.jsx, EmailSection.jsx).
 const GREEN     = '#1D9E75';
 const GREEN_HI  = '#0F6E56';
 const GREEN_BG  = '#E1F5EE';
@@ -35,8 +40,10 @@ const DANGER    = '#A32D2D';
 // ── Top-level list view ─────────────────────────────────────────────────────
 export default function PortalAdmin() {
   const [customers, setCustomers] = useState(null);
-  const [selected,  setSelected]  = useState(null);  // customer id being managed
+  const [selected,  setSelected]  = useState(null);
   const [error,     setError]     = useState(null);
+  const [showCreate, setShowCreate]  = useState(false);
+  const [showEnable, setShowEnable]  = useState(false);
 
   async function loadCustomers() {
     try {
@@ -59,11 +66,15 @@ export default function PortalAdmin() {
 
   return (
     <div style={{ flex:1, overflow:'auto', padding:28 }}>
-      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:24 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
         <h1 style={{ fontSize:20, fontWeight:500, color:TEXT, margin:0 }}>Customer Portal</h1>
-        <div style={{ fontSize:12, color:MUTED }}>
-          Manage which customers have a portal at <code style={{ background:'#f0f0ec', padding:'2px 6px', borderRadius:4, fontSize:11 }}>/c/&lt;slug&gt;</code> and which services they see.
+        <div style={{ display:'flex', gap:8 }}>
+          <button onClick={() => setShowEnable(true)} style={btnSecondary()}>Enable existing customer</button>
+          <button onClick={() => setShowCreate(true)} style={btnPrimary()}>+ New portal customer</button>
         </div>
+      </div>
+      <div style={{ fontSize:12, color:MUTED, marginBottom:24 }}>
+        Manage which customers have a portal at <code style={{ background:'#f0f0ec', padding:'2px 6px', borderRadius:4, fontSize:11 }}>/c/&lt;slug&gt;</code> and which services they see. Services are configured in <strong>Manage</strong> on each row.
       </div>
 
       {error && (
@@ -76,66 +87,101 @@ export default function PortalAdmin() {
         <div style={{ color:MUTED, padding:'40px 0', textAlign:'center' }}>Loading…</div>
       ) : customers.length === 0 ? (
         <div style={{ background:CARD, border:`0.5px dashed #d0d0cc`, borderRadius:12, padding:48, textAlign:'center', color:MUTED }}>
-          No customers yet. Add one in <strong>Email Campaigns → Customers</strong> first; it'll show up here automatically.
+          <div style={{ fontSize:14, marginBottom:14 }}>No portal customers yet.</div>
+          <button onClick={() => setShowCreate(true)} style={btnPrimary()}>+ New portal customer</button>
         </div>
       ) : (
-        <div style={{ background:CARD, border:`0.5px solid ${BORDER}`, borderRadius:8, overflow:'hidden' }}>
-          {/* Header */}
-          <div style={{
-            display:'grid', gridTemplateColumns:'2fr 1.5fr 1fr 1fr 1.5fr 90px',
-            gap:10, padding:'12px 16px', borderBottom:`0.5px solid ${BORDER}`,
-            fontSize:11, color:MUTED, textTransform:'uppercase', letterSpacing:'0.05em',
-          }}>
-            <div>Customer</div>
-            <div>Slug / portal URL</div>
-            <div>Portal users</div>
-            <div>Email</div>
-            <div>LinkedIn</div>
-            <div style={{ textAlign:'right' }}></div>
-          </div>
-          {customers.map(c => <CustomerRow key={c.id} customer={c} onManage={() => setSelected(c.id)} />)}
-        </div>
+        <CustomersTable customers={customers} onManage={(id) => setSelected(id)} />
+      )}
+
+      {showCreate && (
+        <CreateCustomerModal
+          onClose={() => setShowCreate(false)}
+          onCreated={(id) => { setShowCreate(false); setSelected(id); }}
+        />
+      )}
+      {showEnable && (
+        <EnableExistingModal
+          onClose={() => setShowEnable(false)}
+          onEnabled={(id) => { setShowEnable(false); setSelected(id); }}
+        />
       )}
     </div>
   );
 }
 
-function CustomerRow({ customer, onManage }) {
+// ── Customers table ─────────────────────────────────────────────────────────
+function CustomersTable({ customers, onManage }) {
+  // Compute the union of services across all customers so the table header
+  // is comprehensive — every service that exists gets a column. Avoids the
+  // problem of "service A is shown only when at least one customer subscribes".
+  // We get the order from the first customer (which is in services.sort_order).
+  const serviceColumns = customers.length > 0
+    ? customers[0].services.map(s => ({ key: s.service_key, label: s.display_name, state: s.state }))
+    : [];
+
+  // Grid template: 2fr (Customer) + 1.5fr (Slug) + 1fr (Users) + 1fr per service + 90px (Manage)
+  const cols = `2fr 1.5fr 1fr ${serviceColumns.map(() => '1fr').join(' ')} 90px`;
+
+  return (
+    <div style={{ background:CARD, border:`0.5px solid ${BORDER}`, borderRadius:8, overflow:'hidden' }}>
+      <div style={{
+        display:'grid', gridTemplateColumns:cols, gap:10, padding:'12px 16px',
+        borderBottom:`0.5px solid ${BORDER}`,
+        fontSize:11, color:MUTED, textTransform:'uppercase', letterSpacing:'0.05em',
+      }}>
+        <div>Customer</div>
+        <div>Slug / portal URL</div>
+        <div>Portal users</div>
+        {serviceColumns.map(s => <div key={s.key}>{s.label}</div>)}
+        <div></div>
+      </div>
+      {customers.map(c => (
+        <CustomerRow key={c.id} customer={c} cols={cols} serviceColumns={serviceColumns} onManage={() => onManage(c.id)} />
+      ))}
+    </div>
+  );
+}
+
+function CustomerRow({ customer, cols, serviceColumns, onManage }) {
   const [hover, setHover] = useState(false);
+  const servicesByKey = Object.fromEntries(customer.services.map(s => [s.service_key, s]));
   return (
     <div
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       style={{
-        display:'grid', gridTemplateColumns:'2fr 1.5fr 1fr 1fr 1.5fr 90px',
-        gap:10, padding:'14px 16px', alignItems:'center',
-        borderBottom:`0.5px solid ${BORDER}`, fontSize:12,
+        display:'grid', gridTemplateColumns:cols, gap:10, padding:'14px 16px',
+        alignItems:'center', borderBottom:`0.5px solid ${BORDER}`, fontSize:12,
         background: hover ? '#fafaf8' : 'transparent',
       }}>
-      <div style={{ fontWeight:500, color:TEXT }}>
-        {customer.name}
-      </div>
-      <div style={{ color:MUTED, fontFamily:'monospace', fontSize:11 }}>
-        /c/{customer.slug}
-      </div>
+      <div style={{ fontWeight:500, color:TEXT }}>{customer.name}</div>
+      <div style={{ color:MUTED, fontFamily:'monospace', fontSize:11 }}>/c/{customer.slug}</div>
       <div style={{ color: customer.portal_user_count > 0 ? TEXT : TERTIARY }}>
         {customer.portal_user_count === 0
           ? <span style={{ fontStyle:'italic' }}>No users</span>
           : `${customer.portal_user_count} user${customer.portal_user_count !== 1 ? 's' : ''}`}
       </div>
-      <div>
-        {customer.service_email_enabled
-          ? <Pill bg={GREEN_BG} fg={GREEN_HI}>Enabled</Pill>
-          : <Pill bg="#f4f1e8" fg={MUTED}>Not required</Pill>}
-      </div>
-      <div>
-        {customer.linkedin_client_id
-          ? <Pill bg={GREEN_BG} fg={GREEN_HI} title={customer.linkedin_client_name}>
-              ✓ {customer.linkedin_client_name && customer.linkedin_client_name.length > 18
-                  ? customer.linkedin_client_name.slice(0, 18) + '…'
-                  : customer.linkedin_client_name}
+      {serviceColumns.map(col => {
+        const s = servicesByKey[col.key];
+        if (!s) return <div key={col.key} />;
+        if (s.state === 'coming_soon') {
+          return <div key={col.key}><Pill bg={BLUE_BG} fg={BLUE}>Coming soon</Pill></div>;
+        }
+        if (!s.subscribed) {
+          return <div key={col.key}><Pill bg="#f4f1e8" fg={MUTED}>Not required</Pill></div>;
+        }
+        // Subscribed — show "Enabled" or the linked record name.
+        const label = s.linked_external_name
+          ? (s.linked_external_name.length > 16 ? s.linked_external_name.slice(0, 16) + '…' : s.linked_external_name)
+          : 'Enabled';
+        return (
+          <div key={col.key}>
+            <Pill bg={GREEN_BG} fg={GREEN_HI} title={s.linked_external_name || 'Enabled'}>
+              ✓ {label}
             </Pill>
-          : <Pill bg="#f4f1e8" fg={MUTED}>Not required</Pill>}
-      </div>
+          </div>
+        );
+      })}
       <div style={{ textAlign:'right' }}>
         <button onClick={onManage} style={btnSecondary()}>Manage →</button>
       </div>
@@ -145,20 +191,16 @@ function CustomerRow({ customer, onManage }) {
 
 // ── Manage Panel ────────────────────────────────────────────────────────────
 function ManagePanel({ customerId, onClose }) {
-  const [data,    setData]    = useState(null);
-  const [error,   setError]   = useState(null);
-  const [linkedinClients, setLinkedinClients] = useState([]);
+  const [data,  setData]  = useState(null);
+  const [error, setError] = useState(null);
 
   async function loadAll() {
     try {
-      const [c, lc] = await Promise.all([
-        fetch(`/api/portal-admin/customers/${customerId}`).then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`)),
-        fetch(`/api/portal-admin/linkedin-clients`).then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`)),
-      ]);
-      setData(c);
-      setLinkedinClients(lc);
+      const r = await fetch(`/api/portal-admin/customers/${customerId}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setData(await r.json());
     } catch (e) {
-      setError(String(e));
+      setError(String(e.message || e));
     }
   }
   useEffect(() => { loadAll(); }, [customerId]);
@@ -173,13 +215,7 @@ function ManagePanel({ customerId, onClose }) {
       </div>
     );
   }
-  if (!data) {
-    return (
-      <div style={{ flex:1, padding:28, color:MUTED }}>
-        Loading…
-      </div>
-    );
-  }
+  if (!data) return <div style={{ flex:1, padding:28, color:MUTED }}>Loading…</div>;
 
   const { customer, users } = data;
   const portalUrl = `${window.location.origin}/c/${customer.slug}`;
@@ -188,51 +224,71 @@ function ManagePanel({ customerId, onClose }) {
     <div style={{ flex:1, overflow:'auto', padding:28 }}>
       <button onClick={onClose} style={btnSecondary()}>← Back to all customers</button>
 
-      <h1 style={{ fontSize:20, fontWeight:500, color:TEXT, margin:'18px 0 4px' }}>
-        {customer.name}
-      </h1>
+      <h1 style={{ fontSize:20, fontWeight:500, color:TEXT, margin:'18px 0 4px' }}>{customer.name}</h1>
       <div style={{ fontSize:12, color:MUTED, marginBottom:24 }}>
         Customer portal at <a href={portalUrl} target="_blank" rel="noopener noreferrer" style={{ color:BLUE, textDecoration:'none', fontFamily:'monospace' }}>{portalUrl}</a>
       </div>
 
-      <ServicesPanel
-        customer={customer}
-        linkedinClients={linkedinClients}
-        onUpdated={(updated) => setData(d => ({ ...d, customer: updated }))}
-      />
-
-      <UsersPanel
-        customer={customer}
-        users={users}
-        onChange={loadAll}
-      />
-
+      <ServicesPanel customer={customer} onUpdated={(updated) => setData(d => ({ ...d, customer: updated }))} />
+      <UsersPanel customer={customer} users={users} onChange={loadAll} />
       <PortalUrlPanel portalUrl={portalUrl} userCount={users.length} />
+      <DangerZonePanel customer={customer} onUpdated={onClose} />
     </div>
   );
 }
 
 // ── Services panel ──────────────────────────────────────────────────────────
-function ServicesPanel({ customer, linkedinClients, onUpdated }) {
-  const [emailEnabled, setEmailEnabled]   = useState(customer.service_email_enabled);
-  const [linkedinId,   setLinkedinId]     = useState(customer.linkedin_client_id || '');
+// Renders one dropdown per service in customer.services (data-driven from the
+// `services` catalogue). The dropdown options come from /api/portal-admin/
+// service-options/:key — which, for plain on/off services, returns [], in
+// which case we show a yes/no toggle instead.
+function ServicesPanel({ customer, onUpdated }) {
+  // Local edit state — keyed by service_key, holds either a linked id or a
+  // boolean (for plain services). Initialised from customer.services.
+  const initialState = () => {
+    const out = {};
+    for (const s of customer.services) {
+      if (s.link_table) {
+        out[s.service_key] = s.linked_external_id || '';   // '' = not subscribed
+      } else {
+        out[s.service_key] = !!s.subscribed;
+      }
+    }
+    return out;
+  };
+  const [edits, setEdits] = useState(initialState);
   const [saving, setSaving] = useState(false);
-  const [msg,    setMsg]    = useState(null);
+  const [msg, setMsg] = useState(null);
 
-  // Detect dirty state — only enable Save if at least one field changed.
-  const dirty = (emailEnabled !== customer.service_email_enabled)
-             || ((linkedinId || null) !== (customer.linkedin_client_id || null));
+  // Reset edits if customer prop changes (e.g. after save).
+  useEffect(() => { setEdits(initialState()); }, [customer]);
+
+  // Detect dirty state.
+  const dirty = customer.services.some(s => {
+    if (s.state === 'coming_soon') return false;
+    if (s.link_table) return (s.linked_external_id || '') !== (edits[s.service_key] || '');
+    return (!!s.subscribed) !== (!!edits[s.service_key]);
+  });
 
   async function save() {
     setSaving(true); setMsg(null);
+    const payload = { services: {} };
+    for (const s of customer.services) {
+      if (s.state === 'coming_soon') continue;   // never write to coming-soon services
+      if (s.link_table) {
+        const linkedId = edits[s.service_key] || '';
+        payload.services[s.service_key] = linkedId
+          ? { subscribed: true, linked_external_id: linkedId }
+          : { subscribed: false };
+      } else {
+        payload.services[s.service_key] = { subscribed: !!edits[s.service_key] };
+      }
+    }
     try {
       const r = await fetch(`/api/portal-admin/customers/${customer.id}/services`, {
         method:'PUT',
         headers:{ 'Content-Type':'application/json' },
-        body: JSON.stringify({
-          service_email_enabled: emailEnabled,
-          linkedin_client_id:    linkedinId || null,
-        }),
+        body: JSON.stringify(payload),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
@@ -246,57 +302,18 @@ function ServicesPanel({ customer, linkedinClients, onUpdated }) {
 
   return (
     <Card title="Services" subtitle="Which services this customer sees in their portal. Each tab in the customer portal renders either real data, a 'Not required' panel, or a 'Coming soon' panel based on these settings.">
-
-      {/* Email */}
-      <ServiceRow
-        label="Email (Inbox + Campaigns)"
-        description="Inbox replies and email-campaign stats from your cold-outreach system."
-      >
-        <select value={emailEnabled ? 'enabled' : 'not_required'}
-          onChange={e => setEmailEnabled(e.target.value === 'enabled')}
+      {customer.services.map(svc => (
+        <ServiceRow
+          key={svc.service_key}
+          svc={svc}
+          value={edits[svc.service_key]}
+          onChange={(v) => setEdits(e => ({ ...e, [svc.service_key]: v }))}
+          customerId={customer.id}
           disabled={saving}
-          style={selectStyle()}
-        >
-          <option value="enabled">Enabled — show inbox + campaigns</option>
-          <option value="not_required">Not required — hide with message</option>
-        </select>
-      </ServiceRow>
+        />
+      ))}
 
-      {/* LinkedIn */}
-      <ServiceRow
-        label="LinkedIn Posts"
-        description="Customers see their LinkedIn posts pending approval, drawn from the linked LinkedIn account."
-      >
-        <select value={linkedinId}
-          onChange={e => setLinkedinId(e.target.value)}
-          disabled={saving}
-          style={selectStyle()}
-        >
-          <option value="">Not required — hide with message</option>
-          {linkedinClients.map(lc => {
-            const linkedElsewhere = lc.linked_to_id && lc.linked_to_id !== customer.id;
-            return (
-              <option key={lc.id} value={lc.id} disabled={linkedElsewhere}>
-                {lc.name}{linkedElsewhere ? ` — already linked to ${lc.linked_to_name}` : ''}
-              </option>
-            );
-          })}
-        </select>
-      </ServiceRow>
-
-      {/* Facebook (placeholder) */}
-      <ServiceRow
-        label="Facebook Posts"
-        description="Coming soon — once Facebook posting is wired up, you'll be able to link a Facebook page here."
-        comingSoon
-      >
-        <select disabled style={{ ...selectStyle(), color:TERTIARY }}>
-          <option>Coming soon</option>
-        </select>
-      </ServiceRow>
-
-      {/* Save */}
-      <div style={{ display:'flex', alignItems:'center', gap:10, marginTop:6 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:10, marginTop:12 }}>
         <button onClick={save} disabled={!dirty || saving} style={btnPrimary(!dirty || saving)}>
           {saving ? 'Saving…' : 'Save services'}
         </button>
@@ -306,25 +323,76 @@ function ServicesPanel({ customer, linkedinClients, onUpdated }) {
   );
 }
 
-function ServiceRow({ label, description, comingSoon, children }) {
+// One row per service. Behaviour adapts to:
+//   - state === 'coming_soon' → greyed-out, "Coming soon" label only
+//   - link_table set          → dropdown of pickable records via service-options
+//   - link_table null         → on/off select (Enabled / Not required)
+function ServiceRow({ svc, value, onChange, customerId, disabled }) {
+  const isComingSoon = svc.state === 'coming_soon';
+  const hasPicker    = !!svc.link_table;
+
+  // Picker options for link_table services.
+  const [options, setOptions] = useState(null);
+  useEffect(() => {
+    if (!hasPicker || isComingSoon) return;
+    fetch(`/api/portal-admin/service-options/${svc.service_key}`)
+      .then(r => r.ok ? r.json() : [])
+      .then(setOptions)
+      .catch(() => setOptions([]));
+  }, [svc.service_key, hasPicker, isComingSoon]);
+
   return (
     <div style={{
-      display:'grid', gridTemplateColumns:'1fr 320px', gap:18, alignItems:'start',
+      display:'grid', gridTemplateColumns:'1fr 360px', gap:18, alignItems:'start',
       padding:'14px 0', borderBottom:`0.5px solid ${BORDER}`,
     }}>
       <div>
-        <div style={{ fontSize:13, fontWeight:500, color: comingSoon ? TERTIARY : TEXT, marginBottom:4 }}>
-          {label}
-          {comingSoon && (
+        <div style={{ fontSize:13, fontWeight:500, color: isComingSoon ? TERTIARY : TEXT, marginBottom:4 }}>
+          {svc.display_name}
+          {isComingSoon && (
             <span style={{
               marginLeft:8, padding:'1px 6px', fontSize:10, fontWeight:500,
               background:BLUE_BG, color:BLUE, borderRadius:4,
             }}>Coming soon</span>
           )}
         </div>
-        <div style={{ fontSize:11, color:MUTED, lineHeight:1.5 }}>{description}</div>
+        {svc.description && (
+          <div style={{ fontSize:11, color:MUTED, lineHeight:1.5 }}>{svc.description}</div>
+        )}
       </div>
-      <div>{children}</div>
+      <div>
+        {isComingSoon ? (
+          <select disabled style={{ ...selectStyle(), color:TERTIARY }}>
+            <option>Coming soon</option>
+          </select>
+        ) : hasPicker ? (
+          options === null ? (
+            <select disabled style={selectStyle()}><option>Loading…</option></select>
+          ) : (
+            <select value={value || ''} onChange={e => onChange(e.target.value)} disabled={disabled} style={selectStyle()}>
+              <option value="">Not required — hide with message</option>
+              {options.map(opt => {
+                // Grey out (disable) any option that's already linked to a different customer.
+                const linkedElsewhere = opt.linked_to_id && opt.linked_to_id !== customerId;
+                return (
+                  <option key={opt.id} value={opt.id} disabled={linkedElsewhere}>
+                    {opt.name}{linkedElsewhere ? ` — already linked to ${opt.linked_to_name}` : ''}
+                  </option>
+                );
+              })}
+            </select>
+          )
+        ) : (
+          <select value={value ? 'enabled' : 'not_required'}
+            onChange={e => onChange(e.target.value === 'enabled')}
+            disabled={disabled}
+            style={selectStyle()}
+          >
+            <option value="enabled">Enabled — show real data</option>
+            <option value="not_required">Not required — hide with message</option>
+          </select>
+        )}
+      </div>
     </div>
   );
 }
@@ -332,7 +400,7 @@ function ServiceRow({ label, description, comingSoon, children }) {
 // ── Users panel ─────────────────────────────────────────────────────────────
 function UsersPanel({ customer, users, onChange }) {
   const [showAdd,  setShowAdd]  = useState(false);
-  const [newCreds, setNewCreds] = useState(null);   // { username, temp_password } shown ONCE after add or reset
+  const [newCreds, setNewCreds] = useState(null);
 
   return (
     <Card
@@ -392,7 +460,7 @@ function UsersPanel({ customer, users, onChange }) {
 }
 
 function UserRow({ user, onChange, onResetShown }) {
-  const [busy, setBusy] = useState(null);   // 'reset' | 'delete' | null
+  const [busy, setBusy] = useState(null);
 
   async function reset() {
     if (!confirm(`Reset ${user.username}'s password?\n\nThis kills any active sign-ins they have and shows you a new temporary password to give them.`)) return;
@@ -499,14 +567,14 @@ function AddUserModal({ customerId, existingUsernames, onClose, onCreated }) {
 
       <Field label="Username">
         <input value={username} onChange={e => setUsername(e.target.value)} disabled={busy}
-          autoFocus placeholder="andrea-tower"
+          autoFocus placeholder="rob-tower"
           style={inputStyle()}
         />
       </Field>
 
       <Field label="Email (for password resets)">
         <input value={email} onChange={e => setEmail(e.target.value)} disabled={busy}
-          type="email" placeholder="andrea@tower.co.uk"
+          type="email" placeholder="rob@tower.co.uk"
           style={inputStyle()}
         />
       </Field>
@@ -535,18 +603,8 @@ function TempPasswordModal({ creds, customerName, portalSlug, onClose }) {
   const portalUrl = `${window.location.origin}/c/${portalSlug}`;
   const blob = `Portal: ${portalUrl}\nUsername: ${creds.username}\nTemporary password: ${creds.temporary_password}`;
 
-  function copyAll() {
-    navigator.clipboard.writeText(blob).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  }
-  function copyPw() {
-    navigator.clipboard.writeText(creds.temporary_password).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  }
+  function copyAll() { navigator.clipboard.writeText(blob).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }); }
+  function copyPw()  { navigator.clipboard.writeText(creds.temporary_password).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }); }
 
   return (
     <ModalShell title={creds.kind === 'reset' ? 'Password reset' : 'User created'} onClose={onClose}>
@@ -569,9 +627,7 @@ function TempPasswordModal({ creds, customerName, portalSlug, onClose }) {
       </div>
 
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:8 }}>
-        <div style={{ fontSize:11, color: copied ? GREEN_HI : MUTED }}>
-          {copied ? '✓ Copied to clipboard' : ''}
-        </div>
+        <div style={{ fontSize:11, color: copied ? GREEN_HI : MUTED }}>{copied ? '✓ Copied to clipboard' : ''}</div>
         <div style={{ display:'flex', gap:8 }}>
           <button onClick={copyPw} style={btnSecondary()}>Copy password only</button>
           <button onClick={copyAll} style={btnPrimary()}>Copy all details</button>
@@ -602,13 +658,7 @@ function Row({ label, value, mono, bold, link }) {
 // ── Portal URL panel ────────────────────────────────────────────────────────
 function PortalUrlPanel({ portalUrl, userCount }) {
   const [copied, setCopied] = useState(false);
-  function copy() {
-    navigator.clipboard.writeText(portalUrl).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  }
-
+  function copy() { navigator.clipboard.writeText(portalUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }); }
   return (
     <Card title="Portal URL" subtitle="Send this to the customer along with their username and password.">
       <div style={{
@@ -617,12 +667,8 @@ function PortalUrlPanel({ portalUrl, userCount }) {
         border:`0.5px solid ${BORDER}`,
       }}>
         <code style={{ flex:1, fontSize:12, color:TEXT, wordBreak:'break-all' }}>{portalUrl}</code>
-        <button onClick={copy} style={btnSecondary()}>
-          {copied ? '✓ Copied' : 'Copy'}
-        </button>
-        <a href={portalUrl} target="_blank" rel="noopener noreferrer" style={btnSecondary()}>
-          Open ↗
-        </a>
+        <button onClick={copy} style={btnSecondary()}>{copied ? '✓ Copied' : 'Copy'}</button>
+        <a href={portalUrl} target="_blank" rel="noopener noreferrer" style={btnSecondary()}>Open ↗</a>
       </div>
       {userCount === 0 && (
         <div style={{ marginTop:10, fontSize:12, color:AMBER }}>
@@ -630,6 +676,166 @@ function PortalUrlPanel({ portalUrl, userCount }) {
         </div>
       )}
     </Card>
+  );
+}
+
+// ── Danger zone (disable portal) ────────────────────────────────────────────
+function DangerZonePanel({ customer, onUpdated }) {
+  const [busy, setBusy] = useState(false);
+
+  async function disablePortal() {
+    if (!confirm(`Hide ${customer.name} from the Customer Portal admin list?\n\nTheir portal users and services stay in the database — re-enable any time. They'll be signed out next time their session expires.`)) return;
+    setBusy(true);
+    try {
+      const r = await fetch(`/api/portal-admin/customers/${customer.id}`, {
+        method:'PUT',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ portal_enabled: false }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || `HTTP ${r.status}`);
+      }
+      onUpdated();
+    } catch (e) {
+      alert(`Failed: ${e.message}`);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card title="Hide from Customer Portal list" subtitle="Removes this customer from the Customer Portal admin page. Doesn't delete anything — re-enable later via 'Enable existing customer' on the main page.">
+      <button onClick={disablePortal} disabled={busy}
+        style={{ ...btnSecondary(busy), color:DANGER, borderColor:'#f0c4c4' }}>
+        {busy ? 'Working…' : 'Hide from list'}
+      </button>
+    </Card>
+  );
+}
+
+// ── Create-customer modal ───────────────────────────────────────────────────
+function CreateCustomerModal({ onClose, onCreated }) {
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err,  setErr]  = useState('');
+
+  async function submit() {
+    const trimmed = name.trim();
+    if (!trimmed) { setErr('Name is required'); return; }
+    setBusy(true); setErr('');
+    try {
+      const r = await fetch('/api/portal-admin/customers', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      onCreated(d.id);
+    } catch (e) {
+      setErr(e.message);
+      setBusy(false);
+    }
+  }
+
+  // Live preview of the slug as the user types.
+  const slugPreview = name.trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'customer';
+
+  return (
+    <ModalShell title="Add portal customer" onClose={busy ? null : onClose}>
+      <div style={{ fontSize:13, color:TEXT, lineHeight:1.5, marginBottom:14 }}>
+        Creates a new customer for the portal. After creating, you'll set up which services they see and add their portal users.
+      </div>
+
+      <Field label="Customer name">
+        <input value={name} onChange={e => setName(e.target.value)} disabled={busy}
+          autoFocus placeholder="Tower Leasing" style={inputStyle()}
+        />
+      </Field>
+      <div style={{ fontSize:11, color:MUTED, marginTop:-8, marginBottom:14 }}>
+        Portal URL will be: <code style={{ background:'#f0f0ec', padding:'2px 5px', borderRadius:3 }}>/c/{slugPreview}</code>
+      </div>
+
+      {err && <div style={{ color:DANGER, fontSize:12, marginTop:6 }}>{err}</div>}
+
+      <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginTop:6 }}>
+        <button onClick={onClose} disabled={busy} style={btnSecondary()}>Cancel</button>
+        <button onClick={submit} disabled={busy || !name.trim()} style={btnPrimary(busy || !name.trim())}>
+          {busy ? 'Creating…' : 'Create & manage'}
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+// ── Enable-existing modal ───────────────────────────────────────────────────
+function EnableExistingModal({ onClose, onEnabled }) {
+  const [eligible, setEligible] = useState(null);
+  const [picked,   setPicked]   = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err,  setErr]  = useState('');
+
+  useEffect(() => {
+    fetch('/api/portal-admin/eligible-customers')
+      .then(r => r.ok ? r.json() : [])
+      .then(setEligible)
+      .catch(() => setEligible([]));
+  }, []);
+
+  async function submit() {
+    if (!picked) { setErr('Pick a customer to enable'); return; }
+    setBusy(true); setErr('');
+    try {
+      const r = await fetch(`/api/portal-admin/customers/${picked}`, {
+        method:'PUT',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ portal_enabled: true }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      onEnabled(picked);
+    } catch (e) {
+      setErr(e.message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <ModalShell title="Enable existing customer" onClose={busy ? null : onClose}>
+      <div style={{ fontSize:13, color:TEXT, lineHeight:1.5, marginBottom:14 }}>
+        Pick an existing customer (e.g. one you've set up under <strong>Email Campaigns → Customers</strong>) to give a portal. Their existing settings are preserved — you'll add portal-specific services and users next.
+      </div>
+
+      <Field label="Customer">
+        {eligible === null ? (
+          <select disabled style={selectStyle()}><option>Loading…</option></select>
+        ) : eligible.length === 0 ? (
+          <div style={{ fontSize:12, color:MUTED, padding:'10px 0' }}>
+            All your existing customers are already portal-enabled.
+            Use <strong>+ New portal customer</strong> to add a new one.
+          </div>
+        ) : (
+          <select value={picked} onChange={e => setPicked(e.target.value)} disabled={busy} style={selectStyle()}>
+            <option value="">— pick one —</option>
+            {eligible.map(c => (
+              <option key={c.id} value={c.id}>{c.name} (/c/{c.slug})</option>
+            ))}
+          </select>
+        )}
+      </Field>
+
+      {err && <div style={{ color:DANGER, fontSize:12, marginTop:6 }}>{err}</div>}
+
+      <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginTop:14 }}>
+        <button onClick={onClose} disabled={busy} style={btnSecondary()}>Cancel</button>
+        <button onClick={submit} disabled={busy || !picked} style={btnPrimary(busy || !picked)}>
+          {busy ? 'Enabling…' : 'Enable & manage'}
+        </button>
+      </div>
+    </ModalShell>
   );
 }
 
@@ -703,11 +909,7 @@ function inputStyle() {
   };
 }
 function selectStyle() {
-  return {
-    ...inputStyle(),
-    cursor:'pointer',
-    appearance:'auto',
-  };
+  return { ...inputStyle(), cursor:'pointer', appearance:'auto' };
 }
 function btnPrimary(disabled) {
   return {
@@ -729,8 +931,6 @@ function btnSecondary(disabled) {
 
 function formatRelative(iso) {
   if (!iso) return '';
-  // SQLite returns 'YYYY-MM-DD HH:MM:SS' (UTC, no timezone marker). Browsers
-  // parse that as local — append Z to force UTC. (Same fix as EmailSection's relTime.)
   const fixed = iso.includes('T') ? iso : iso.replace(' ', 'T') + 'Z';
   const ms = Date.now() - new Date(fixed).getTime();
   const m = Math.floor(ms / 60000);
