@@ -47,8 +47,12 @@ function genTempPassword() {
  * value coming from the `services` catalogue is checked against this set
  * before being interpolated into a SQL query. Add new tables here when a
  * future service needs to reference them (e.g. 'facebook_ad_accounts').
+ *
+ * email_clients is in here because the Email service uses it as a picker —
+ * a portal customer named "Cube6" can be pointed at the email_clients row
+ * "mail.engineersolutions.co.uk" so their inbox/campaigns pull from there.
  */
-const ALLOWED_LINK_TABLES = new Set(['clients']);
+const ALLOWED_LINK_TABLES = new Set(['clients', 'email_clients']);
 
 function fetchLinkedName(linkTable, externalId) {
   if (!linkTable || !externalId) return null;
@@ -171,6 +175,18 @@ router.get('/service-options/:service_key', (req, res) => {
   if (!ALLOWED_LINK_TABLES.has(svc.link_table)) {
     return res.status(500).json({ error: `Service link_table "${svc.link_table}" is not whitelisted` });
   }
+
+  // Per-table filter: when picking from email_clients, hide rows that are
+  // themselves portal customers — you want to pick the underlying email-system
+  // record (e.g. "mail.engineersolutions.co.uk"), not another portal customer.
+  // Leaves a small loophole if you want a portal customer pointing at another
+  // portal customer's email — fine, since we still show CURRENTLY-linked rows
+  // (matched by the LEFT JOIN below) so the picker can still show the value
+  // that's already saved.
+  const filterSql = svc.link_table === 'email_clients'
+    ? 'AND (t.portal_enabled = 0 OR cs.email_client_id IS NOT NULL)'
+    : '';
+
   const rows = db.prepare(`
     SELECT
       t.id,
@@ -183,6 +199,7 @@ router.get('/service-options/:service_key', (req, res) => {
       ON cs.service_key        = ?
      AND cs.linked_external_id = t.id
     LEFT JOIN email_clients ec ON ec.id = cs.email_client_id
+    WHERE 1=1 ${filterSql}
     ORDER BY t.name COLLATE NOCASE ASC
   `).all(svc.service_key);
   res.json(rows.map(r => ({

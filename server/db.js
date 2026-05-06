@@ -924,6 +924,11 @@ db.exec(`
 // INSERT OR IGNORE keeps it idempotent — re-running on every boot is safe and
 // future Wez can edit display_name / description in the DB if needed without
 // schema changes.
+//
+// Note on the Email service: link_table is 'email_clients' because some
+// customers' portal name (e.g. "Cube6") differs from the email system record
+// they're served from (e.g. "mail.engineersolutions.co.uk"). The picker lets
+// the admin point each portal customer at the right underlying email record.
 {
   const seedService = db.prepare(`
     INSERT OR IGNORE INTO services
@@ -938,10 +943,20 @@ db.exec(`
       'Coming soon — once Facebook posting is wired up, you\'ll be able to link a Facebook page here.',
       'coming_soon', null, null, 20],
     ['email', 'Email (Inbox + Campaigns)',
-      'Inbox replies and email-campaign stats from your cold-outreach system.',
-      'live', null, null, 30],
+      'Inbox replies and email-campaign stats. Pick the underlying email system record — usually the domain you send their cold email from (e.g. mail.engineersolutions.co.uk for the "Cube6" portal customer).',
+      'live', 'email_clients', 'Email system record', 30],
   ];
   for (const s of seeds) seedService.run(...s);
+
+  // Idempotent upgrade: if a previous deploy seeded 'email' with link_table=NULL,
+  // upgrade it now to point at email_clients. Other columns are left alone so
+  // any future manual edit (e.g. wording tweak) survives.
+  db.prepare(`
+    UPDATE services
+    SET link_table = 'email_clients',
+        link_label = 'Email system record'
+    WHERE service_key = 'email' AND link_table IS NULL
+  `).run();
 }
 
 // 14m. Backfill customer_services from the legacy columns. Idempotent — uses
@@ -954,7 +969,15 @@ db.exec(`
 // state get no row in customer_services at all — that's the new representation
 // of "not_required" (absence of row, not a row with an off flag).
 {
-  // Email subscriptions.
+  // Email subscriptions. linked_external_id = the email_client's own id —
+  // preserves existing behaviour (every email-enabled customer's portal sees
+  // its own email data), while letting the admin re-point the link via the
+  // Manage panel later if a portal customer (e.g. "Cube6") needs to point at
+  // a differently-named email system record (e.g. "mail.engineersolutions.co.uk").
+  //
+  // For rows that already exist in customer_services from a prior deploy
+  // with linked_external_id = NULL, also fill in the self-link so the schema
+  // is consistent across all email subscriptions.
   const emailRows = db.prepare(`
     SELECT id FROM email_clients
     WHERE service_email_enabled = 1
@@ -964,11 +987,21 @@ db.exec(`
     const ins = db.prepare(`
       INSERT OR IGNORE INTO customer_services
         (email_client_id, service_key, linked_external_id, enabled_by)
-      VALUES (?, 'email', NULL, 'backfill')
+      VALUES (?, 'email', ?, 'backfill')
     `);
-    const tx = db.transaction(rows => { for (const r of rows) ins.run(r.id); });
+    const tx = db.transaction(rows => { for (const r of rows) ins.run(r.id, r.id); });
     tx(emailRows);
     console.log(`[db] migration: backfilled customer_services email rows for ${emailRows.length} customer(s)`);
+  }
+  // Patch any pre-existing email rows that still have NULL linked_external_id
+  // (would happen if a prior deploy used the on/off design before this upgrade).
+  const patched = db.prepare(`
+    UPDATE customer_services
+    SET linked_external_id = email_client_id
+    WHERE service_key = 'email' AND linked_external_id IS NULL
+  `).run();
+  if (patched.changes > 0) {
+    console.log(`[db] migration: self-linked email service for ${patched.changes} pre-existing row(s)`);
   }
 
   // LinkedIn subscriptions — preserve the linked_external_id link.
