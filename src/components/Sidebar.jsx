@@ -48,6 +48,11 @@ export default function Sidebar({ onLogout, activeView, onNavigate }) {
         <SubItem id="email-domain-health" label="Domain Health" active={activeView==='email-domain-health'} onNavigate={onNavigate} icon={<DomainIcon />} />
         <SubItem id="email-mailboxes"     label="Mailboxes"     active={activeView==='email-mailboxes'}     onNavigate={onNavigate} icon={<MailboxIcon />} badge={prospectCount} />
 
+        <hr style={DIVIDER} />
+
+        <div style={SECTION}>Customer Portal</div>
+        <SubItem id="portal-customers"    label="Portal Customers" active={activeView==='portal-customers'}  onNavigate={onNavigate} icon={<PortalIcon />} />
+
       </div>
 
       <div style={{ padding:'14px 16px', borderTop:'0.5px solid rgba(255,255,255,0.1)' }}>
@@ -115,6 +120,16 @@ function MailboxIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
       <path d="M2 3a1 1 0 00-1 1v8a1 1 0 001 1h12a1 1 0 001-1V4a1 1 0 00-1-1H2zm0 1h12v.4l-6 3.5L2 4.4V4zm0 1.6l5.7 3.3a.6.6 0 00.6 0L14 5.6V12H2V5.6z"/>
+    </svg>
+  );
+}
+
+function PortalIcon() {
+  // Door-with-arrow icon — represents a customer "entering" their portal.
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M3 1.5A.5.5 0 013.5 1h6a.5.5 0 01.5.5v3.5h-1V2H4v12h5v-3h1v3.5a.5.5 0 01-.5.5h-6a.5.5 0 01-.5-.5v-13z"/>
+      <path d="M11.5 5.5a.5.5 0 01.354.146l2.5 2.5a.5.5 0 010 .708l-2.5 2.5a.5.5 0 11-.708-.708L13.293 8.5H6.5a.5.5 0 010-1h6.793l-1.647-1.646A.5.5 0 0111.5 5.5z"/>
     </svg>
   );
 }

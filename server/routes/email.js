@@ -540,8 +540,14 @@ router.post('/clients', (req, res) => {
   const { name, color } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   const id = uuid();
-  db.prepare('INSERT INTO email_clients (id,name,color) VALUES (?,?,?)')
-    .run(id, name.trim(), color || '#1D9E75');
+  // Auto-generate a URL-safe slug for the customer portal at /c/<slug>.
+  // The helper (db._portalUniqueSlug) lives in db.js so the same algorithm
+  // is used for backfill of existing rows AND for new inserts here.
+  const slug = db._portalUniqueSlug
+    ? db._portalUniqueSlug(name.trim(), id)
+    : name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  db.prepare('INSERT INTO email_clients (id,name,color,slug) VALUES (?,?,?,?)')
+    .run(id, name.trim(), color || '#1D9E75', slug);
   res.json(db.prepare('SELECT * FROM email_clients WHERE id=?').get(id));
 });
 

@@ -4,6 +4,7 @@ import ClientCard from './ClientCard.jsx';
 import NewClientModal from './NewClientModal.jsx';
 import ClientDetail from './ClientDetail.jsx';
 import EmailSection from './EmailSection.jsx';
+import PortalAdmin from './PortalAdmin.jsx';
 
 export default function Dashboard({ onLogout }) {
   const [clients, setClients]           = useState([]);
@@ -87,6 +88,16 @@ export default function Dashboard({ onLogout }) {
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
         <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
         <EmailSection initialTab={initialTab} />
+      </div>
+    );
+  }
+
+  // ── Customer Portal admin ──────────────────────────────────────────────────
+  if (view === 'portal-customers') {
+    return (
+      <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+        <PortalAdmin />
       </div>
     );
   }
