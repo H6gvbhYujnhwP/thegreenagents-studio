@@ -26,9 +26,15 @@ export default function Sidebar({ onLogout, activeView, onNavigate }) {
   return (
     <div style={{ width:210, background:'#0F6E56', display:'flex', flexDirection:'column', flexShrink:0 }}>
 
-      {/* Logo */}
+      {/* Logo — the green A-leaf mark on a white tile, mirrored exactly in the
+          customer portal sidebar (PortalApp.jsx) so admin and portal look
+          identical at the top-left. Image lives at /tga-logo.png in /public. */}
       <div style={{ padding:'16px 14px', borderBottom:'0.5px solid rgba(255,255,255,0.1)', display:'flex', alignItems:'center', gap:10 }}>
-        <div style={{ width:30, height:30, background:'#1D9E75', borderRadius:7, display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontWeight:600, fontSize:14, flexShrink:0 }}>G</div>
+        <div style={{ width:30, height:30, background:'#fff', borderRadius:7, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, padding:3, boxSizing:'border-box' }}>
+          <img src="/tga-logo.png" alt="The Green Agents"
+            style={{ maxWidth:'100%', maxHeight:'100%', objectFit:'contain' }}
+          />
+        </div>
         <div>
           <div style={{ color:'#fff', fontSize:13, fontWeight:500, lineHeight:1.2 }}>The Green Agents</div>
           <div style={{ color:'#9FE1CB', fontSize:11 }}>Studio</div>

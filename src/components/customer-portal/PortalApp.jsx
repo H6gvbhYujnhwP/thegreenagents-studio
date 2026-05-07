@@ -20,7 +20,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 
 // Brand colours — match the admin Studio for visual consistency.
-const TGA_GREEN     = '#0e3b2d';
+const TGA_GREEN     = '#0F6E56';
 const TGA_GREEN_HI  = '#14a37e';
 const TGA_GREEN_LO  = '#7fbfa1';
 const TEXT          = '#1a1a1a';
@@ -468,10 +468,14 @@ function PortalChrome({ user, client, services, onLogout }) {
           display:'flex', alignItems:'center', gap:10,
         }}>
           <div style={{
-            width:30, height:30, borderRadius:7, background:TGA_GREEN_HI,
-            color:'white', display:'flex', alignItems:'center', justifyContent:'center',
-            fontSize:14, fontWeight:500, flexShrink:0,
-          }}>G</div>
+            width:30, height:30, borderRadius:7, background:'#fff',
+            display:'flex', alignItems:'center', justifyContent:'center',
+            flexShrink:0, padding:3, boxSizing:'border-box',
+          }}>
+            <img src="/tga-logo.png" alt="The Green Agents"
+              style={{ maxWidth:'100%', maxHeight:'100%', objectFit:'contain' }}
+            />
+          </div>
           <div style={{ minWidth:0 }}>
             <div style={{ fontSize:13, fontWeight:500, color:'white', lineHeight:1.2 }}>The Green Agents</div>
             <div style={{ fontSize:11, color:TGA_GREEN_LO, marginTop:2 }}>Studio</div>
@@ -531,7 +535,7 @@ function PortalChrome({ user, client, services, onLogout }) {
       {/* Workspace */}
       <main style={{ flex:1, display:'flex', flexDirection:'column', minWidth:0 }}>
         <header style={{
-          padding:'14px 22px', borderBottom:`0.5px solid ${BORDER}`,
+          padding:'18px 22px', borderBottom:`0.5px solid ${BORDER}`,
           display:'flex', alignItems:'center', gap:14, background:CARD,
         }}>
           {/* Customer logo — uses the uploaded logo URL if available, falls
@@ -540,19 +544,19 @@ function PortalChrome({ user, client, services, onLogout }) {
           {client?.logo_url ? (
             <img src={client.logo_url} alt={`${client.name} logo`}
               style={{
-                width:56, height:56, borderRadius:8,
+                width:72, height:72, borderRadius:10,
                 objectFit:'contain', flexShrink:0, display:'block',
               }}
             />
           ) : (
             <div style={{
-              width:56, height:56, borderRadius:8, background:client?.logo_color || '#1a4d8c',
+              width:72, height:72, borderRadius:10, background:client?.logo_color || '#1a4d8c',
               color:'white', display:'flex', alignItems:'center', justifyContent:'center',
-              fontSize:18, fontWeight:500, flexShrink:0,
+              fontSize:22, fontWeight:500, flexShrink:0,
             }}>{client?.logo_initial || 'C'}</div>
           )}
           <div>
-            <div style={{ fontSize:15, fontWeight:500, color:TEXT }}>{client?.name}</div>
+            <div style={{ fontSize:17, fontWeight:500, color:TEXT }}>{client?.name}</div>
             <div style={{ fontSize:11, color:MUTED }}>{client?.audience}</div>
           </div>
           <div style={{

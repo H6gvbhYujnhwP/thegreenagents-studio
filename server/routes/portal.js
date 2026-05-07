@@ -96,8 +96,10 @@ router.get('/posts', (req, res) => {
   }
 
   // Most-recent awaiting_approval campaign for this LinkedIn client.
+  // The campaigns table doesn't have a title column — generated post batches
+  // are identified by id and creation date; the portal shows a generic header.
   const campaign = db.prepare(`
-    SELECT id, title, stage, posts_json, created_at
+    SELECT id, stage, posts_json, created_at
     FROM campaigns
     WHERE client_id = ? AND stage = 'awaiting_approval'
     ORDER BY created_at DESC
@@ -124,7 +126,7 @@ router.get('/posts', (req, res) => {
     posts: posts.map(projectPost),
     campaign: {
       id:    campaign.id,
-      title: campaign.title || 'Posts ready for review',
+      title: 'Posts ready for review',
     },
     not_subscribed: false,
   });
@@ -150,7 +152,7 @@ function findPostForPortalUser(req, postId) {
   // open (admin error, partial-failure retry) we still let the customer act
   // on it.
   const campaigns = db.prepare(`
-    SELECT id, title, stage, posts_json, created_at
+    SELECT id, stage, posts_json, created_at
     FROM campaigns
     WHERE client_id = ? AND stage = 'awaiting_approval'
     ORDER BY created_at DESC
@@ -173,7 +175,7 @@ function findCampaignForPortalUser(req, campaignId) {
   const linkedinClientId = resolveLinkedinClientId(req.portalClient.id);
   if (!linkedinClientId) return null;
   const campaign = db.prepare(`
-    SELECT id, title, stage, posts_json, created_at, client_id
+    SELECT id, stage, posts_json, created_at, client_id
     FROM campaigns
     WHERE id = ? AND client_id = ?
   `).get(campaignId, linkedinClientId);
