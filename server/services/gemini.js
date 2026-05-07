@@ -126,10 +126,72 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
   const logoW    = logoMeta.width;
   const logoH    = logoMeta.height;
 
+  // Auto-detect whether the logo has its own opaque background.
+  //
+  // The original design assumed all logos were transparent PNGs and added a
+  // contrasting white/black patch behind every one for readability. But some
+  // customers upload logos that already have a built-in white background
+  // (e.g. Tower Leasing). For those, the patch is redundant and produces a
+  // visible thin line where the patch edge meets the logo's own rectangle —
+  // two near-white shapes overlapping on a darker base image.
+  //
+  // We sample the four corner pixels' alpha channel:
+  //   - All four corners opaque (alpha=255) → logo has its own background,
+  //     skip the patch.
+  //   - Any corner has transparency → logo expects a patch behind it, keep
+  //     the existing behaviour.
+  //
+  // The middle of every logo is opaque (that's the artwork), so we can't
+  // sample there. Corners are reliable: a transparent-background logo has
+  // alpha=0 at the corners; a logo with rounded-corner artwork on a coloured
+  // background still has alpha=255 at the rectangle corners. Errors fall
+  // through to "keep the patch" — safer than accidentally dropping it.
+  let logoHasOwnBackground = false;
+  try {
+    const logoRaw = await sharp(logoResized).raw().toBuffer({ resolveWithObject: true });
+    const channels = logoRaw.info.channels;
+    if (channels === 4) {
+      const data = logoRaw.data;
+      const w = logoRaw.info.width;
+      const h = logoRaw.info.height;
+      // Index of alpha byte for pixel (x, y) is (y * w + x) * 4 + 3.
+      const alphaAt = (x, y) => data[(y * w + x) * 4 + 3];
+      const corners = [
+        alphaAt(0, 0),
+        alphaAt(w - 1, 0),
+        alphaAt(0, h - 1),
+        alphaAt(w - 1, h - 1),
+      ];
+      logoHasOwnBackground = corners.every(a => a === 255);
+    }
+    // channels === 3 means the PNG was saved without an alpha channel at all
+    // (fully opaque). That's also "logo has its own background."
+    if (channels === 3) {
+      logoHasOwnBackground = true;
+    }
+  } catch (err) {
+    console.warn(`[gemini] Logo alpha sample failed (keeping patch): ${err.message}`);
+  }
+
   const patchW = logoW + PADDING * 2;
   const patchH = logoH + PADDING * 2;
   const patchX = width  - patchW - 16;
   const patchY = height - patchH - 16;
+
+  // If the logo has its own background, place it directly on the image with
+  // no padding patch behind it. We still inset it from the corner by the
+  // same 16px the patch path uses, so the visual position is consistent.
+  if (logoHasOwnBackground) {
+    const logoLeft = width  - logoW - 16;
+    const logoTop  = height - logoH - 16;
+    const composited = await sharp(imageBuffer)
+      .composite([
+        { input: logoResized, left: logoLeft, top: logoTop, blend: 'over' }
+      ])
+      .png()
+      .toBuffer();
+    return composited.toString('base64');
+  }
 
   // Analyse corner brightness to determine patch colour
   const cornerPixels = await sharp(imageBuffer)
