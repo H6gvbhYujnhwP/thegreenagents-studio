@@ -913,11 +913,24 @@ db.exec(`
     ON customer_services(email_client_id, service_key);
   CREATE INDEX IF NOT EXISTS idx_customer_services_service
     ON customer_services(service_key);
+`);
+
+// One-shot fix: an earlier version of this migration created
+// idx_customer_services_external_unique that blocked self-links (rows where
+// email_client_id = linked_external_id). Self-links are the natural default
+// for "this email customer's portal uses its own data" — they shouldn't count
+// toward the uniqueness check. Drop the old index if present, then recreate
+// with the self-link exemption. Idempotent: safe to re-run forever.
+db.exec(`
+  DROP INDEX IF EXISTS idx_customer_services_external_unique;
   /* For services with linked_external_id, prevent the same external record
-     being linked to two customers. Partial UNIQUE — NULL means "no link". */
+     being linked to TWO DIFFERENT portal customers. Self-links (email_client_id
+     = linked_external_id) are exempt — they represent "use my own data" and
+     can co-exist with another customer's link to the same record. */
   CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_services_external_unique
     ON customer_services(service_key, linked_external_id)
-    WHERE linked_external_id IS NOT NULL;
+    WHERE linked_external_id IS NOT NULL
+      AND email_client_id != linked_external_id;
 `);
 
 // 14l. Seed the services catalogue with the three services we know about today.
