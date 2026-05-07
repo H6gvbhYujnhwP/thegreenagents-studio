@@ -49,13 +49,6 @@ const mockClient = {
   logo_color: '#1a4d8c',
 };
 
-const mockUser = {
-  id: 'u_1',
-  username: 'andrea-tower',
-  email: 'andrea@tower.co.uk',
-  role: 'admin',
-};
-
 const mockPosts = Array.from({ length: 12 }).map((_, i) => ({
   id: `post_${i + 1}`,
   order: i + 1,
@@ -466,41 +459,72 @@ function PortalChrome({ user, client, services, onLogout }) {
     <div style={{ display:'flex', height:'100vh', background:BG, fontFamily:'-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }}>
       {/* Sidebar */}
       <aside style={{
-        width:200, background:TGA_GREEN, color:TGA_GREEN_LO,
-        padding:'20px 14px', display:'flex', flexDirection:'column', gap:24,
-        flexShrink:0,
+        width:220, background:TGA_GREEN, color:TGA_GREEN_LO,
+        display:'flex', flexDirection:'column', flexShrink:0,
       }}>
-        <div style={{ display:'flex', alignItems:'center', gap:9 }}>
+        {/* Brand block — clearly delineated from nav with a divider below */}
+        <div style={{
+          padding:'20px 18px', borderBottom:'0.5px solid rgba(255,255,255,0.1)',
+          display:'flex', alignItems:'center', gap:10,
+        }}>
           <div style={{
-            width:28, height:28, borderRadius:6, background:TGA_GREEN_HI,
+            width:30, height:30, borderRadius:7, background:TGA_GREEN_HI,
             color:'white', display:'flex', alignItems:'center', justifyContent:'center',
-            fontSize:13, fontWeight:500,
+            fontSize:14, fontWeight:500, flexShrink:0,
           }}>G</div>
-          <div>
+          <div style={{ minWidth:0 }}>
             <div style={{ fontSize:13, fontWeight:500, color:'white', lineHeight:1.2 }}>The Green Agents</div>
-            <div style={{ fontSize:11, color:TGA_GREEN_LO }}>Studio</div>
+            <div style={{ fontSize:11, color:TGA_GREEN_LO, marginTop:2 }}>Studio</div>
           </div>
         </div>
 
-        <div>
-          <div style={navSectionStyle()}>Social posts</div>
-          <NavItem label="LinkedIn Posts" active={page==='posts'}     onClick={() => setPage('posts')} />
-          {/* Facebook Posts ships when the column lands. Already in the services
-              map as 'coming_soon' so the gate panel is ready. Uncomment when
-              the admin can link a Facebook page to the customer:
-          <NavItem label="Facebook Posts" active={page==='facebook'}  onClick={() => setPage('facebook')} />
-          */}
-          <div style={navSectionStyle()}>Email</div>
-          <NavItem label="Inbox"          active={page==='inbox'}     onClick={() => setPage('inbox')} />
-          <NavItem label="Campaigns"      active={page==='campaigns'} onClick={() => setPage('campaigns')} />
-          <div style={navSectionStyle()}>Account</div>
-          <NavItem label="Settings"       active={page==='settings'}  onClick={() => setPage('settings')} />
-        </div>
+        {/* Nav — three sections (Social posts, Email, Account). Each has a
+            small-caps heading, then nav items. Generous gap between sections
+            so the eye can group them. */}
+        <nav style={{ flex:1, padding:'14px 0', display:'flex', flexDirection:'column', gap:18 }}>
+          <NavSection heading="Social posts">
+            <NavItem label="LinkedIn Posts"
+              active={page==='posts'}
+              onClick={() => setPage('posts')}
+              dim={svc.linkedin === 'not_required'}
+            />
+            <NavItem label="Facebook Posts"
+              active={page==='facebook'}
+              onClick={() => setPage('facebook')}
+              dim={svc.facebook !== 'enabled'}
+              suffix={svc.facebook === 'coming_soon' ? 'Soon' : null}
+            />
+          </NavSection>
 
-        <div style={{ flex:1 }} />
+          <NavSection heading="Email">
+            <NavItem label="Inbox"
+              active={page==='inbox'}
+              onClick={() => setPage('inbox')}
+              dim={svc.email === 'not_required'}
+            />
+            <NavItem label="Campaigns"
+              active={page==='campaigns'}
+              onClick={() => setPage('campaigns')}
+              dim={svc.email === 'not_required'}
+            />
+          </NavSection>
 
-        <div onClick={onLogout} style={{ fontSize:12, color:TGA_GREEN_LO, padding:'6px 8px', cursor:'pointer' }}>
-          Sign out
+          <NavSection heading="Account">
+            <NavItem label="Settings"
+              active={page==='settings'}
+              onClick={() => setPage('settings')}
+            />
+          </NavSection>
+        </nav>
+
+        {/* Sign out — pinned to the bottom, its own visual zone via top border */}
+        <div style={{
+          padding:'14px 18px', borderTop:'0.5px solid rgba(255,255,255,0.1)',
+        }}>
+          <button onClick={onLogout} style={{
+            background:'transparent', border:'none', color:TGA_GREEN_LO,
+            fontSize:12, padding:0, cursor:'pointer',
+          }}>Sign out</button>
         </div>
       </aside>
 
@@ -510,11 +534,27 @@ function PortalChrome({ user, client, services, onLogout }) {
           padding:'14px 22px', borderBottom:`0.5px solid ${BORDER}`,
           display:'flex', alignItems:'center', gap:14, background:CARD,
         }}>
-          <div style={{
-            width:38, height:38, borderRadius:7, background:client?.logo_color || '#1a4d8c',
-            color:'white', display:'flex', alignItems:'center', justifyContent:'center',
-            fontSize:14, fontWeight:500, flexShrink:0,
-          }}>{client?.logo_initial || 'C'}</div>
+          {/* Customer logo — uses the uploaded logo URL if available, falls
+              back to initials on the brand colour. Box is fixed-size so both
+              states have the same footprint. */}
+          {client?.logo_url ? (
+            <div style={{
+              width:44, height:44, borderRadius:8, background:'#fff',
+              border:`0.5px solid ${BORDER}`,
+              display:'flex', alignItems:'center', justifyContent:'center',
+              flexShrink:0, overflow:'hidden', padding:4, boxSizing:'border-box',
+            }}>
+              <img src={client.logo_url} alt={`${client.name} logo`}
+                style={{ maxWidth:'100%', maxHeight:'100%', objectFit:'contain' }}
+              />
+            </div>
+          ) : (
+            <div style={{
+              width:44, height:44, borderRadius:8, background:client?.logo_color || '#1a4d8c',
+              color:'white', display:'flex', alignItems:'center', justifyContent:'center',
+              fontSize:15, fontWeight:500, flexShrink:0,
+            }}>{client?.logo_initial || 'C'}</div>
+          )}
           <div>
             <div style={{ fontSize:15, fontWeight:500, color:TEXT }}>{client?.name}</div>
             <div style={{ fontSize:11, color:MUTED }}>{client?.audience}</div>
@@ -611,51 +651,144 @@ function ServiceGate({ state, serviceName, children }) {
   );
 }
 
-function navSectionStyle() {
-  return {
-    fontSize:10, textTransform:'uppercase', letterSpacing:'0.08em',
-    color:TGA_GREEN_LO, margin:'0 0 8px', padding:'0 8px',
-  };
+// ── Sidebar primitives ──────────────────────────────────────────────────────
+//
+// Three-section layout (Social posts / Email / Account):
+//   - NavSection  : section heading + the items beneath it
+//   - NavItem     : single nav row, with active accent bar on the left edge
+//                   matching the admin sidebar's visual language
+//
+// `dim` softens an item that's not subscribed (so Andrea sees Inbox/Campaigns
+// in the sidebar even when her plan doesn't include email — but they read as
+// secondary, with the gate panel explaining "Not required" when she clicks).
+// `suffix` appends a small label like "Soon" for coming_soon services.
+function NavSection({ heading, children }) {
+  return (
+    <div>
+      <div style={{
+        // Bolder section headings — more weight, brighter colour, slightly
+        // larger so they read as proper structural labels rather than a hint.
+        fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.1em',
+        color:'rgba(255,255,255,0.85)', padding:'0 18px', marginBottom:8,
+      }}>{heading}</div>
+      <div style={{ display:'flex', flexDirection:'column' }}>{children}</div>
+    </div>
+  );
 }
 
-function NavItem({ label, active, onClick }) {
+function NavItem({ label, active, onClick, dim, suffix }) {
   const [hover, setHover] = useState(false);
   return (
-    <div onClick={onClick}
+    <button onClick={onClick}
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       style={{
-        display:'flex', alignItems:'center', gap:8, padding:'7px 8px', fontSize:13,
-        color: active ? 'white' : TGA_GREEN_LO,
-        background: active ? 'rgba(255,255,255,0.08)' : (hover ? 'rgba(255,255,255,0.04)' : 'transparent'),
-        borderRadius:6, cursor:'pointer', userSelect:'none',
-      }}
-    >{label}</div>
+        display:'flex', alignItems:'center', gap:8,
+        padding:'7px 18px',
+        background: active ? 'rgba(255,255,255,0.1)' : (hover ? 'rgba(255,255,255,0.04)' : 'transparent'),
+        // Left accent bar — matches the admin sidebar style. Always 2px so
+        // hover/active don't change layout, just colour.
+        borderLeft: active ? '2px solid #9FE1CB' : '2px solid transparent',
+        borderTop:'none', borderRight:'none', borderBottom:'none',
+        color: active ? '#fff' : (dim ? 'rgba(255,255,255,0.4)' : TGA_GREEN_LO),
+        fontSize:12.5, textAlign:'left', cursor:'pointer', userSelect:'none',
+        width:'100%',
+      }}>
+      <span style={{ flex:1 }}>{label}</span>
+      {suffix && (
+        <span style={{
+          fontSize:9, fontWeight:500, padding:'1px 6px',
+          background:'rgba(255,255,255,0.12)', color:'rgba(255,255,255,0.7)',
+          borderRadius:3, letterSpacing:'0.04em', textTransform:'uppercase',
+        }}>{suffix}</span>
+      )}
+    </button>
   );
 }
 
 // ── POSTS PAGE ───────────────────────────────────────────────────────────────
 function PortalPosts() {
-  const [posts, setPosts] = useState(mockPosts);
-  const [editing, setEditing] = useState(null);  // post object being edited
-  const [regenConfirm, setRegenConfirm] = useState(null);  // post object pending regen
+  // Loading lifecycle: null = not yet loaded, [] = loaded but empty, [...] = posts.
+  const [posts, setPosts]               = useState(null);
+  const [campaign, setCampaign]         = useState(null);
+  const [notSubscribed, setNotSubscribed] = useState(false);
+  const [loadError, setLoadError]       = useState(null);
+  const [editing, setEditing]           = useState(null);
+  const [regenConfirm, setRegenConfirm] = useState(null);
 
+  // Initial load. The ServiceGate upstream usually filters out the
+  // not_subscribed case before we even mount, but we still respond cleanly
+  // here in case the gate is bypassed or the services state is stale.
+  useEffect(() => {
+    fetch('/api/portal/posts', { credentials:'include' })
+      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+      .then(d => {
+        setPosts(d.posts || []);
+        setCampaign(d.campaign);
+        setNotSubscribed(!!d.not_subscribed);
+      })
+      .catch(e => {
+        setLoadError(String(e));
+        setPosts([]);
+      });
+  }, []);
+
+  // ─── Loading / empty / error states ───
+  if (loadError) {
+    return (
+      <div>
+        <h2 style={pageTitle()}>LinkedIn Posts</h2>
+        <div style={{
+          padding:'12px 16px', background:'#fbe9e9', color:DANGER,
+          borderRadius:8, fontSize:13, marginTop:18,
+        }}>Couldn't load posts: {loadError}</div>
+      </div>
+    );
+  }
+  if (posts === null) {
+    return (
+      <div>
+        <h2 style={pageTitle()}>LinkedIn Posts</h2>
+        <p style={pageSub()}>Loading your posts…</p>
+      </div>
+    );
+  }
+  if (posts.length === 0) {
+    return (
+      <div>
+        <h2 style={pageTitle()}>LinkedIn Posts — review &amp; approve</h2>
+        <div style={{
+          marginTop:18, padding:'40px 32px', background:CARD,
+          borderRadius:8, border:`0.5px dashed ${BORDER}`,
+          textAlign:'center',
+        }}>
+          <div style={{ fontSize:14, color:TEXT, marginBottom:6, fontWeight:500 }}>
+            Nothing to review right now
+          </div>
+          <div style={{ fontSize:13, color:MUTED, lineHeight:1.5, maxWidth:440, margin:'0 auto' }}>
+            Your next batch will appear here when it's ready. We'll let you know.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Loaded — main review grid ───
   const approvedCount = posts.filter(p => p.approved).length;
-  const allApproved = approvedCount === posts.length;
+  const allApproved   = approvedCount === posts.length;
 
   function approveOne(id) {
     setPosts(prev => prev.map(p => p.id === id ? { ...p, approved: true } : p));
-    // TODO(backend): POST /api/portal/posts/:id/approve
+    // TODO(backend chunk 3b): POST /api/portal/posts/:id/approve
   }
   function approveAllRemaining() {
     if (!confirm(`Approve all ${posts.length - approvedCount} remaining posts?`)) return;
     setPosts(prev => prev.map(p => ({ ...p, approved: true })));
-    // TODO(backend): POST /api/portal/campaigns/:id/posts/approve-all
+    // TODO(backend chunk 3b): POST /api/portal/campaigns/:id/posts/approve-all
   }
   function saveEdit(id, newBody, newTitle) {
     setPosts(prev => prev.map(p => p.id === id ? { ...p, body: newBody, title: newTitle, approved: true } : p));
     setEditing(null);
-    // TODO(backend): PUT /api/portal/posts/:id  body: { title, body }
-    //   server marks the post approved=true on save (per the spec — edit + save = ready)
+    // TODO(backend chunk 3b): PUT /api/portal/posts/:id  body: { title, body }
   }
   function regenPost(id) {
     setPosts(prev => prev.map(p => p.id === id ? {
@@ -665,17 +798,7 @@ function PortalPosts() {
       approved: false,
     } : p));
     setRegenConfirm(null);
-    // TODO(backend): POST /api/portal/posts/:id/regenerate
-    //   - returns { post: { ...new fields } }
-    //   - this triggers Gemini text + image regen
-    //   - on success, replace the post in state
-    setTimeout(() => {
-      setPosts(prev => prev.map(p => p.id === id ? {
-        ...p,
-        title: 'Fresh take — fully regenerated',
-        body:  'New text and a new image have been generated. Review and approve when ready.',
-      } : p));
-    }, 1200);
+    // TODO(backend chunk 3b): POST /api/portal/posts/:id/regenerate
   }
 
   return (
@@ -706,7 +829,7 @@ function PortalPosts() {
 
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
         {posts.map(p => (
-          <PostCard key={p.id} post={p}
+          <PostCard key={p.id} post={p} totalPosts={posts.length}
             onEdit={() => setEditing(p)}
             onRegen={() => setRegenConfirm(p)}
             onApprove={() => approveOne(p.id)}
@@ -738,21 +861,29 @@ function PortalPosts() {
   );
 }
 
-function PostCard({ post, onEdit, onRegen, onApprove }) {
+function PostCard({ post, totalPosts, onEdit, onRegen, onApprove }) {
   return (
     <div style={{
       background:CARD, borderRadius:8, border:`0.5px solid ${BORDER}`, overflow:'hidden',
     }}>
+      {/* Post image — real image from the campaign's posts_json. Falls back
+          to a neutral placeholder block when image_url is missing or generation
+          failed (image_error). The 1.91:1 aspect ratio matches LinkedIn. */}
       <div style={{
-        aspectRatio:'1.91/1', background:post.image_color, color:'#d0e6f0',
-        display:'flex', alignItems:'center', justifyContent:'center', fontSize:11,
-        position:'relative',
+        aspectRatio:'1.91/1', position:'relative',
+        background: post.image_url ? '#f0f0ec' : '#2a4d2a',
+        display:'flex', alignItems:'center', justifyContent:'center',
+        overflow:'hidden',
       }}>
-        <span style={{
-          position:'absolute', top:8, left:8,
-          background:'rgba(0,0,0,0.4)', color:'white', padding:'1px 6px',
-          borderRadius:3, fontSize:10,
-        }}>image</span>
+        {post.image_url ? (
+          <img src={post.image_url} alt=""
+            style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }}
+          />
+        ) : (
+          <span style={{ color:'#d0e6f0', fontSize:11 }}>
+            {post.image_error ? 'Image generation failed — regenerate to retry' : 'No image yet'}
+          </span>
+        )}
       </div>
       <div style={{ padding:'11px 12px' }}>
         <div style={{
@@ -762,14 +893,14 @@ function PostCard({ post, onEdit, onRegen, onApprove }) {
           <span style={{
             padding:'1px 6px', background:BLUE_BG, color:BLUE,
             borderRadius:4, fontSize:10, fontWeight:500,
-          }}>Post {post.order} of 12</span>
+          }}>Post {post.order} of {totalPosts}</span>
           <span>{post.scheduled_for}</span>
         </div>
         <p style={{ fontSize:13, fontWeight:500, margin:'0 0 4px', lineHeight:1.3, color:TEXT }}>{post.title}</p>
         <p style={{
           fontSize:11, color:MUTED, lineHeight:1.4, margin:'0 0 10px',
           display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden',
-        }}>{post.body.split('\n')[0]}</p>
+        }}>{(post.body || '').split('\n')[0]}</p>
         <div style={{ display:'flex', gap:5 }}>
           <button onClick={onEdit} style={cardBtn()}>Edit</button>
           <button onClick={onRegen} style={cardBtn(DANGER)}>Regen</button>
@@ -801,10 +932,17 @@ function EditPostModal({ post, onClose, onSave }) {
         <div>
           <div style={{ fontSize:11, color:MUTED, marginBottom:6 }}>Image (read-only)</div>
           <div style={{
-            aspectRatio:'1.91/1', background:post.image_color, borderRadius:6,
+            aspectRatio:'1.91/1', borderRadius:6, overflow:'hidden',
+            background: post.image_url ? '#f0f0ec' : '#2a4d2a',
             display:'flex', alignItems:'center', justifyContent:'center',
             color:'#d0e6f0', fontSize:11,
-          }}>image</div>
+          }}>
+            {post.image_url
+              ? <img src={post.image_url} alt=""
+                  style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />
+              : 'No image'
+            }
+          </div>
           <div style={{ fontSize:11, color:TERTIARY_TEXT, marginTop:8, lineHeight:1.4 }}>
             Want a new image? Cancel and click <strong style={{ color:TEXT }}>Regen</strong> on the
             post — that regenerates both text and image.
@@ -1170,11 +1308,13 @@ function PortalSettings({ user, services }) {
             People at your company who can sign in to this portal. Only admins can add or remove users.
           </p>
           <div style={{ border:`0.5px solid ${BORDER}`, borderRadius:6, overflow:'hidden' }}>
-            <UserRow username="andrea-tower"  email="andrea@tower.co.uk" role="admin"  isYou />
-            <UserRow username="ben-marketing" email="ben@tower.co.uk"    role="viewer" />
+            {/* Until the data routes ship (next chunk), we just show the
+                signed-in user themselves. Once GET /api/portal/users is wired
+                up this becomes a real list with Add / Remove controls. */}
+            <UserRow username={user.username} email={user.email || ''} role={user.role} isYou />
           </div>
-          <div style={{ marginTop:12 }}>
-            <BtnSecondary onClick={() => alert('(Demo) Add-user flow goes here.')}>+ Add user</BtnSecondary>
+          <div style={{ marginTop:12, fontSize:11, color:TERTIARY_TEXT }}>
+            Adding more users from this portal is coming soon. In the meantime, contact The Green Agents to add a teammate.
           </div>
         </SettingsCard>
       )}

@@ -9,6 +9,7 @@ import emailRoutes     from './routes/email.js';
 import algorithmRoutes from './routes/algorithm.js';
 import portalAuthRoutes from './routes/portal-auth.js';
 import portalAdminRoutes from './routes/portal-admin.js';
+import portalRoutes from './routes/portal.js';
 import { startPoller } from './services/imap-poller.js';
 import { startClassifier } from './services/classify-replies.js';
 import { startDripTicker } from './services/drip-ticker.js';
@@ -27,6 +28,7 @@ app.use('/api/campaigns', campaignRoutes);
 app.use('/api/email',     emailRoutes);
 app.use('/api/algorithm', algorithmRoutes);
 app.use('/api/portal',    portalAuthRoutes);   // customer-portal auth (login/logout/check/reset)
+app.use('/api/portal',    portalRoutes);       // customer-portal data (posts, inbox, campaigns)
 app.use('/api/portal-admin', portalAdminRoutes); // admin-side portal management (requireAuth)
 
 const distPath = join(__dirname, '../dist');
