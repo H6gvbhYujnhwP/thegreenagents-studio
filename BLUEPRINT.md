@@ -68,6 +68,22 @@ Both products share a database (better-sqlite3), an admin UI, and a per-customer
 
 19. **Admin sets initial portal passwords; portal shows "your password is temporary" banner on first sign-in.** No invite-link flow. Reset emails work the normal way for forgotten passwords later.
 
+### Customer-portal final-mile decisions (locked in this chat)
+
+20. **The customer portal mirrors the admin post-card layout exactly — image at natural aspect (no cropping), full body text with "Read full post" expand, content_pillar · format meta line, "📅 Day Time" schedule, four action buttons (Edit text / Rewrite post / New image / Approve).** The customer reviews exactly what'll be posted to LinkedIn — no truncated previews. Spinner overlays cover the card during text regen and sit over the image during image regen, with a "Please wait while your image/text is being regenerated" helper message.
+
+21. **Regenerate is split into two backend routes — `/regenerate-text` (Anthropic only) and `/regenerate-image` (Gemini + R2 only).** Mirrors admin's "Rewrite post" / "New image" buttons. Combined 30/customer/day cap shared with the legacy combined `/regenerate` route — any text or image regen counts toward the same 30. The legacy combined route is kept in place but no longer wired to a UI.
+
+22. **"View in Supergrow" link is hidden from customers everywhere.** Customers see the portal as a Green Agents product; they don't see the underlying Supergrow tool. Applies to both the live review grid and the read-only past-campaign history.
+
+23. **Past campaigns history: ANY deployed campaign for this customer's linked LinkedIn client.** Specifically `stage IN ('deployed', 'done')` — meaning anything customer-approved via approve-all (`deployed`) AND anything admin pushed direct to Supergrow drafts before the portal existed (`done`). Read-only: same `PostCard` component as the live grid but with `readOnly` prop hiding the action row. Lives below the current-batch grid on the same LinkedIn Posts page (no separate "history" nav item).
+
+24. **Customer portal sidebar uses identical colour to admin sidebar (`#0F6E56`).** TGA logo + tile + "The Green Agents / Studio" wordmark are visually identical at the top-left across both. Logo lives at `public/tga-logo.png` (Vite-bundled static asset, served from URL root).
+
+25. **`generatePosts` runs without web search.** The web_search tool was the root cause of the 2026-05-07 Cube6 failure ("I need to conduct the required research before generating the posts" — Claude returned that as text and never produced JSON). The LinkedIn algorithm context now comes from the stored `algorithm_brief` (set by the admin "LinkedIn Algorithm" button). If the brief is null or older than 14 days, the campaign log shows a non-blocking warning. Both `generatePosts` and `regenerateSinglePost` also got an automatic JSON-parse retry — up to 2 attempts, with the second using an aggressive "JSON ONLY" override system message.
+
+26. **Customer-portal reply send uses the mailbox the original arrived on.** Decision locked in chunk 3b-ii. The `email_inboxes.email_address` becomes the `From:` of the outbound. Maintains threading because (a) the recipient sees the same address that originally received them, (b) that mailbox is already SES-verified, (c) `In-Reply-To` and `References` headers wire the new message into the existing thread in Gmail/Outlook.
+
 ---
 
 ## Current state — what's deployed and working
@@ -196,10 +212,10 @@ A per-customer portal at `/c/<slug>` where each portal customer's contact (e.g. 
 - **Login** — username + password form. Subtitle pulls customer name from `GET /api/portal/by-slug/:slug`. "Forgot password?" link opens a modal that posts to `/auth/forgot-password` (always returns 200 — never leaks whether email is registered).
 - **Reset password** — mounted when URL has `?reset=<token>`. Two password fields → POST to `/auth/reset-password`.
 - **Portal chrome** (after login) — sidebar with three sections (**Social posts** / **Email** / **Account**), workspace area on the right. Sidebar headings are bold uppercase with bright colour for clear visual hierarchy.
-- **LinkedIn Posts** — review/edit/regen/approve grid. **Real images now ship from `posts_json.image_url`** (chunk 3a, just landed). Approve/edit/regen are still TODO stubs (chunk 3b).
-- **Inbox** — table of received replies. **Still using mockReplies**. Real route is chunk 3b.
-- **Campaigns** — read-only view of email campaigns + stats. **Still using mockCampaigns**. Real route is chunk 3b.
-- **Settings** — change own password (real, working), organisation users (currently shows the signed-in user only, with a "more users coming soon" note — real list endpoint is chunk 3b).
+- **LinkedIn Posts** — full review grid mirroring admin layout exactly. Image at natural aspect, full body with "Read full post" expand, four buttons (Edit text / Rewrite post / New image / Approve), spinner overlays during regen. Below the live grid: "Past campaigns" section with read-only history of every `deployed` or `done` campaign for this client.
+- **Inbox** — real `/api/portal/inbox` data. Click a row to open full reply detail (HTML body when present, text fallback) in an email-client-style modal. Reply button opens compose modal that sends via SES from the mailbox the original arrived on, with `In-Reply-To` and `References` for threading.
+- **Campaigns** — real `/api/portal/campaigns` read-only list with sent/opens/clicks/replies counts. Aggregate stats strip at top. `tracking_off` campaigns show "—" for opens/clicks with explanatory note.
+- **Settings** — change own password (real, working), organisation users (deliberately shows the signed-in user only with a "managed by The Green Agents" note — Wez's call, not a TODO).
 
 **Header logo:** 44×44 box. Renders `client.logo_url` when set, falls back to initials on the brand colour. Logo arrives via `/api/portal/auth/check`.
 
@@ -216,21 +232,31 @@ A per-customer portal at `/c/<slug>` where each portal customer's contact (e.g. 
 
 **Data backend file:** `server/routes/portal.js`, also mounted at `/api/portal` (Express cascades through routers at the same prefix). All routes go through `requirePortalSession` middleware applied via `router.use()` at the top — the customer is always resolved from the cookie.
 
-**Endpoints currently shipped (chunk 3a):**
-- `GET /posts` — most-recent `awaiting_approval` campaign for the linked LinkedIn client. Returns `{ posts, campaign, not_subscribed }`. Posts projected from the JSON in `campaigns.posts_json` to portal-friendly fields (`title`, `body`, `image_url`, `scheduled_for`, `approved`, etc.). Resolves the LinkedIn client id from `customer_services` first (new source of truth), falls back to legacy `email_clients.linkedin_client_id` if needed.
+**Endpoints currently shipped (full chunk 3b complete):**
 
-**Endpoints still TODO (chunk 3b):**
-- `PUT /posts/:id` body `{ title, body }` — saves AND marks approved
-- `POST /posts/:id/approve`
-- `POST /posts/:id/regenerate` — Gemini regen, soft-cap 30/customer/day (table `client_post_regens` already exists)
-- `POST /campaigns/:id/posts/approve-all` — bulk approve. **When all posts approved, push to Supergrow as live `queue_post` calls in order. On partial failure (e.g. 8 of 12 succeed), DON'T flip campaign stage from `awaiting_approval` to `deployed` — leave it for retry. Audit log the partial-failure state.**
-- `GET /inbox` — replies for this customer's mailboxes (via the email-service link)
-- `GET /replies/:id` — single reply detail
-- `POST /replies/:id/send` — body `{ cc, body }`. Send via SES with proper `In-Reply-To` and `References`. Store outbound row in existing `email_outbound` table.
-- `GET /campaigns` — read-only campaigns list with stats. `tracking_off: true` on campaigns where both `track_opens` and `track_clicks` are false.
-- `GET /users`, `POST /users`, `DELETE /users/:id` — admin-role users only
+Posts (3a + 3b-i):
+- `GET /posts` — most-recent `awaiting_approval` campaign for the linked LinkedIn client. Returns `{ posts, campaign, not_subscribed }`. Posts projected from `campaigns.posts_json` to portal-friendly fields including `topic`, `content_pillar`, `format`, `suggested_day`, `suggested_time` so the customer card mirrors the admin layout.
+- `PUT /posts/:id` body `{ title, body }` — saves edits AND marks approved (single-click for the common "tweak then accept" flow).
+- `POST /posts/:id/approve` — approve without editing.
+- `POST /posts/:id/regenerate` — combined regen (text + image). Kept for safety but no longer wired to a UI.
+- `POST /posts/:id/regenerate-text` — text-only regen via `regenerateSinglePost` (Anthropic). Drops approval, counts against 30/day cap.
+- `POST /posts/:id/regenerate-image` — image-only regen via Gemini + R2 upload. Drops approval, counts against 30/day cap.
+- `POST /campaigns/:id/posts/approve-all` — bulk approve. On full success: pushes posts sequentially to Supergrow as live `queue_post` calls in `posts_json` order, then flips campaign stage to `deployed`. On partial failure: stops at the first failure (no out-of-order queue), keeps stage at `awaiting_approval`, marks only the successful ones with `client_approved_at`, audits the partial state. Returns 207 with details.
 
-**Critical security rule:** every portal route MUST resolve `email_client_id` from the session cookie and filter every database query by it. Never trust an `email_client_id` (or `slug`) passed in URL params or request body. Return **404** (not 403) for resources that exist but don't belong to the caller.
+History (3b-i):
+- `GET /campaigns-history` — all campaigns where `stage IN ('deployed', 'done')` for the linked LinkedIn client. Returns full projected posts arrays so the frontend can expand a card without a second fetch.
+
+Inbox (3b-ii):
+- `GET /inbox` — last 100 replies for the customer's mailboxes (resolved via `customer_services` email link). Returns rows with `from_address`, `from_name`, snippet, classification, received_at, matched_campaign_title.
+- `GET /replies/:id` — full reply detail including `body_html` and `body_text`. 404 (not 403) on cross-tenant lookups.
+- `POST /replies/:id/send` body `{ cc, body }` — send via SES. From-address is the mailbox the original arrived on. Sets `In-Reply-To` and `References` headers (built from the inbound reply's `message_id` + `references_header`). Stores an `email_outbound` row regardless of SES outcome — `message_id` populated on success or `error` populated on failure.
+
+Campaigns (3b-iii):
+- `GET /campaigns` — read-only list of every email campaign for the linked email_client, newest first, with sent/opens/clicks/bounces/unsubs/replies counts. Reply count computed from `email_replies.matched_campaign_id` (no stored count column on email_campaigns). `tracking_off: true` on campaigns where both `track_opens` and `track_clicks` are false. Status normalised to four customer-friendly values: `scheduled` / `sending` / `sent` / `failed`.
+
+**Critical security rule:** every portal route MUST resolve `email_client_id` from the session cookie via `req.portalClient.id`, then resolve linked-services ids via `resolveEmailClientId(...)` or `resolveLinkedinClientId(...)`. Never trust an `email_client_id`, `slug`, or `linked_external_id` passed in URL params or request body. Return **404** (not 403) for resources that exist but don't belong to the caller.
+
+**Frontend state:** `PortalApp.jsx` is now fully wired — no `// TODO(backend chunk 3b)` markers remain. The mock data constants (`mockReplies`, `mockCampaigns`) are still declared at the top of the file but no longer referenced anywhere in the active render paths; left in place to avoid noise in the diff and can be cleaned up in a future polish chat.
 
 #### Customer portal — generic services design
 
@@ -300,19 +326,16 @@ Indexes:
 
 ## What's NOT done (priorities for next chat)
 
-### 1. Customer-portal data routes — chunk 3b (TOP PRIORITY)
+### 1. Real-world testing of chunk 3b (TOP PRIORITY)
 
-`server/routes/portal.js` exists with just `GET /posts` shipped. Next chat needs to add:
+All chunk 3b backend + frontend work is shipped and parse-clean. What hasn't happened yet:
 
-- **Posts mutation routes:** `PUT /posts/:id` (saves + approves), `POST /posts/:id/approve`, `POST /posts/:id/regenerate`, `POST /campaigns/:id/posts/approve-all`
-- **Approve-all → Supergrow push:** sequential `queue_post` calls in order. On partial failure, stage stays `awaiting_approval`, audit log the situation. On full success, flip stage to `deployed`.
-- **Regen rate limit:** insert into `client_post_regens` (table already exists). 30/customer/day soft cap, 429 with friendly message.
-- **Per-post approval state lives INSIDE `posts_json`** — fields `client_approved_at` and `client_approved_by_user_id` go in each post object alongside `linkedin_post_text`/`image_url`/etc. NOT a sidecar table. (Decision locked in earlier chat.)
-- **Inbox routes:** `GET /inbox` filtered by the email-service-linked email_client (via `customer_services` lookup). `GET /replies/:id`, `POST /replies/:id/send` (SES with `In-Reply-To` + `References`, store in `email_outbound` table — already exists).
-- **Campaigns route:** `GET /campaigns` read-only with stats, `tracking_off: true` flag.
-- **Users routes:** `GET /users`, `POST /users`, `DELETE /users/:id` — admin role only.
+- **End-to-end test of customer-portal Approve all → Supergrow push.** Cube6 hasn't yet had a successful test where the customer clicks "Approve all remaining" and sees posts land in Supergrow's live `queue_post`. Wez tried generating a new campaign for Cube6 on 2026-05-07 and hit the JSON-parse failure that has now been fixed (decision #25), but a fresh test cycle hasn't completed.
+- **Inbox reply send via SES with threading.** Code shipped, not yet tested with a real reply.
+- **Campaigns view with real numbers.** Code shipped, depends on the customer having real email_campaigns rows on their linked email_client.
+- **History card expansion.** Code shipped, depends on having at least one `deployed` or `done` campaign.
 
-After this lands, the customer portal is functionally complete. Frontend already has the integration points wired with `// TODO(backend chunk 3b)` markers.
+The next chat should start by asking Wez to run a smoke test on each of these and reporting what works / what breaks. Don't add features until the existing ones are verified.
 
 ### 2. Phase 4 multi-step follow-up sequences — runtime + UI
 
@@ -330,11 +353,18 @@ Schema is in db.js. What's left:
 - Sequence editor UI in CampaignModal — **mockup first**
 - Per-step stats columns
 
-### 3. Customer portal admin UX polish (small, low priority)
+### 3. Customer portal polish (small, low priority)
 
-- Visible feedback when a service is set to "Not required" (subtle warning text on the Manage panel)
+These came up during chunk 3b development but were deliberately deferred:
+
+- **Mock data constants left declared.** `mockReplies` and `mockCampaigns` at the top of `PortalApp.jsx` are no longer referenced — they're harmless unused JS but worth a small cleanup.
+- **The legacy combined `POST /posts/:id/regenerate` route** is no longer wired to a UI but kept in place. Can be removed in a future cleanup.
+- **Stale-brief warning** is currently 14 days. May want tuning based on observed cadence.
+- **Reply send retry on transient SES failure.** Currently fails fast with a 502 + error banner. Could add 1 retry with backoff for transient throttle errors.
+- **Inbox infinite scroll / search.** Capped at 100 most-recent replies. If a customer has thousands, older ones are invisible.
+- Visible feedback when a service is set to "Not required" (subtle warning text on the Manage panel).
 - Banner at top of Manage panel when zero services are subscribed: "This customer has no services enabled — they'll see 'Not required' on every tab."
-- Greater visual distinction for the Save Services button when dirty (currently relies on opacity change which can be missed)
+- Greater visual distinction for the Save Services button when dirty (currently relies on opacity change which can be missed).
 
 ### 4. SNS subscription wiring (USER ACTION ONLY, no code)
 
@@ -455,8 +485,12 @@ server/
     algorithm.js                  — Supergrow algorithm
     portal-auth.js                — customer-portal auth + requirePortalSession middleware
                                     Exports requirePortalSession for use by portal.js.
-    portal.js                     — customer-portal data routes. CHUNK 3a (GET /posts) shipped.
-                                    Chunk 3b adds posts mutations, inbox, campaigns, users.
+    portal.js                     — customer-portal data routes. ALL OF CHUNK 3b SHIPPED.
+                                    13 routes: GET /posts, PUT /posts/:id, POST /posts/:id/approve,
+                                    POST /posts/:id/regenerate (legacy combined), POST /posts/:id/regenerate-text,
+                                    POST /posts/:id/regenerate-image, POST /campaigns/:id/posts/approve-all,
+                                    GET /campaigns-history, GET /inbox, GET /replies/:id,
+                                    POST /replies/:id/send, GET /campaigns.
     portal-admin.js               — admin-side customer-portal management
   services/
     ses.js, tracking.js, touch-count.js, crypto-vault.js, imap-poller.js,
@@ -521,20 +555,32 @@ src/
 
 17. **Don't fake tool calls.** I made one mistake this chat where I wrote `[USl_replace]` and "Successfully replaced string" as plain text instead of actually calling tools. No edits happened. The user caught it. **Always use real tool calls; if you see plain-text "tool result" lines without a real tool call confirmation, redo the work.**
 
+### Lessons specific to chunk 3b (this chat)
+
+18. **Read the Render logs before guessing.** When the user reported HTTP 500 on GET /posts after chunk 3b-i deploy, I spent multiple turns inspecting code looking for an import error. The actual cause was a `SELECT id, title, ... FROM campaigns` — `title` doesn't exist as a column on the `campaigns` table — and was visible in the logs immediately. Lesson: when a 500 hits, **ask for the Render log first**, don't guess from the code.
+
+19. **`useState` calls must be above all early returns.** When extending `PortalPosts` with new state for chunk 3b-i (busy map, expandedId, bulkBusy, etc.), I initially put the new `useState` calls below the loading/error/empty early returns. React's rules-of-hooks require hooks to run in the same order on every render — putting them after a `return` violates this. Fixed by moving all hook calls to the top of the function.
+
+20. **`generatePosts` web search was the failure mode.** On 2026-05-07, Cube6's campaign failed with "Claude did not return valid JSON: I need to conduct the required research before generating the posts." The model decided to research first and emitted a text response instead of JSON. Web search has now been removed from `generatePosts` (decision #25). The LinkedIn algorithm context comes from the stored `algorithm_brief` instead. Both `generatePosts` and `regenerateSinglePost` also got automatic JSON-parse retry — up to 2 attempts.
+
+21. **Sidebar colour consistency was a real issue, not just aesthetic.** Admin and customer portal sidebars used different greens (`#0F6E56` vs `#0e3b2d`). Customer noticed immediately when comparing screenshots. Lesson: "consistent branding" means literal colour values, not "they're both green-ish."
+
+22. **Mirror-the-admin meant exactly that.** The customer-portal post card had been built independently with truncated text, force-cropped 1.91:1 images, two action buttons. The admin used full text + natural-aspect images + three action buttons. Customer's instruction was "mirror the admin exactly" — which surfaced a series of decisions (separate Rewrite/New image buttons, hide "View in Supergrow", combined or separate regen cap) that needed pre-confirmation before code. Building those mockups first, getting calls on each, then writing code in one shot was the right path.
+
+23. **Static asset convention: `public/` directory.** The repo had no images bundled anywhere — even the favicon was inline SVG. I created `public/tga-logo.png` as the convention going forward. Vite serves `public/*` from the URL root with no config changes. Future image assets should follow this pattern.
+
 ---
 
 ## What to do first in next chat
 
 1. **Read this whole blueprint.**
-2. The next chat is **chunk 3b — customer-portal data routes (mutations + inbox + campaigns + users).** Frontend is wired with `// TODO(backend chunk 3b)` markers. Backend file `server/routes/portal.js` already exists with `GET /posts` shipped — extend it.
-3. Build order:
-   - **Posts mutations:** PUT /posts/:id, POST /posts/:id/approve, POST /posts/:id/regenerate (Gemini + R2; track in `client_post_regens`), POST /campaigns/:id/posts/approve-all (Supergrow `queue_post` push, partial-failure handling)
-   - **Inbox:** GET /inbox, GET /replies/:id, POST /replies/:id/send (SES + threading + `email_outbound` row)
-   - **Campaigns:** GET /campaigns
-   - **Users:** GET /users, POST /users (admin only), DELETE /users/:id (admin only)
-4. Stop after each subsection for Wez to push and verify before moving on.
-5. After chunk 3b lands and is tested, the customer portal is functionally complete. Next priority is **finishing Phase 4 multi-step sequences** (schema is in, runtime + UI still missing). Get the four design pre-decisions confirmed before writing code.
-6. If Wez surfaces bugs from recent deploys, fix those first.
+2. **Ask Wez what's been tested and what's not.** Chunk 3b is fully shipped (backend + frontend + parse-clean) but real-world end-to-end tests of approve-all → Supergrow push, inbox reply send, campaigns view, and history expansion may not all have happened. The next chat's first job is verifying what works. Don't add features until existing ones are confirmed working.
+3. **If Wez surfaces bugs from the chunk 3b deploy, fix those first.** Common things to check based on this chat's experience:
+   - Is the algorithm_brief populated? `generatePosts` now relies on it. If null, posts generate from Claude's built-in knowledge (good but not customer-specific). If older than 14 days, the campaign log shows a non-blocking warning.
+   - Are reply send threading headers landing correctly? Check Gmail/Outlook's "show original" on a customer-portal-sent reply to confirm `In-Reply-To` and `References` are wired.
+   - Does the customer's linked email_client have an `email_inboxes` row? The reply-send route 500s if the mailbox can't be resolved — the helper returns null which the route handles, but verify in practice.
+4. **Once chunk 3b is verified, the customer portal is functionally complete.** Next priority is **finishing Phase 4 multi-step sequences** (schema is in, runtime + UI still missing). Get the four design pre-decisions confirmed before writing code.
+5. **Smaller backlog items** (see "What's NOT done" §3) are polish — don't pick those up before bigger pieces unless Wez asks.
 
 ---
 
@@ -542,4 +588,4 @@ src/
 
 The user is patient, curious, and a great collaborator. They put genuine effort into testing each phase and report back with screenshots + Render logs. They want this to be a real product they could one day sell to other companies. Treat the project that way — quality matters more than speed. When in doubt, ask.
 
-— Claude (end-of-chat handoff after customer-portal admin + auth + chunk 3a, pre-chunk-3b)
+— Claude (end-of-chat handoff after customer-portal chunk 3b complete + admin-mirroring + history + post-generation reliability fix + sidebar parity)

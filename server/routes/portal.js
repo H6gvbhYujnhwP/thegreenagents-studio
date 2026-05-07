@@ -945,4 +945,83 @@ router.post('/replies/:id/send', async (req, res) => {
   }
 });
 
+// ─── 3b-iii: Campaigns view ───────────────────────────────────────────────────
+// Read-only list of email campaigns the customer has had sent on their behalf.
+// Filtered by the email-service-linked email_client (same join as inbox).
+//
+// Reply counts are computed from email_replies.matched_campaign_id rather than
+// stored on email_campaigns — that's where the matcher actually lands them.
+// tracking_off flags campaigns where opens AND clicks were both off; the
+// frontend renders "—" for those columns instead of 0 to make clear that "0
+// opens" is "we didn't track" not "no one opened".
+
+// ─── GET /api/portal/campaigns ────────────────────────────────────────────────
+router.get('/campaigns', (req, res) => {
+  const linkedEmailClientId = resolveEmailClientId(req.portalClient.id);
+  if (!linkedEmailClientId) {
+    return res.json({ campaigns: [], not_subscribed: true });
+  }
+
+  // Pull all campaigns, then layer on reply counts in a second query. SQLite
+  // can do this in one query with a LEFT JOIN + GROUP BY, but the join blows
+  // up if a campaign has many replies (cartesian with email_sends rows).
+  // Two small queries keep it correct and clear.
+  const campaigns = db.prepare(`
+    SELECT
+      id, title, status,
+      sent_count, open_count, click_count, bounce_count, unsubscribe_count,
+      track_opens, track_clicks,
+      sent_at, scheduled_at, created_at
+    FROM email_campaigns
+    WHERE email_client_id = ?
+    ORDER BY COALESCE(sent_at, scheduled_at, created_at) DESC
+  `).all(linkedEmailClientId);
+
+  if (campaigns.length === 0) {
+    return res.json({ campaigns: [], not_subscribed: false });
+  }
+
+  // Reply counts in one round-trip — fetch all reply rows that match these
+  // campaigns and aggregate in JS. Cheap because email_replies is small per
+  // customer (hundreds, not millions).
+  const replyCounts = db.prepare(`
+    SELECT matched_campaign_id, COUNT(*) AS n
+    FROM email_replies
+    WHERE email_client_id = ? AND matched_campaign_id IS NOT NULL
+    GROUP BY matched_campaign_id
+  `).all(linkedEmailClientId);
+  const replyMap = new Map(replyCounts.map(r => [r.matched_campaign_id, r.n]));
+
+  res.json({
+    campaigns: campaigns.map(c => {
+      const tracking_off = !c.track_opens && !c.track_clicks;
+      return {
+        id:       c.id,
+        title:    c.title,
+        // Surface a customer-friendly status. The DB stores 'draft', 'sending',
+        // 'sent', 'paused', 'failed' etc. We collapse 'sending'/'paused' to
+        // "Sending" since paused is an internal-state concept, and everything
+        // post-send to "Sent". Pre-send states surface as "Scheduled".
+        status:
+          c.status === 'sending' || c.status === 'paused' ? 'sending' :
+          c.status === 'sent' || c.sent_at                ? 'sent' :
+          c.status === 'failed'                            ? 'failed' :
+          'scheduled',
+        sent:     c.sent_count        || 0,
+        opens:    c.open_count        || 0,
+        clicks:   c.click_count       || 0,
+        bounces:  c.bounce_count      || 0,
+        unsubs:   c.unsubscribe_count || 0,
+        replies:  replyMap.get(c.id)   || 0,
+        tracking_off,
+        // Date used by the frontend's "Started" column. Prefer sent_at, fall
+        // back to scheduled_at, then created_at — whichever is the most
+        // meaningful "this got going on…" timestamp.
+        started_at: c.sent_at || c.scheduled_at || c.created_at,
+      };
+    }),
+    not_subscribed: false,
+  });
+});
+
 export default router;

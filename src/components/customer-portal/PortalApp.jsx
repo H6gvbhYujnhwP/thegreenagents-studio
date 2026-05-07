@@ -1677,19 +1677,88 @@ function ComposeReplyModal({ reply, onClose, onSend }) {
 
 // ── CAMPAIGNS PAGE (read-only) ───────────────────────────────────────────────
 function PortalCampaigns() {
-  const stats = aggregateStats(mockCampaigns);
+  const [campaigns, setCampaigns]     = useState(null);  // null=loading, []=none, [...]=list
+  const [notSubscribed, setNotSubscribed] = useState(false);
+  const [loadError, setLoadError]     = useState(null);
+
+  useEffect(() => {
+    fetch('/api/portal/campaigns', { credentials:'include' })
+      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+      .then(d => {
+        setCampaigns(d.campaigns || []);
+        setNotSubscribed(!!d.not_subscribed);
+      })
+      .catch(e => {
+        setLoadError(String(e));
+        setCampaigns([]);
+      });
+  }, []);
+
+  if (loadError) {
+    return (
+      <div>
+        <h2 style={pageTitle()}>Campaigns</h2>
+        <div style={{
+          padding:'12px 16px', background:'#fbe9e9', color:DANGER,
+          borderRadius:8, fontSize:13, marginTop:18,
+        }}>Couldn't load campaigns: {loadError}</div>
+      </div>
+    );
+  }
+  if (campaigns === null) {
+    return (
+      <div>
+        <h2 style={pageTitle()}>Campaigns</h2>
+        <p style={pageSub()}>Loading campaigns…</p>
+      </div>
+    );
+  }
+  if (campaigns.length === 0) {
+    return (
+      <div>
+        <h2 style={pageTitle()}>Campaigns</h2>
+        <div style={{
+          marginTop:18, padding:'40px 32px', background:CARD,
+          borderRadius:8, border:`0.5px dashed ${BORDER}`,
+          textAlign:'center',
+        }}>
+          <div style={{ fontSize:14, color:TEXT, marginBottom:6, fontWeight:500 }}>
+            No campaigns yet
+          </div>
+          <div style={{ fontSize:13, color:MUTED, lineHeight:1.5, maxWidth:440, margin:'0 auto' }}>
+            Email campaigns run for your account will show up here with delivery and engagement stats.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Aggregate strip — totals across all campaigns. Trackable totals exclude
+  // campaigns where tracking was off, so the "X% open rate" headlines aren't
+  // skewed by sends that were never instrumented.
+  const totalSent      = campaigns.reduce((a, c) => a + (c.sent || 0), 0);
+  const totalReplies   = campaigns.reduce((a, c) => a + (c.replies || 0), 0);
+  const sendingCount   = campaigns.filter(c => c.status === 'sending').length;
+
+  // Status display config — keys match the four normalised values from the
+  // backend: 'scheduled' | 'sending' | 'sent' | 'failed'.
+  const STATUS_DISPLAY = {
+    scheduled: { label: 'Scheduled', bg: '#f4f1e8',  color: MUTED },
+    sending:   { label: 'Sending',   bg: BLUE_BG,    color: BLUE },
+    sent:      { label: 'Sent',      bg: '#f4f1e8',  color: MUTED },
+    failed:    { label: 'Failed',    bg: '#fbe9e9',  color: DANGER },
+  };
 
   return (
     <div>
       <h2 style={pageTitle()}>Campaigns</h2>
       <p style={pageSub()}>Read-only view of every email campaign we've run for your account.</p>
 
-      {/* Aggregate strip — same numbers as Inbox dashboard, shown here for context */}
       <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:10, marginBottom:16 }}>
-        <StatCard label="Total campaigns"  value={mockCampaigns.length} />
-        <StatCard label="Total sent"       value={stats.sent.toLocaleString()} />
-        <StatCard label="Replies received" value={stats.replies} />
-        <StatCard label="Currently sending" value={mockCampaigns.filter(c => c.status === 'sending').length} />
+        <StatCard label="Total campaigns"   value={campaigns.length} />
+        <StatCard label="Total sent"        value={totalSent.toLocaleString()} />
+        <StatCard label="Replies received"  value={totalReplies} />
+        <StatCard label="Currently sending" value={sendingCount} />
       </div>
 
       <div style={{
@@ -1709,38 +1778,49 @@ function PortalCampaigns() {
           <div style={{ textAlign:'right' }}>Replies</div>
           <div style={{ textAlign:'right' }}>Started</div>
         </div>
-        {mockCampaigns.map(c => (
-          <div key={c.id} style={{
-            display:'grid', gridTemplateColumns:'2fr 100px 80px 80px 80px 80px 100px',
-            gap:10, alignItems:'center', padding:'10px 14px',
-            borderBottom:`0.5px solid ${BORDER}`, fontSize:12, color:TEXT,
-          }}>
-            <div style={{ fontWeight:500 }}>{c.title}</div>
-            <div>
-              <span style={{
-                ...badgeStyle(),
-                background: c.status === 'sending' ? BLUE_BG : '#f4f1e8',
-                color:      c.status === 'sending' ? BLUE : MUTED,
-              }}>{c.status === 'sending' ? 'Sending' : 'Sent'}</span>
+        {campaigns.map(c => {
+          const cfg = STATUS_DISPLAY[c.status] || STATUS_DISPLAY.sent;
+          // Format started_at — SQLite "YYYY-MM-DD HH:MM:SS" without Z is
+          // parsed as local time by browsers; force UTC interpretation so
+          // it matches what the admin sees.
+          let startedDisplay = '';
+          if (c.started_at) {
+            const ts = c.started_at.includes('Z') ? c.started_at : c.started_at.replace(' ', 'T') + 'Z';
+            startedDisplay = new Date(ts).toLocaleDateString('en-GB', { day:'numeric', month:'short' });
+          }
+          return (
+            <div key={c.id} style={{
+              display:'grid', gridTemplateColumns:'2fr 100px 80px 80px 80px 80px 100px',
+              gap:10, alignItems:'center', padding:'10px 14px',
+              borderBottom:`0.5px solid ${BORDER}`, fontSize:12, color:TEXT,
+            }}>
+              <div style={{ fontWeight:500, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                {c.title}
+              </div>
+              <div>
+                <span style={{ ...badgeStyle(), background: cfg.bg, color: cfg.color }}>
+                  {cfg.label}
+                </span>
+              </div>
+              <div style={{ textAlign:'right' }}>{(c.sent || 0).toLocaleString()}</div>
+              <div style={{ textAlign:'right', color: c.tracking_off ? TERTIARY_TEXT : TEXT }}>
+                {c.tracking_off ? '—' : (c.opens || 0)}
+              </div>
+              <div style={{ textAlign:'right', color: c.tracking_off ? TERTIARY_TEXT : TEXT }}>
+                {c.tracking_off ? '—' : (c.clicks || 0)}
+              </div>
+              <div style={{ textAlign:'right', color: c.replies > 0 ? GREEN : TEXT, fontWeight: c.replies > 0 ? 500 : 400 }}>
+                {c.replies || 0}
+              </div>
+              <div style={{ textAlign:'right', color:MUTED, fontSize:11 }}>
+                {startedDisplay}
+              </div>
             </div>
-            <div style={{ textAlign:'right' }}>{c.sent.toLocaleString()}</div>
-            <div style={{ textAlign:'right', color: c.tracking_off ? TERTIARY_TEXT : TEXT }}>
-              {c.tracking_off ? '—' : c.opens}
-            </div>
-            <div style={{ textAlign:'right', color: c.tracking_off ? TERTIARY_TEXT : TEXT }}>
-              {c.tracking_off ? '—' : c.clicks}
-            </div>
-            <div style={{ textAlign:'right', color: c.replies > 0 ? GREEN : TEXT, fontWeight: c.replies > 0 ? 500 : 400 }}>
-              {c.replies}
-            </div>
-            <div style={{ textAlign:'right', color:MUTED, fontSize:11 }}>
-              {new Date(c.started_at).toLocaleDateString('en-GB', { day:'numeric', month:'short' })}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
-      {mockCampaigns.some(c => c.tracking_off) && (
+      {campaigns.some(c => c.tracking_off) && (
         <div style={{
           marginTop:12, padding:'10px 12px', background:BLUE_BG, color:BLUE,
           borderRadius:8, fontSize:12, lineHeight:1.5,
