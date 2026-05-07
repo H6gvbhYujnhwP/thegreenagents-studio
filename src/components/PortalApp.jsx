@@ -20,7 +20,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 
 // Brand colours — match the admin Studio for visual consistency.
-const TGA_GREEN     = '#0e3b2d';
+const TGA_GREEN     = '#0F6E56';
 const TGA_GREEN_HI  = '#14a37e';
 const TGA_GREEN_LO  = '#7fbfa1';
 const TEXT          = '#1a1a1a';
@@ -457,6 +457,11 @@ function PortalChrome({ user, client, services, onLogout }) {
 
   return (
     <div style={{ display:'flex', height:'100vh', background:BG, fontFamily:'-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }}>
+      {/* Global keyframes for spinner overlays used across the portal
+          (post regen, approve buttons, etc.). Injected once at chrome level
+          so every authenticated page can use animation: spin without
+          re-declaring the @keyframes. */}
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       {/* Sidebar */}
       <aside style={{
         width:220, background:TGA_GREEN, color:TGA_GREEN_LO,
@@ -468,10 +473,14 @@ function PortalChrome({ user, client, services, onLogout }) {
           display:'flex', alignItems:'center', gap:10,
         }}>
           <div style={{
-            width:30, height:30, borderRadius:7, background:TGA_GREEN_HI,
-            color:'white', display:'flex', alignItems:'center', justifyContent:'center',
-            fontSize:14, fontWeight:500, flexShrink:0,
-          }}>G</div>
+            width:30, height:30, borderRadius:7, background:'#fff',
+            display:'flex', alignItems:'center', justifyContent:'center',
+            flexShrink:0, padding:3, boxSizing:'border-box',
+          }}>
+            <img src="/tga-logo.png" alt="The Green Agents"
+              style={{ maxWidth:'100%', maxHeight:'100%', objectFit:'contain' }}
+            />
+          </div>
           <div style={{ minWidth:0 }}>
             <div style={{ fontSize:13, fontWeight:500, color:'white', lineHeight:1.2 }}>The Green Agents</div>
             <div style={{ fontSize:11, color:TGA_GREEN_LO, marginTop:2 }}>Studio</div>
@@ -531,32 +540,28 @@ function PortalChrome({ user, client, services, onLogout }) {
       {/* Workspace */}
       <main style={{ flex:1, display:'flex', flexDirection:'column', minWidth:0 }}>
         <header style={{
-          padding:'14px 22px', borderBottom:`0.5px solid ${BORDER}`,
+          padding:'18px 22px', borderBottom:`0.5px solid ${BORDER}`,
           display:'flex', alignItems:'center', gap:14, background:CARD,
         }}>
           {/* Customer logo — uses the uploaded logo URL if available, falls
-              back to initials on the brand colour. The 38x38 box is fixed so
-              both states have the same footprint. */}
+              back to initials on the brand colour. Box is fixed-size so both
+              states have the same footprint. */}
           {client?.logo_url ? (
-            <div style={{
-              width:38, height:38, borderRadius:7, background:'#fff',
-              border:`0.5px solid ${BORDER}`,
-              display:'flex', alignItems:'center', justifyContent:'center',
-              flexShrink:0, overflow:'hidden',
-            }}>
-              <img src={client.logo_url} alt={`${client.name} logo`}
-                style={{ maxWidth:'100%', maxHeight:'100%', objectFit:'contain' }}
-              />
-            </div>
+            <img src={client.logo_url} alt={`${client.name} logo`}
+              style={{
+                width:72, height:72, borderRadius:10,
+                objectFit:'contain', flexShrink:0, display:'block',
+              }}
+            />
           ) : (
             <div style={{
-              width:38, height:38, borderRadius:7, background:client?.logo_color || '#1a4d8c',
+              width:72, height:72, borderRadius:10, background:client?.logo_color || '#1a4d8c',
               color:'white', display:'flex', alignItems:'center', justifyContent:'center',
-              fontSize:14, fontWeight:500, flexShrink:0,
+              fontSize:22, fontWeight:500, flexShrink:0,
             }}>{client?.logo_initial || 'C'}</div>
           )}
           <div>
-            <div style={{ fontSize:15, fontWeight:500, color:TEXT }}>{client?.name}</div>
+            <div style={{ fontSize:17, fontWeight:500, color:TEXT }}>{client?.name}</div>
             <div style={{ fontSize:11, color:MUTED }}>{client?.audience}</div>
           </div>
           <div style={{
@@ -666,8 +671,10 @@ function NavSection({ heading, children }) {
   return (
     <div>
       <div style={{
-        fontSize:10, fontWeight:600, textTransform:'uppercase', letterSpacing:'0.08em',
-        color:'rgba(255,255,255,0.5)', padding:'0 18px', marginBottom:6,
+        // Bolder section headings — more weight, brighter colour, slightly
+        // larger so they read as proper structural labels rather than a hint.
+        fontSize:11, fontWeight:700, textTransform:'uppercase', letterSpacing:'0.1em',
+        color:'rgba(255,255,255,0.85)', padding:'0 18px', marginBottom:8,
       }}>{heading}</div>
       <div style={{ display:'flex', flexDirection:'column' }}>{children}</div>
     </div>
@@ -705,47 +712,215 @@ function NavItem({ label, active, onClick, dim, suffix }) {
 
 // ── POSTS PAGE ───────────────────────────────────────────────────────────────
 function PortalPosts() {
-  const [posts, setPosts] = useState(mockPosts);
-  const [editing, setEditing] = useState(null);  // post object being edited
-  const [regenConfirm, setRegenConfirm] = useState(null);  // post object pending regen
+  // Loading lifecycle: null = not yet loaded, [] = loaded but empty, [...] = posts.
+  const [posts, setPosts]               = useState(null);
+  const [campaign, setCampaign]         = useState(null);
+  const [notSubscribed, setNotSubscribed] = useState(false);
+  const [loadError, setLoadError]       = useState(null);
+  const [editing, setEditing]           = useState(null);
+  const [regenConfirm, setRegenConfirm] = useState(null);
+  // Per-post UI state. busy[postId] = 'regen-text' | 'regen-image' | 'approving' | 'saving'.
+  // Used to show the spinner overlay on the matching card and disable buttons.
+  // These hooks MUST live above the early returns below so React's hook order
+  // stays stable across renders.
+  const [busy, setBusy]                 = useState({});
+  const [expandedId, setExpandedId]     = useState(null);
+  const [bulkBusy, setBulkBusy]         = useState(false);
+  const [bulkResult, setBulkResult]     = useState(null);
+  const [actionError, setActionError]   = useState(null);
 
+  // Initial load. The ServiceGate upstream usually filters out the
+  // not_subscribed case before we even mount, but we still respond cleanly
+  // here in case the gate is bypassed or the services state is stale.
+  useEffect(() => {
+    fetch('/api/portal/posts', { credentials:'include' })
+      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+      .then(d => {
+        setPosts(d.posts || []);
+        setCampaign(d.campaign);
+        setNotSubscribed(!!d.not_subscribed);
+      })
+      .catch(e => {
+        setLoadError(String(e));
+        setPosts([]);
+      });
+  }, []);
+
+  // ─── Loading / empty / error states ───
+  if (loadError) {
+    return (
+      <div>
+        <h2 style={pageTitle()}>LinkedIn Posts</h2>
+        <div style={{
+          padding:'12px 16px', background:'#fbe9e9', color:DANGER,
+          borderRadius:8, fontSize:13, marginTop:18,
+        }}>Couldn't load posts: {loadError}</div>
+      </div>
+    );
+  }
+  if (posts === null) {
+    return (
+      <div>
+        <h2 style={pageTitle()}>LinkedIn Posts</h2>
+        <p style={pageSub()}>Loading your posts…</p>
+      </div>
+    );
+  }
+  if (posts.length === 0) {
+    return (
+      <div>
+        <h2 style={pageTitle()}>LinkedIn Posts — review &amp; approve</h2>
+        <div style={{
+          marginTop:18, padding:'40px 32px', background:CARD,
+          borderRadius:8, border:`0.5px dashed ${BORDER}`,
+          textAlign:'center',
+        }}>
+          <div style={{ fontSize:14, color:TEXT, marginBottom:6, fontWeight:500 }}>
+            Nothing to review right now
+          </div>
+          <div style={{ fontSize:13, color:MUTED, lineHeight:1.5, maxWidth:440, margin:'0 auto' }}>
+            Your next batch will appear here when it's ready. We'll let you know.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Loaded — main review grid ───
   const approvedCount = posts.filter(p => p.approved).length;
-  const allApproved = approvedCount === posts.length;
+  const allApproved   = approvedCount === posts.length;
 
-  function approveOne(id) {
-    setPosts(prev => prev.map(p => p.id === id ? { ...p, approved: true } : p));
-    // TODO(backend): POST /api/portal/posts/:id/approve
+  function setPostBusy(id, kind) {
+    setBusy(prev => kind ? { ...prev, [id]: kind } : (() => { const n = { ...prev }; delete n[id]; return n; })());
   }
-  function approveAllRemaining() {
-    if (!confirm(`Approve all ${posts.length - approvedCount} remaining posts?`)) return;
-    setPosts(prev => prev.map(p => ({ ...p, approved: true })));
-    // TODO(backend): POST /api/portal/campaigns/:id/posts/approve-all
+
+  // Reload posts from the server — used after regen so we get the canonical
+  // state back (image_url, approved=false drop, etc.) without trusting the
+  // optimistic local state.
+  async function reloadOne(id) {
+    try {
+      const r = await fetch('/api/portal/posts', { credentials:'include' });
+      if (!r.ok) return;
+      const d = await r.json();
+      setPosts(prev => (prev || []).map(p => {
+        const fresh = (d.posts || []).find(np => np.id === p.id);
+        return fresh || p;
+      }));
+    } catch (_) {}
   }
-  function saveEdit(id, newBody, newTitle) {
-    setPosts(prev => prev.map(p => p.id === id ? { ...p, body: newBody, title: newTitle, approved: true } : p));
-    setEditing(null);
-    // TODO(backend): PUT /api/portal/posts/:id  body: { title, body }
-    //   server marks the post approved=true on save (per the spec — edit + save = ready)
+
+  async function approveOne(id) {
+    setActionError(null);
+    setPostBusy(id, 'approving');
+    try {
+      const r = await fetch(`/api/portal/posts/${encodeURIComponent(id)}/approve`, {
+        method:'POST', credentials:'include',
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) {
+        setActionError(d.error || `Couldn't approve post (HTTP ${r.status})`);
+        setPostBusy(id, null);
+        return;
+      }
+      setPosts(prev => (prev || []).map(p => p.id === id ? d.post : p));
+    } catch (e) {
+      setActionError(`Network error: ${e.message}`);
+    } finally {
+      setPostBusy(id, null);
+    }
   }
-  function regenPost(id) {
-    setPosts(prev => prev.map(p => p.id === id ? {
-      ...p,
-      title: 'Regenerating…',
-      body:  '(new content will appear in a few seconds)',
-      approved: false,
-    } : p));
-    setRegenConfirm(null);
-    // TODO(backend): POST /api/portal/posts/:id/regenerate
-    //   - returns { post: { ...new fields } }
-    //   - this triggers Gemini text + image regen
-    //   - on success, replace the post in state
-    setTimeout(() => {
-      setPosts(prev => prev.map(p => p.id === id ? {
-        ...p,
-        title: 'Fresh take — fully regenerated',
-        body:  'New text and a new image have been generated. Review and approve when ready.',
-      } : p));
-    }, 1200);
+
+  async function approveAllRemaining() {
+    if (!campaign?.id) {
+      setActionError('Campaign not loaded — refresh and try again.');
+      return;
+    }
+    if (!confirm(`Approve all ${posts.length - approvedCount} remaining posts? They'll be sent to LinkedIn's scheduled queue immediately.`)) return;
+    setActionError(null); setBulkResult(null); setBulkBusy(true);
+    try {
+      const r = await fetch(`/api/portal/campaigns/${encodeURIComponent(campaign.id)}/posts/approve-all`, {
+        method:'POST', credentials:'include',
+      });
+      const d = await r.json().catch(() => ({}));
+      // 207 = partial failure (some posts queued, some failed). We still
+      // refresh from the server to show the new approval state of the ones
+      // that DID get queued.
+      if (r.ok && d.ok) {
+        setBulkResult({ ok:true, total:d.total, succeeded:d.succeeded });
+        await reloadOne();
+      } else {
+        setBulkResult({ ok:false, total:d.total || posts.length, succeeded:d.succeeded || 0, error: d.error || `Push failed (HTTP ${r.status})` });
+        await reloadOne();
+      }
+    } catch (e) {
+      setBulkResult({ ok:false, error:`Network error: ${e.message}` });
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function saveEdit(id, newBody, newTitle) {
+    setActionError(null);
+    setPostBusy(id, 'saving');
+    try {
+      const r = await fetch(`/api/portal/posts/${encodeURIComponent(id)}`, {
+        method:'PUT', credentials:'include',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ title: newTitle, body: newBody }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) {
+        setActionError(d.error || `Couldn't save post (HTTP ${r.status})`);
+        setPostBusy(id, null);
+        return;
+      }
+      setPosts(prev => (prev || []).map(p => p.id === id ? d.post : p));
+      setEditing(null);
+    } catch (e) {
+      setActionError(`Network error: ${e.message}`);
+    } finally {
+      setPostBusy(id, null);
+    }
+  }
+
+  async function regenText(id) {
+    setActionError(null);
+    setPostBusy(id, 'regen-text');
+    try {
+      const r = await fetch(`/api/portal/posts/${encodeURIComponent(id)}/regenerate-text`, {
+        method:'POST', credentials:'include',
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) {
+        setActionError(d.error || `Couldn't rewrite post (HTTP ${r.status})`);
+        return;
+      }
+      setPosts(prev => (prev || []).map(p => p.id === id ? d.post : p));
+    } catch (e) {
+      setActionError(`Network error: ${e.message}`);
+    } finally {
+      setPostBusy(id, null);
+    }
+  }
+
+  async function regenImage(id) {
+    setActionError(null);
+    setPostBusy(id, 'regen-image');
+    try {
+      const r = await fetch(`/api/portal/posts/${encodeURIComponent(id)}/regenerate-image`, {
+        method:'POST', credentials:'include',
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) {
+        setActionError(d.error || `Couldn't regenerate image (HTTP ${r.status})`);
+        return;
+      }
+      setPosts(prev => (prev || []).map(p => p.id === id ? d.post : p));
+    } catch (e) {
+      setActionError(`Network error: ${e.message}`);
+    } finally {
+      setPostBusy(id, null);
+    }
   }
 
   return (
@@ -756,6 +931,39 @@ function PortalPosts() {
         Order shown is the order they'll publish.
       </p>
 
+      {/* Inline error toast — appears for any failed action and persists until
+          the user dismisses or triggers another action. */}
+      {actionError && (
+        <div style={{
+          padding:'10px 14px', background:'#fbe9e9', color:DANGER,
+          borderRadius:8, marginBottom:12, fontSize:12, display:'flex', alignItems:'center', gap:10,
+        }}>
+          <span style={{ flex:1 }}>{actionError}</span>
+          <button onClick={() => setActionError(null)} style={{
+            background:'transparent', border:'none', color:DANGER, cursor:'pointer', fontSize:14, padding:0,
+          }} aria-label="Dismiss">×</button>
+        </div>
+      )}
+
+      {/* Approve-all result banner. Success: green; partial failure: amber. */}
+      {bulkResult && bulkResult.ok && (
+        <div style={{
+          padding:'10px 14px', background:GREEN_BG, color:GREEN,
+          borderRadius:8, marginBottom:12, fontSize:12,
+        }}>
+          <strong style={{ fontWeight:500 }}>All {bulkResult.total} posts approved and queued to LinkedIn.</strong> They'll publish in the scheduled order.
+        </div>
+      )}
+      {bulkResult && !bulkResult.ok && (
+        <div style={{
+          padding:'10px 14px', background:AMBER_BG, color:AMBER,
+          borderRadius:8, marginBottom:12, fontSize:12,
+        }}>
+          <strong style={{ fontWeight:500 }}>{bulkResult.succeeded || 0} of {bulkResult.total || posts.length} posts queued.</strong>{' '}
+          {bulkResult.error || 'The remaining posts can be retried by clicking Approve all remaining again.'}
+        </div>
+      )}
+
       {/* Approval progress bar */}
       <div style={{
         display:'flex', alignItems:'center', gap:10, padding:'10px 14px',
@@ -764,21 +972,27 @@ function PortalPosts() {
         borderRadius:8, marginBottom:16, fontSize:12,
       }}>
         <strong style={{ fontWeight:500 }}>{approvedCount} of {posts.length} approved.</strong>
-        {!allApproved && <span>Once all {posts.length} are approved, posts go live in this order.</span>}
-        {allApproved  && <span>All posts approved — they'll go live in the scheduled order.</span>}
+        {!allApproved && <span>Once all {posts.length} are approved, posts go straight to LinkedIn's scheduled queue in this order.</span>}
+        {allApproved  && <span>All posts approved — they'll publish in the scheduled order.</span>}
         {!allApproved && (
-          <button onClick={approveAllRemaining} style={{
-            marginLeft:'auto', padding:'6px 12px', background:TGA_GREEN_HI, color:'white',
-            border:'none', borderRadius:6, fontSize:12, cursor:'pointer', fontWeight:500,
-          }}>Approve all remaining</button>
+          <button onClick={approveAllRemaining} disabled={bulkBusy} style={{
+            marginLeft:'auto', padding:'6px 12px',
+            background: bulkBusy ? TGA_GREEN_LO : TGA_GREEN_HI, color:'white',
+            border:'none', borderRadius:6, fontSize:12,
+            cursor: bulkBusy ? 'not-allowed' : 'pointer', fontWeight:500,
+          }}>{bulkBusy ? 'Sending to LinkedIn…' : 'Approve all remaining'}</button>
         )}
       </div>
 
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
         {posts.map(p => (
-          <PostCard key={p.id} post={p}
+          <PostCard key={p.id} post={p} totalPosts={posts.length}
+            busy={busy[p.id] || null}
+            expanded={expandedId === p.id}
+            onToggleExpand={() => setExpandedId(expandedId === p.id ? null : p.id)}
             onEdit={() => setEditing(p)}
-            onRegen={() => setRegenConfirm(p)}
+            onRegenText={() => regenText(p.id)}
+            onRegenImage={() => regenImage(p.id)}
             onApprove={() => approveOne(p.id)}
           />
         ))}
@@ -787,65 +1001,155 @@ function PortalPosts() {
       {editing && (
         <EditPostModal
           post={editing}
+          busy={busy[editing.id] === 'saving'}
           onClose={() => setEditing(null)}
           onSave={saveEdit}
         />
-      )}
-
-      {regenConfirm && (
-        <Modal title="Regenerate this post?" onClose={() => setRegenConfirm(null)}>
-          <p style={{ fontSize:13, color:TEXT, lineHeight:1.5, margin:'0 0 16px' }}>
-            This discards the current text and image and generates fresh ones using AI. The post
-            will need re-approval. This can't be undone.
-          </p>
-          <div style={{ display:'flex', justifyContent:'flex-end', gap:8 }}>
-            <BtnSecondary onClick={() => setRegenConfirm(null)}>Cancel</BtnSecondary>
-            <BtnPrimary onClick={() => regenPost(regenConfirm.id)}>Regenerate</BtnPrimary>
-          </div>
-        </Modal>
       )}
     </div>
   );
 }
 
-function PostCard({ post, onEdit, onRegen, onApprove }) {
+function PostCard({ post, totalPosts, busy, expanded, onToggleExpand, onEdit, onRegenText, onRegenImage, onApprove }) {
+  const isRegenText  = busy === 'regen-text';
+  const isRegenImage = busy === 'regen-image';
+  const isApproving  = busy === 'approving';
+  const isAnyBusy    = !!busy;
+
+  const metaLine = [post.content_pillar, post.format].filter(Boolean).join(' · ');
+
   return (
     <div style={{
       background:CARD, borderRadius:8, border:`0.5px solid ${BORDER}`, overflow:'hidden',
+      display:'flex', flexDirection:'column',
+      opacity: isAnyBusy ? 0.85 : 1, transition:'opacity 0.2s',
+      position:'relative',
     }}>
-      <div style={{
-        aspectRatio:'1.91/1', background:post.image_color, color:'#d0e6f0',
-        display:'flex', alignItems:'center', justifyContent:'center', fontSize:11,
-        position:'relative',
-      }}>
-        <span style={{
-          position:'absolute', top:8, left:8,
-          background:'rgba(0,0,0,0.4)', color:'white', padding:'1px 6px',
-          borderRadius:3, fontSize:10,
-        }}>image</span>
-      </div>
-      <div style={{ padding:'11px 12px' }}>
+      {/* Card-wide overlay shown while text is regenerating. Image stays
+          visible underneath; the body section is what changes. We put the
+          overlay on the WHOLE CARD so the spinner sits centred regardless
+          of which part is updating. */}
+      {isRegenText && (
         <div style={{
-          display:'flex', justifyContent:'space-between', alignItems:'center',
-          marginBottom:4, fontSize:11, color:MUTED,
+          position:'absolute', inset:0, background:'rgba(255,255,255,0.92)',
+          display:'flex', alignItems:'center', justifyContent:'center', zIndex:5,
+          flexDirection:'column', gap:10, padding:20, textAlign:'center',
         }}>
-          <span style={{
-            padding:'1px 6px', background:BLUE_BG, color:BLUE,
-            borderRadius:4, fontSize:10, fontWeight:500,
-          }}>Post {post.order} of 12</span>
-          <span>{post.scheduled_for}</span>
+          <div style={{
+            width:30, height:30, border:`2.5px solid ${TGA_GREEN_HI}`,
+            borderTopColor:'transparent', borderRadius:'50%',
+            animation:'spin 0.8s linear infinite',
+          }} />
+          <div style={{ fontSize:12, fontWeight:500, color:TEXT }}>Rewriting your post…</div>
+          <div style={{ fontSize:11, color:MUTED, lineHeight:1.4, maxWidth:240 }}>
+            Please wait while your text is being regenerated. This usually takes 5–15 seconds.
+          </div>
         </div>
-        <p style={{ fontSize:13, fontWeight:500, margin:'0 0 4px', lineHeight:1.3, color:TEXT }}>{post.title}</p>
-        <p style={{
-          fontSize:11, color:MUTED, lineHeight:1.4, margin:'0 0 10px',
-          display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden',
-        }}>{post.body.split('\n')[0]}</p>
-        <div style={{ display:'flex', gap:5 }}>
-          <button onClick={onEdit} style={cardBtn()}>Edit</button>
-          <button onClick={onRegen} style={cardBtn(DANGER)}>Regen</button>
+      )}
+
+      {/* Image — admin uses natural aspect with objectFit:contain. We mirror
+          that so customers see exactly what the post will look like.
+          maxHeight:300 caps oversized images so the card doesn't go rogue. */}
+      <div style={{ position:'relative', background:'#f5f5f3' }}>
+        {post.image_url ? (
+          <img src={post.image_url} alt={`Post ${post.order}`}
+            style={{
+              width:'100%', height:'auto', maxHeight:300,
+              objectFit:'contain', display:'block', background:'#f5f5f3',
+            }}
+            onError={e => { e.currentTarget.style.display = 'none'; }}
+          />
+        ) : (
+          <div style={{
+            height:80, display:'flex', alignItems:'center', justifyContent:'center',
+            color:MUTED, fontSize:11,
+          }}>
+            {post.image_error ? 'Image generation failed — click "New image" to retry' : 'No image generated yet'}
+          </div>
+        )}
+        {/* Image-only spinner overlay. Sits ON the image so the customer
+            knows specifically that the IMAGE is being regenerated (vs text). */}
+        {isRegenImage && (
+          <div style={{
+            position:'absolute', inset:0, background:'rgba(255,255,255,0.85)',
+            display:'flex', alignItems:'center', justifyContent:'center',
+            flexDirection:'column', gap:8, padding:12, textAlign:'center',
+          }}>
+            <div style={{
+              width:26, height:26, border:`2.5px solid ${TGA_GREEN_HI}`,
+              borderTopColor:'transparent', borderRadius:'50%',
+              animation:'spin 0.8s linear infinite',
+            }} />
+            <div style={{ fontSize:11, fontWeight:500, color:TEXT }}>Generating image…</div>
+            <div style={{ fontSize:10, color:MUTED, lineHeight:1.4, maxWidth:200 }}>
+              Please wait while your image is being regenerated.
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Body */}
+      <div style={{ padding:'12px 14px', flex:1, display:'flex', flexDirection:'column' }}>
+        <div style={{
+          display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:6,
+        }}>
+          <div>
+            <div style={{ fontSize:12, fontWeight:500, color:TEXT }}>Post {post.order}</div>
+            {metaLine && (
+              <div style={{ fontSize:10, color:MUTED, marginTop:1 }}>{metaLine}</div>
+            )}
+            {(post.suggested_day || post.suggested_time) && (
+              <div style={{ fontSize:10, color:GREEN, marginTop:2 }}>
+                📅 {post.suggested_day} {post.suggested_time}
+              </div>
+            )}
+          </div>
+          {post.approved && (
+            <span style={{
+              fontSize:10, padding:'2px 7px', borderRadius:4,
+              background:GREEN_BG, color:GREEN, fontWeight:500, whiteSpace:'nowrap',
+            }}>✓ Approved</span>
+          )}
+        </div>
+
+        {post.topic && (
+          <div style={{ fontSize:12, fontWeight:500, color:TEXT, marginBottom:6 }}>{post.topic}</div>
+        )}
+
+        {/* Full body, with mask-fade fallback when collapsed (admin pattern). */}
+        <div style={{
+          fontSize:11, color:MUTED, lineHeight:1.6, flex:1,
+          maxHeight: expanded ? 'none' : 96, overflow:'hidden',
+          maskImage: expanded ? 'none' : 'linear-gradient(to bottom, black 50%, transparent 100%)',
+          WebkitMaskImage: expanded ? 'none' : 'linear-gradient(to bottom, black 50%, transparent 100%)',
+          whiteSpace:'pre-wrap',
+        }}>{post.body}</div>
+        <button onClick={onToggleExpand} style={{
+          marginTop:8, fontSize:11, color:TGA_GREEN_HI, background:'none', border:'none',
+          cursor:'pointer', padding:0, textAlign:'left', fontWeight:500,
+        }}>{expanded ? '▲ Collapse' : '▼ Read full post'}</button>
+
+        {/* Action row — four buttons, mirroring admin's Edit / Rewrite / New image
+            plus the customer-only Approve. */}
+        <div style={{ display:'flex', gap:5, marginTop:10, paddingTop:10, borderTop:`0.5px solid ${BORDER}` }}>
+          <button onClick={onEdit} disabled={isAnyBusy} style={cardBtn(null, isAnyBusy)}>
+            Edit text
+          </button>
+          <button onClick={onRegenText} disabled={isAnyBusy} style={cardBtn(null, isAnyBusy)}>
+            Rewrite post
+          </button>
+          <button onClick={onRegenImage} disabled={isAnyBusy} style={cardBtn(null, isAnyBusy)}>
+            New image
+          </button>
           {post.approved
-            ? <button disabled style={{ ...cardBtn(), background:TGA_GREEN_HI, color:'white', borderColor:TGA_GREEN_HI, cursor:'default' }}>✓ Approved</button>
-            : <button onClick={onApprove} style={cardBtn()}>Approve</button>
+            ? <button disabled style={{
+                ...cardBtn(),
+                background:TGA_GREEN_HI, color:'white', borderColor:TGA_GREEN_HI, cursor:'default',
+              }}>✓ Approved</button>
+            : <button onClick={onApprove} disabled={isAnyBusy} style={{
+                ...cardBtn(null, isAnyBusy),
+                background: isApproving ? TGA_GREEN_LO : 'transparent',
+              }}>{isApproving ? 'Approving…' : 'Approve'}</button>
           }
         </div>
       </div>
@@ -853,53 +1157,62 @@ function PostCard({ post, onEdit, onRegen, onApprove }) {
   );
 }
 
-function cardBtn(color) {
+function cardBtn(color, disabled) {
   return {
     flex:1, padding:5, fontSize:11, border:`0.5px solid ${BORDER}`,
-    background:'transparent', color: color || TEXT, borderRadius:5, cursor:'pointer',
+    background:'transparent', color: color || TEXT, borderRadius:5,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.55 : 1,
   };
 }
 
 // ── EDIT MODAL ───────────────────────────────────────────────────────────────
-function EditPostModal({ post, onClose, onSave }) {
+function EditPostModal({ post, busy, onClose, onSave }) {
   const [title, setTitle] = useState(post.title);
   const [body, setBody]   = useState(post.body);
 
   return (
-    <Modal title="Edit post" onClose={onClose} wide>
+    <Modal title="Edit post" onClose={() => !busy && onClose()} wide>
       <div style={{ display:'grid', gridTemplateColumns:'180px 1fr', gap:18 }}>
         <div>
           <div style={{ fontSize:11, color:MUTED, marginBottom:6 }}>Image (read-only)</div>
           <div style={{
-            aspectRatio:'1.91/1', background:post.image_color, borderRadius:6,
-            display:'flex', alignItems:'center', justifyContent:'center',
-            color:'#d0e6f0', fontSize:11,
-          }}>image</div>
+            borderRadius:6, overflow:'hidden', background:'#f5f5f3',
+            minHeight:120, display:'flex', alignItems:'center', justifyContent:'center',
+            color:MUTED, fontSize:11,
+          }}>
+            {post.image_url
+              ? <img src={post.image_url} alt=""
+                  style={{ width:'100%', height:'auto', maxHeight:240, objectFit:'contain', display:'block', background:'#f5f5f3' }} />
+              : 'No image'
+            }
+          </div>
           <div style={{ fontSize:11, color:TERTIARY_TEXT, marginTop:8, lineHeight:1.4 }}>
-            Want a new image? Cancel and click <strong style={{ color:TEXT }}>Regen</strong> on the
-            post — that regenerates both text and image.
+            Want a new image? Cancel and click <strong style={{ color:TEXT }}>New image</strong> on the post.
           </div>
         </div>
         <div>
           <div style={{ fontSize:11, color:MUTED, marginBottom:4 }}>Title</div>
-          <input value={title} onChange={e => setTitle(e.target.value)} autoFocus
+          <input value={title} onChange={e => setTitle(e.target.value)} autoFocus disabled={busy}
             style={{ ...loginInputStyle(), marginBottom:14 }}
           />
           <div style={{ fontSize:11, color:MUTED, marginBottom:4 }}>Body</div>
-          <textarea value={body} onChange={e => setBody(e.target.value)}
+          <textarea value={body} onChange={e => setBody(e.target.value)} disabled={busy}
             style={{
               ...loginInputStyle(),
               fontFamily:'inherit', minHeight:240, resize:'vertical', lineHeight:1.5,
             }}
           />
           <div style={{ fontSize:11, color:TERTIARY_TEXT, marginTop:6 }}>
-            Saving marks this post approved. To go back to draft, click <strong style={{ color:TEXT }}>Regen</strong> instead.
+            Saving marks this post approved. To rewrite from scratch, click <strong style={{ color:TEXT }}>Rewrite post</strong> instead.
           </div>
         </div>
       </div>
       <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginTop:18 }}>
-        <BtnSecondary onClick={onClose}>Cancel</BtnSecondary>
-        <BtnPrimary onClick={() => onSave(post.id, body, title)}>Save &amp; approve</BtnPrimary>
+        <BtnSecondary onClick={onClose} disabled={busy}>Cancel</BtnSecondary>
+        <BtnPrimary onClick={() => onSave(post.id, body, title)} disabled={busy || !body.trim()}>
+          {busy ? 'Saving…' : 'Save & approve'}
+        </BtnPrimary>
       </div>
     </Modal>
   );

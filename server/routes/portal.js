@@ -63,10 +63,15 @@ function projectPost(post, index) {
     id:                post.id || `post_${index + 1}`,
     order:             index + 1,
     title:             post.topic || `Post ${index + 1}`,
+    topic:             post.topic || '',
     body:              post.linkedin_post_text || '',
     image_url:         post.image_url || null,
     image_error:       post.image_error || null,
     scheduled_for:     schedule,
+    suggested_day:     day,
+    suggested_time:    time,
+    content_pillar:    post.content_pillar || '',
+    format:            post.format || '',
     approved:          !!post.client_approved_at,
     approved_at:       post.client_approved_at || null,
     approved_by:       post.client_approved_by_user_id || null,
@@ -379,6 +384,143 @@ router.post('/posts/:id/regenerate', async (req, res) => {
     regens_used_today: usedToday + 1,
     regens_remaining: REGEN_CAP_PER_DAY - (usedToday + 1),
     image_error: imageError, // surface non-fatal image failure to the UI
+  });
+});
+
+// ─── POST /api/portal/posts/:id/regenerate-text ───────────────────────────────
+// Text-only regen — mirrors the admin-side "Rewrite post" button.
+// Counts toward the SAME 30/day cap as image regens (combined cap, locked
+// pre-decision). Approval is dropped on a successful rewrite — customer must
+// re-review the new content.
+router.post('/posts/:id/regenerate-text', async (req, res) => {
+  const found = findPostForPortalUser(req, req.params.id);
+  if (!found) return res.status(404).json({ error: 'Post not found' });
+
+  // Combined cap check — same query as /regenerate.
+  const REGEN_CAP_PER_DAY = 30;
+  const usedToday = db.prepare(`
+    SELECT COUNT(*) AS n FROM client_post_regens
+    WHERE email_client_id = ? AND created_at >= datetime('now', '-1 day')
+  `).get(req.portalClient.id).n;
+
+  if (usedToday >= REGEN_CAP_PER_DAY) {
+    return res.status(429).json({
+      error: `Daily regenerate limit reached (${REGEN_CAP_PER_DAY}/day). Please try again tomorrow.`,
+      used:  usedToday,
+      limit: REGEN_CAP_PER_DAY,
+    });
+  }
+
+  const { campaign, posts, postIndex, post } = found;
+  const client = db.prepare(`SELECT * FROM clients WHERE id = ?`).get(campaign.client_id);
+  if (!client) return res.status(404).json({ error: 'Linked LinkedIn client not found' });
+
+  let rewritten;
+  try {
+    rewritten = await regenerateSinglePost(post, client);
+  } catch (err) {
+    console.error(`[portal] regen-text failed post ${req.params.id}:`, err.message);
+    return res.status(502).json({ error: `Text regeneration failed: ${err.message}` });
+  }
+
+  // Update text + image_prompt, drop approval. Image stays as-is.
+  const updatedPost = {
+    ...post,
+    linkedin_post_text: rewritten.linkedin_post_text || post.linkedin_post_text,
+    image_prompt:       rewritten.image_prompt       || post.image_prompt,
+    client_approved_at: null,
+    client_approved_by_user_id: null,
+  };
+  posts[postIndex] = updatedPost;
+  writeCampaignPosts(campaign.id, posts);
+
+  db.prepare(`
+    INSERT INTO client_post_regens (email_client_id, client_user_id, campaign_id, post_id)
+    VALUES (?, ?, ?, ?)
+  `).run(req.portalClient.id, req.portalUser.id, campaign.id, req.params.id);
+
+  audit('portal_post_regenerate_text', req, req.params.id, {
+    campaign_id: campaign.id,
+    regens_used_today: usedToday + 1,
+  });
+
+  res.json({
+    ok: true,
+    post: projectPost(updatedPost, postIndex),
+    regens_used_today: usedToday + 1,
+    regens_remaining: REGEN_CAP_PER_DAY - (usedToday + 1),
+  });
+});
+
+// ─── POST /api/portal/posts/:id/regenerate-image ──────────────────────────────
+// Image-only regen — mirrors the admin-side "New image" button.
+// Same combined 30/day cap as text regen. Approval is dropped on success.
+router.post('/posts/:id/regenerate-image', async (req, res) => {
+  const found = findPostForPortalUser(req, req.params.id);
+  if (!found) return res.status(404).json({ error: 'Post not found' });
+
+  const REGEN_CAP_PER_DAY = 30;
+  const usedToday = db.prepare(`
+    SELECT COUNT(*) AS n FROM client_post_regens
+    WHERE email_client_id = ? AND created_at >= datetime('now', '-1 day')
+  `).get(req.portalClient.id).n;
+
+  if (usedToday >= REGEN_CAP_PER_DAY) {
+    return res.status(429).json({
+      error: `Daily regenerate limit reached (${REGEN_CAP_PER_DAY}/day). Please try again tomorrow.`,
+      used:  usedToday,
+      limit: REGEN_CAP_PER_DAY,
+    });
+  }
+
+  const { campaign, posts, postIndex, post } = found;
+  const client = db.prepare(`SELECT * FROM clients WHERE id = ?`).get(campaign.client_id);
+  if (!client) return res.status(404).json({ error: 'Linked LinkedIn client not found' });
+
+  let newImageUrl;
+  try {
+    const imageData = await generateImage(
+      post.image_prompt || `Professional LinkedIn image for: ${post.topic}`,
+      client,
+      post,
+    );
+    newImageUrl = await uploadImageToR2(
+      imageData.data,
+      imageData.mimeType,
+      client.id,
+      post.id || `post-${postIndex}`,
+    );
+  } catch (err) {
+    console.error(`[portal] regen-image failed post ${req.params.id}:`, err.message);
+    return res.status(502).json({ error: `Image regeneration failed: ${err.message}` });
+  }
+
+  const updatedPost = {
+    ...post,
+    image_url: newImageUrl,
+    image_error: undefined,
+    // Drop approval — content has changed, customer must re-review.
+    client_approved_at: null,
+    client_approved_by_user_id: null,
+  };
+  posts[postIndex] = updatedPost;
+  writeCampaignPosts(campaign.id, posts);
+
+  db.prepare(`
+    INSERT INTO client_post_regens (email_client_id, client_user_id, campaign_id, post_id)
+    VALUES (?, ?, ?, ?)
+  `).run(req.portalClient.id, req.portalUser.id, campaign.id, req.params.id);
+
+  audit('portal_post_regenerate_image', req, req.params.id, {
+    campaign_id: campaign.id,
+    regens_used_today: usedToday + 1,
+  });
+
+  res.json({
+    ok: true,
+    post: projectPost(updatedPost, postIndex),
+    regens_used_today: usedToday + 1,
+    regens_remaining: REGEN_CAP_PER_DAY - (usedToday + 1),
   });
 });
 
