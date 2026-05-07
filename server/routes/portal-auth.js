@@ -84,7 +84,7 @@ function sqlPlusHours(hours) {
  */
 function buildServicesObject(clientId) {
   const rows = db.prepare(`
-    SELECT s.service_key, s.state,
+    SELECT s.service_key, s.state, s.display_name, s.customer_pitch,
            CASE WHEN cs.email_client_id IS NULL THEN 0 ELSE 1 END AS subscribed
     FROM services s
     LEFT JOIN customer_services cs
@@ -93,11 +93,23 @@ function buildServicesObject(clientId) {
     ORDER BY s.sort_order ASC
   `).all(clientId);
 
+  // Each entry is now an object with {state, label, pitch} so the customer
+  // portal can render service-specific sales copy on gated screens. The
+  // shape change is backward-compatible: PortalApp.jsx reads svc.linkedin
+  // and similar — when reading the legacy string format it's a single value;
+  // now reading svc.linkedin.state. Whoever updates the frontend at the same
+  // time as this change has to flip the read sites — which we are.
   const out = {};
   for (const r of rows) {
-    if (r.state === 'coming_soon') out[r.service_key] = 'coming_soon';
-    else if (r.subscribed)         out[r.service_key] = 'enabled';
-    else                           out[r.service_key] = 'not_required';
+    let state;
+    if (r.state === 'coming_soon')   state = 'coming_soon';
+    else if (r.subscribed)           state = 'enabled';
+    else                             state = 'not_required';
+    out[r.service_key] = {
+      state,
+      label: r.display_name,
+      pitch: r.customer_pitch || null,
+    };
   }
   return out;
 }

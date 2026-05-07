@@ -44,8 +44,12 @@ export default function Sidebar({ onLogout, activeView, onNavigate }) {
       {/* Nav */}
       <div style={{ flex:1, paddingTop:10 }}>
 
-        <div style={SECTION}>Social Media Posts</div>
-        <NavItem id="clients" label="LinkedIn Posts" active={activeView==='clients'} onNavigate={onNavigate} icon={<UsersIcon />} />
+        <div style={SECTION}>Social Media</div>
+        <NavItem id="clients"          label="LinkedIn Posts"   active={activeView==='clients'}          onNavigate={onNavigate} icon={<UsersIcon />} />
+        <NavItem id="facebook-posts"   label="Facebook Posts"   active={activeView==='facebook-posts'}   onNavigate={onNavigate} icon={<UsersIcon />} dim suffix="Soon" />
+        <NavItem id="instagram"        label="Instagram"        active={activeView==='instagram'}        onNavigate={onNavigate} icon={<UsersIcon />} dim suffix="Soon" />
+        <NavItem id="tiktok"           label="TikTok"           active={activeView==='tiktok'}           onNavigate={onNavigate} icon={<UsersIcon />} dim suffix="Soon" />
+        <NavItem id="facebook-pixels"  label="Facebook Pixels"  active={activeView==='facebook-pixels'}  onNavigate={onNavigate} icon={<UsersIcon />} dim suffix="Soon" />
 
         <hr style={DIVIDER} />
 
@@ -70,14 +74,17 @@ export default function Sidebar({ onLogout, activeView, onNavigate }) {
   );
 }
 
-function NavItem({ id, label, active, onNavigate, icon }) {
+function NavItem({ id, label, active, onNavigate, icon, dim, suffix }) {
   return (
     <button onClick={()=>onNavigate(id)} style={{
       display:'flex', alignItems:'center', gap:9, width:'100%',
       padding:'8px 16px', background:active?'rgba(255,255,255,0.12)':'transparent',
-      border:'none', color:active?'#fff':'#9FE1CB', fontSize:12, textAlign:'left', cursor:'pointer'
+      border:'none',
+      color:active?'#fff':(dim?'rgba(255,255,255,0.45)':'#9FE1CB'),
+      fontSize:12, textAlign:'left', cursor:'pointer'
     }}>
-      {icon}{label}
+      {icon}<span style={{flex:1}}>{label}</span>
+      {suffix && <span style={{ fontSize:9, fontWeight:600, padding:'1px 6px', borderRadius:8, background:'rgba(255,255,255,0.12)', color:'rgba(255,255,255,0.7)', letterSpacing:'0.05em', textTransform:'uppercase' }}>{suffix}</span>}
     </button>
   );
 }

@@ -451,9 +451,17 @@ function PortalChrome({ user, client, services, onLogout }) {
   // The portal sidebar always shows EVERY service (per Wez's locked-in
   // pre-decision — discoverability over hidden tabs). What changes is what
   // each tab renders inside, based on the `services` object from the server.
-  // The `services` object has three states per service: 'enabled' /
-  // 'not_required' / 'coming_soon'. ServiceGate handles the latter two.
-  const svc = services || { email:'enabled', linkedin:'enabled', facebook:'coming_soon' };
+  // Each entry is { state, label, pitch }. State is one of: 'enabled' /
+  // 'not_required' / 'coming_soon'. ServiceGate handles the latter two with
+  // service-specific sales pitch text from `pitch`.
+  const svc = services || {
+    email:           { state:'enabled',     label:'Email',           pitch:null },
+    linkedin:        { state:'enabled',     label:'LinkedIn Posts',  pitch:null },
+    facebook:        { state:'coming_soon', label:'Facebook Posts',  pitch:null },
+    instagram:       { state:'coming_soon', label:'Instagram',       pitch:null },
+    tiktok:          { state:'coming_soon', label:'TikTok',          pitch:null },
+    facebook_pixels: { state:'coming_soon', label:'Facebook Pixels', pitch:null },
+  };
 
   return (
     <div style={{ display:'flex', height:'100vh', background:BG, fontFamily:'-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }}>
@@ -487,21 +495,39 @@ function PortalChrome({ user, client, services, onLogout }) {
           </div>
         </div>
 
-        {/* Nav — three sections (Social posts, Email, Account). Each has a
+        {/* Nav — three sections (Social media, Email, Account). Each has a
             small-caps heading, then nav items. Generous gap between sections
             so the eye can group them. */}
         <nav style={{ flex:1, padding:'14px 0', display:'flex', flexDirection:'column', gap:18 }}>
-          <NavSection heading="Social posts">
+          <NavSection heading="Social media">
             <NavItem label="LinkedIn Posts"
               active={page==='posts'}
               onClick={() => setPage('posts')}
-              dim={svc.linkedin === 'not_required'}
+              dim={svc.linkedin?.state === 'not_required'}
             />
             <NavItem label="Facebook Posts"
               active={page==='facebook'}
               onClick={() => setPage('facebook')}
-              dim={svc.facebook !== 'enabled'}
-              suffix={svc.facebook === 'coming_soon' ? 'Soon' : null}
+              dim={svc.facebook?.state !== 'enabled'}
+              suffix={svc.facebook?.state === 'coming_soon' ? 'Soon' : null}
+            />
+            <NavItem label="Instagram"
+              active={page==='instagram'}
+              onClick={() => setPage('instagram')}
+              dim={svc.instagram?.state !== 'enabled'}
+              suffix={svc.instagram?.state === 'coming_soon' ? 'Soon' : null}
+            />
+            <NavItem label="TikTok"
+              active={page==='tiktok'}
+              onClick={() => setPage('tiktok')}
+              dim={svc.tiktok?.state !== 'enabled'}
+              suffix={svc.tiktok?.state === 'coming_soon' ? 'Soon' : null}
+            />
+            <NavItem label="Facebook Pixels"
+              active={page==='facebook_pixels'}
+              onClick={() => setPage('facebook_pixels')}
+              dim={svc.facebook_pixels?.state !== 'enabled'}
+              suffix={svc.facebook_pixels?.state === 'coming_soon' ? 'Soon' : null}
             />
           </NavSection>
 
@@ -509,12 +535,12 @@ function PortalChrome({ user, client, services, onLogout }) {
             <NavItem label="Inbox"
               active={page==='inbox'}
               onClick={() => setPage('inbox')}
-              dim={svc.email === 'not_required'}
+              dim={svc.email?.state === 'not_required'}
             />
             <NavItem label="Campaigns"
               active={page==='campaigns'}
               onClick={() => setPage('campaigns')}
-              dim={svc.email === 'not_required'}
+              dim={svc.email?.state === 'not_required'}
             />
           </NavSection>
 
@@ -572,23 +598,38 @@ function PortalChrome({ user, client, services, onLogout }) {
 
         <div style={{ flex:1, overflow:'auto', padding:'20px 22px' }}>
           {page === 'posts' && (
-            <ServiceGate state={svc.linkedin} serviceName="LinkedIn Posts">
+            <ServiceGate svc={svc.linkedin} serviceName="LinkedIn Posts">
               <PortalPosts />
             </ServiceGate>
           )}
           {page === 'inbox' && (
-            <ServiceGate state={svc.email} serviceName="Inbox">
+            <ServiceGate svc={svc.email} serviceName="Inbox">
               <PortalInbox />
             </ServiceGate>
           )}
           {page === 'campaigns' && (
-            <ServiceGate state={svc.email} serviceName="Campaigns">
+            <ServiceGate svc={svc.email} serviceName="Campaigns">
               <PortalCampaigns />
             </ServiceGate>
           )}
           {page === 'facebook' && (
-            <ServiceGate state={svc.facebook} serviceName="Facebook Posts">
+            <ServiceGate svc={svc.facebook} serviceName="Facebook Posts">
               {/* Real <PortalFacebook /> component when the service ships. */}
+              <div />
+            </ServiceGate>
+          )}
+          {page === 'instagram' && (
+            <ServiceGate svc={svc.instagram} serviceName="Instagram">
+              <div />
+            </ServiceGate>
+          )}
+          {page === 'tiktok' && (
+            <ServiceGate svc={svc.tiktok} serviceName="TikTok">
+              <div />
+            </ServiceGate>
+          )}
+          {page === 'facebook_pixels' && (
+            <ServiceGate svc={svc.facebook_pixels} serviceName="Facebook Pixels">
               <div />
             </ServiceGate>
           )}
@@ -600,18 +641,28 @@ function PortalChrome({ user, client, services, onLogout }) {
 }
 
 // ── SERVICE GATE ─────────────────────────────────────────────────────────────
-// Wraps each service tab so customers who aren't subscribed see a calm
-// "Not required" message instead of empty data. Three states from the
-// services object on /api/portal/auth/check:
+// Wraps each service tab so customers who aren't subscribed see service-
+// specific sales copy instead of empty data. Reads the new services object
+// shape from /api/portal/auth/check: { state, label, pitch }.
 //   'enabled'      — render children (the real tab contents)
-//   'not_required' — show "this service isn't part of your current plan"
-//   'coming_soon'  — show "coming soon — we'll let you know when ready"
-// New services get a dropdown in the admin customer-edit modal that flips
-// between enabled and not_required for that customer.
-function ServiceGate({ state, serviceName, children }) {
+//   'not_required' — "Not Currently Subscribed" pill + sales pitch from DB
+//   'coming_soon'  — "Coming soon" pill + same pitch text describing the service
+// Pitch text lives in services.customer_pitch in the DB and is seeded on every
+// boot, so wording tweaks ship via deploy. Falls back to a generic line if
+// the pitch column is empty.
+function ServiceGate({ svc, serviceName, children }) {
+  // Defensive — if /auth/check ever returns the legacy string shape (e.g. an
+  // older browser tab cached it), behave as if the service is gated.
+  const state = (svc && typeof svc === 'object') ? svc.state : svc;
+  const pitch = (svc && typeof svc === 'object') ? svc.pitch : null;
+
   if (state === 'enabled') return children;
 
   const isComingSoon = state === 'coming_soon';
+  const pillLabel    = isComingSoon ? 'Coming soon' : 'Not Currently Subscribed';
+  const pillBg       = isComingSoon ? BLUE_BG : '#f4f1e8';
+  const pillColor    = isComingSoon ? BLUE    : MUTED;
+
   return (
     <div>
       <h2 style={pageTitle()}>{serviceName}</h2>
@@ -622,19 +673,16 @@ function ServiceGate({ state, serviceName, children }) {
       }}>
         <div style={{
           display:'inline-block', padding:'5px 11px', fontSize:11,
-          background: isComingSoon ? BLUE_BG : '#f4f1e8',
-          color:      isComingSoon ? BLUE    : MUTED,
-          borderRadius:4, fontWeight:500, marginBottom:14,
-        }}>{isComingSoon ? 'Coming soon' : 'Not required'}</div>
-        <div style={{ fontSize:14, color:TEXT, marginBottom:8, fontWeight:500 }}>
-          {isComingSoon
-            ? `${serviceName} isn't live yet`
-            : `${serviceName} isn't part of your current plan`}
-        </div>
-        <div style={{ fontSize:13, color:MUTED, lineHeight:1.5, maxWidth:440, margin:'0 auto' }}>
-          {isComingSoon
-            ? "We'll let you know as soon as it's ready. No action needed from you in the meantime."
-            : <>Contact The Green Agents if you'd like to add this service to your account.</>}
+          background:pillBg, color:pillColor,
+          borderRadius:4, fontWeight:500, marginBottom:18,
+        }}>{pillLabel}</div>
+
+        <div style={{
+          fontSize:15, color:TEXT, lineHeight:1.6, maxWidth:540, margin:'0 auto', fontWeight:400,
+        }}>
+          {pitch || (isComingSoon
+            ? `${serviceName} is on its way — we'll let you know as soon as it's ready.`
+            : `${serviceName} isn't part of your current plan.`)}
         </div>
       </div>
     </div>

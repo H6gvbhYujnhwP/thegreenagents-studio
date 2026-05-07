@@ -60,6 +60,13 @@ try { db.exec('ALTER TABLE clients ADD COLUMN logo_url TEXT'); } catch (_) {}
 // whether the operator finished the campaign or the customer self-served.
 try { db.exec("ALTER TABLE campaigns ADD COLUMN deployed_by TEXT"); } catch (_) {}
 
+// ── services.customer_pitch column migration ─────────────────────────────────
+// The original `description` column is admin-facing operator text — what the
+// service does and how to wire it up. The customer_pitch column is the
+// customer-facing sales blurb that renders on the gated screen when a customer
+// isn't subscribed to a service. Two audiences, two columns. Both seeded below.
+try { db.exec("ALTER TABLE services ADD COLUMN customer_pitch TEXT"); } catch (_) {}
+
 // ── One-shot fix: collapse legacy 'deployed' stage into 'done' ────────────────
 // During customer-portal chunk 3b, the approve-all flow set stage='deployed'.
 // That value isn't recognised by the admin's CampaignProgress UI (which knows
@@ -984,11 +991,36 @@ db.exec(`
     ['facebook', 'Facebook Posts',
       'Coming soon — once Facebook posting is wired up, you\'ll be able to link a Facebook page here.',
       'coming_soon', null, null, 20],
+    ['instagram', 'Instagram',
+      'Coming soon — Instagram posts in your customer\'s brand voice.',
+      'coming_soon', null, null, 25],
+    ['tiktok', 'TikTok',
+      'Coming soon — short-form video scripts and content for TikTok.',
+      'coming_soon', null, null, 28],
+    ['facebook_pixels', 'Facebook Pixels',
+      'Coming soon — Facebook Pixel + Conversions API installation and management.',
+      'coming_soon', null, null, 29],
     ['email', 'Email (Inbox + Campaigns)',
       'Inbox replies and email-campaign stats. Pick the underlying email system record — usually the domain you send their cold email from (e.g. mail.engineersolutions.co.uk for the "Cube6" portal customer).',
       'live', 'email_clients', 'Email system record', 30],
   ];
   for (const s of seeds) seedService.run(...s);
+
+  // Customer-facing sales pitches. Unlike `description` (which is admin
+  // operator text), these are what the customer sees on a gated screen when
+  // they don't have the service. Re-applied every boot so wording tweaks
+  // here ship via deploy with no manual DB work. Kept short — 2-3 sentences,
+  // benefit-led, no fluff.
+  const pitches = [
+    ['linkedin', null], // linkedin is live for everyone who has it; never gated for sales
+    ['facebook', 'Reach the buyers who scroll Facebook every day. We write, design, and schedule Facebook posts in your brand voice — same approval flow as your LinkedIn posts. One review screen, posts go straight into your scheduled queue.'],
+    ['instagram', 'Showcase your work where decisions get made visually. We turn your projects, products, and team moments into scroll-stopping Instagram posts — captions and images crafted in your brand voice, delivered for review every week.'],
+    ['tiktok', 'Where the next generation of buyers lives. We write TikTok-native scripts and produce short-form video content that gets watched, not skipped — designed to build awareness with audiences traditional channels miss.'],
+    ['facebook_pixels', 'Stop guessing who\'s converting. We install and manage your Facebook Pixel and Conversions API so every form submission, sale, or sign-up flows back to Meta — making your ad spend smarter and your reporting clearer.'],
+    ['email', 'Turn cold contacts into warm conversations. We run targeted outbound email campaigns from a properly-warmed mailbox, route every reply into your portal inbox, and keep deliverability rock-solid so the right buyers actually see your message.'],
+  ];
+  const updatePitch = db.prepare(`UPDATE services SET customer_pitch = ? WHERE service_key = ?`);
+  for (const [key, pitch] of pitches) updatePitch.run(pitch, key);
 
   // Idempotent upgrade: if a previous deploy seeded 'email' with link_table=NULL,
   // upgrade it now to point at email_clients. Other columns are left alone so

@@ -102,6 +102,26 @@ export default function Dashboard({ onLogout }) {
     );
   }
 
+  // ── Coming-soon placeholder views ─────────────────────────────────────────
+  // Four sidebar items for services not yet built on the admin side. Each one
+  // points to this same screen with the title varying. When a real admin
+  // screen lands for any of these, replace the branch with a real component
+  // mount (same pattern as PortalAdmin above).
+  const COMING_SOON_TITLES = {
+    'facebook-posts':  'Facebook Posts',
+    'instagram':       'Instagram',
+    'tiktok':          'TikTok',
+    'facebook-pixels': 'Facebook Pixels',
+  };
+  if (COMING_SOON_TITLES[view]) {
+    return (
+      <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+        <AdminComingSoon title={COMING_SOON_TITLES[view]} />
+      </div>
+    );
+  }
+
   // ── Client detail view ────────────────────────────────────────────────────
   if (selectedClient) {
     return (
@@ -213,6 +233,35 @@ export default function Dashboard({ onLogout }) {
       {showNewClient && (
         <NewClientModal onClose={()=>setShowNewClient(false)} onCreated={()=>{ setShowNewClient(false); loadClients(); }} />
       )}
+    </div>
+  );
+}
+
+// ── Admin coming-soon placeholder ────────────────────────────────────────────
+// Single re-usable screen for sidebar items whose admin side hasn't been built
+// yet. Used by Facebook Posts, Instagram, TikTok, Facebook Pixels admin tabs.
+// When any of those gets a real admin UI, replace its branch in Dashboard's
+// view router with a real component mount and this stays for the rest.
+function AdminComingSoon({ title }) {
+  return (
+    <div style={{ flex:1, overflow:'auto', padding:28 }}>
+      <h1 style={{ fontSize:20, fontWeight:500, color:'#1a1a1a', marginBottom:24 }}>{title}</h1>
+      <div style={{
+        background:'#fff', borderRadius:8, border:'0.5px solid #d0d0cc',
+        padding:'56px 32px', textAlign:'center',
+      }}>
+        <div style={{
+          display:'inline-block', padding:'5px 11px', fontSize:11,
+          background:'#E6F1FB', color:'#0C447C',
+          borderRadius:4, fontWeight:500, marginBottom:18,
+        }}>Coming soon</div>
+        <div style={{ fontSize:15, color:'#1a1a1a', fontWeight:500, marginBottom:8 }}>
+          Feature in development
+        </div>
+        <div style={{ fontSize:13, color:'#666', lineHeight:1.5, maxWidth:480, margin:'0 auto' }}>
+          The admin tools for {title.toLowerCase()} will appear here once the service ships. Customer-portal customers already see a sales pitch on this service.
+        </div>
+      </div>
     </div>
   );
 }
