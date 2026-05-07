@@ -19,6 +19,23 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const app  = express();
 const PORT = process.env.PORT || 3001;
 
+// Process-level safety net.
+//
+// Background: ImapFlow (and other Node libraries that use EventEmitter under
+// the hood) can emit 'error' events on instances. If a listener isn't wired
+// up, Node treats it as unhandled and terminates the entire process —
+// including the drip ticker and reply classifier that share this Node
+// instance with the IMAP poller. We've already attached per-instance error
+// listeners to ImapFlow clients in services/imap-poller.js. These two
+// process-level handlers are belt-and-braces for any similar bug we haven't
+// found yet: the process logs the error and stays alive instead of crashing.
+process.on('uncaughtException', (err) => {
+  console.error('[process] uncaughtException:', err && err.stack ? err.stack : err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] unhandledRejection:', reason && reason.stack ? reason.stack : reason);
+});
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 

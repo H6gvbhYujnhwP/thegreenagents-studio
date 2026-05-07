@@ -113,6 +113,16 @@ async function pollOneInbox(inbox) {
     socketTimeout: 30_000,
   });
 
+  // ImapFlow emits 'error' on the EventEmitter when the socket dies (e.g.
+  // ETIMEOUT after 30s of silence). Without a listener, Node treats it as
+  // unhandled and kills the entire Node process — taking the drip ticker
+  // and reply classifier down with the poller. Attaching a no-op listener
+  // converts the event into a regular promise rejection that the existing
+  // try/catch in pollAllInboxes/pollSingleInbox handles cleanly.
+  client.on('error', (err) => {
+    console.error(`[poller] ${inbox.email_address}: socket error ${err.code || ''} ${err.message}`);
+  });
+
   await client.connect();
   let stored = 0;
   let scanned = 0;
@@ -279,6 +289,12 @@ export async function testImapCredentials({ email, appPassword, host = 'imap.gma
     auth: { user: email, pass: appPassword },
     logger: false,
     socketTimeout: 15_000,
+  });
+  // No-op error listener — see comment in pollOneInbox. Without this, a
+  // socket-level error during the credential test would crash the process
+  // instead of returning { ok: false } to the UI.
+  client.on('error', (err) => {
+    console.error(`[poller] testImapCredentials ${email}: socket error ${err.code || ''} ${err.message}`);
   });
   try {
     await client.connect();
