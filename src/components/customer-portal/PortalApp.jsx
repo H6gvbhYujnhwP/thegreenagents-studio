@@ -538,21 +538,17 @@ function PortalChrome({ user, client, services, onLogout }) {
               back to initials on the brand colour. Box is fixed-size so both
               states have the same footprint. */}
           {client?.logo_url ? (
-            <div style={{
-              width:44, height:44, borderRadius:8, background:'#fff',
-              border:`0.5px solid ${BORDER}`,
-              display:'flex', alignItems:'center', justifyContent:'center',
-              flexShrink:0, overflow:'hidden', padding:4, boxSizing:'border-box',
-            }}>
-              <img src={client.logo_url} alt={`${client.name} logo`}
-                style={{ maxWidth:'100%', maxHeight:'100%', objectFit:'contain' }}
-              />
-            </div>
+            <img src={client.logo_url} alt={`${client.name} logo`}
+              style={{
+                width:56, height:56, borderRadius:8,
+                objectFit:'contain', flexShrink:0, display:'block',
+              }}
+            />
           ) : (
             <div style={{
-              width:44, height:44, borderRadius:8, background:client?.logo_color || '#1a4d8c',
+              width:56, height:56, borderRadius:8, background:client?.logo_color || '#1a4d8c',
               color:'white', display:'flex', alignItems:'center', justifyContent:'center',
-              fontSize:15, fontWeight:500, flexShrink:0,
+              fontSize:18, fontWeight:500, flexShrink:0,
             }}>{client?.logo_initial || 'C'}</div>
           )}
           <div>
