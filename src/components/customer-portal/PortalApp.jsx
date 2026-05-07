@@ -1013,7 +1013,7 @@ function PortalPosts() {
         )}
       </div>
 
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(340px, 1fr))', gap:16 }}>
         {posts.map(p => (
           <PostCard key={p.id} post={p} totalPosts={posts.length}
             busy={busy[p.id] || null}
@@ -1344,7 +1344,7 @@ function HistoryCampaignCard({ campaign, expanded, onToggle,
           batch grid but readOnly=true hides the action row. */}
       {expanded && (
         <div style={{ padding:'0 14px 14px', borderTop:`0.5px solid ${BORDER}` }}>
-          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginTop:14 }}>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(340px, 1fr))', gap:16, marginTop:14 }}>
             {campaign.posts.map(p => (
               <PostCard key={p.id} post={p} totalPosts={campaign.post_count}
                 readOnly
