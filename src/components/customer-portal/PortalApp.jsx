@@ -570,21 +570,6 @@ function PortalChrome({ user, client, services, onLogout }) {
           }}>{user.email || user.username}</div>
         </header>
 
-        {/* First-login banner — shown until the user changes their password.
-            Backend sets must_change_password=true when last_login_at is NULL.
-            After they hit Change password in Settings, must_change_password
-            stays true until /auth/check returns the latest user row (next
-            render after the change-password call). */}
-        {user.must_change_password && (
-          <div style={{
-            background:AMBER_BG, color:AMBER, fontSize:12, padding:'10px 22px',
-            borderBottom:`0.5px solid ${BORDER}`, lineHeight:1.5,
-          }}>
-            <strong style={{ fontWeight:500 }}>Your password is temporary.</strong>
-            {' '}Please <a onClick={() => setPage('settings')} style={{ color:AMBER, textDecoration:'underline', cursor:'pointer' }}>change it now</a> in Settings.
-          </div>
-        )}
-
         <div style={{ flex:1, overflow:'auto', padding:'20px 22px' }}>
           {page === 'posts' && (
             <ServiceGate state={svc.linkedin} serviceName="LinkedIn Posts">
