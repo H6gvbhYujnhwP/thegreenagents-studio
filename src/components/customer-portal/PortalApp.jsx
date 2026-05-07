@@ -607,7 +607,7 @@ function PortalChrome({ user, client, services, onLogout }) {
               <div />
             </ServiceGate>
           )}
-          {page === 'settings'  && <PortalSettings user={user} services={svc} />}
+          {page === 'settings'  && <PortalSettings user={user} client={client} services={svc} />}
         </div>
       </main>
     </div>
@@ -1555,6 +1555,16 @@ function ReplyRow({ reply, onClick }) {
 }
 
 function ClassifyBadge({ reply }) {
+  // Emails that didn't match any campaign send aren't responses to outreach —
+  // they're whatever else landed in the customer's Gmail INBOX (vendor mail,
+  // newsletters, transactional notifications). The classifier still ran on
+  // them, but its output ('Prospect', 'Unsub'd', etc.) is meaningless for a
+  // non-campaign email and actively misleading. Show a neutral 'Normal email'
+  // tag instead so the customer can tell at a glance which rows are real
+  // campaign replies vs general inbox traffic.
+  if (!reply.campaign_title) {
+    return <span style={{ ...badgeStyle(), background:'#eef0f2', color:MUTED }}>Normal email</span>;
+  }
   if (reply.auto_unsubscribed) return <span style={{ ...badgeStyle(), background:AMBER_BG, color:AMBER }}>Unsub'd</span>;
   if (reply.classification === 'positive') return <span style={{ ...badgeStyle(), background:GREEN_BG, color:GREEN }}>Prospect</span>;
   if (reply.classification === 'auto_reply') return <span style={{ ...badgeStyle(), background:'#f4f1e8', color:MUTED }}>OOO</span>;
@@ -1835,7 +1845,7 @@ function PortalCampaigns() {
 }
 
 // ── SETTINGS PAGE ────────────────────────────────────────────────────────────
-function PortalSettings({ user, services }) {
+function PortalSettings({ user, client, services }) {
   const [pw1, setPw1]       = useState('');
   const [pw2, setPw2]       = useState('');
   const [pwOld, setPwOld]   = useState('');
@@ -1915,13 +1925,24 @@ function PortalSettings({ user, services }) {
           Your logo and audience profile are managed by The Green Agents. Contact us if you need them updated.
         </p>
         <div style={{ display:'flex', alignItems:'center', gap:14, padding:'10px 12px', border:`0.5px solid ${BORDER}`, borderRadius:6 }}>
-          <div style={{
-            width:48, height:48, borderRadius:8, background:'#1a4d8c', color:'white',
-            display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, fontWeight:500,
-          }}>TL</div>
+          {client?.logo_url ? (
+            <img src={client.logo_url} alt={`${client.name || 'Client'} logo`}
+              style={{
+                width:48, height:48, borderRadius:8,
+                objectFit:'contain', flexShrink:0, display:'block',
+              }}
+            />
+          ) : (
+            <div style={{
+              width:48, height:48, borderRadius:8, background:client?.logo_color || '#1a4d8c', color:'white',
+              display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, fontWeight:500, flexShrink:0,
+            }}>{client?.logo_initial || (client?.name || 'C').charAt(0).toUpperCase()}</div>
+          )}
           <div>
-            <div style={{ fontSize:13, fontWeight:500, color:TEXT }}>Tower Leasing</div>
-            <div style={{ fontSize:11, color:MUTED }}>Asset finance · authority brand</div>
+            <div style={{ fontSize:13, fontWeight:500, color:TEXT }}>{client?.name || '—'}</div>
+            {client?.audience && (
+              <div style={{ fontSize:11, color:MUTED }}>{client.audience}</div>
+            )}
           </div>
         </div>
       </SettingsCard>
