@@ -657,4 +657,45 @@ router.post('/campaigns/:id/posts/approve-all', async (req, res) => {
   });
 });
 
+// ─── GET /api/portal/campaigns-history ────────────────────────────────────────
+// Read-only history of past campaigns for this customer's LinkedIn client.
+// Returns campaigns where the work is done — either the customer approved them
+// via approve-all (stage = 'deployed') or admin pushed them direct to Supergrow
+// drafts before the portal existed (stage = 'done'). Newest first.
+//
+// Each campaign comes back with its full projected posts array so the frontend
+// can expand a card without a second round-trip. Posts that aren't approved
+// individually still appear (image + text), so the customer sees the complete
+// batch they signed off on.
+router.get('/campaigns-history', (req, res) => {
+  const linkedinClientId = resolveLinkedinClientId(req.portalClient.id);
+  if (!linkedinClientId) {
+    return res.json({ campaigns: [], not_subscribed: true });
+  }
+
+  const rows = db.prepare(`
+    SELECT id, stage, posts_json, created_at, completed_at
+    FROM campaigns
+    WHERE client_id = ? AND stage IN ('deployed', 'done')
+    ORDER BY COALESCE(completed_at, created_at) DESC
+  `).all(linkedinClientId);
+
+  const campaigns = rows.map(row => {
+    let posts = [];
+    try { posts = JSON.parse(row.posts_json || '[]'); } catch (_) { posts = []; }
+    return {
+      id:           row.id,
+      stage:        row.stage,
+      created_at:   row.created_at,
+      completed_at: row.completed_at,
+      post_count:   posts.length,
+      cover_url:    posts[0]?.image_url || null,
+      first_topic:  posts[0]?.topic || null,
+      posts:        posts.map(projectPost),
+    };
+  });
+
+  res.json({ campaigns, not_subscribed: false });
+});
+
 export default router;
