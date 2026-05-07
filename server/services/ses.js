@@ -107,7 +107,13 @@ function extractMessageId(xml) {
 }
 
 // ── Build raw MIME email ──────────────────────────────────────────────────────
-function buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody, listUnsubUrl }) {
+// inReplyTo and references support email threading. When the customer portal
+// replies to a received message, we set:
+//   In-Reply-To: <message-id-of-the-reply-they're-answering>
+//   References: <chain of message-ids in the thread>
+// Both are optional — undefined means a fresh standalone email (existing
+// behaviour). Most call sites don't need them; only the portal reply route does.
+function buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody, listUnsubUrl, inReplyTo, references }) {
   const boundary   = `b_${Date.now()}_${Math.random().toString(36).slice(2)}`;
   const toAddress  = toName ? `${toName} <${to}>` : to;
   const plain      = plainBody || htmlToPlain(htmlBody);
@@ -149,6 +155,26 @@ function buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, html
     headers.push(`List-Unsubscribe-Post: List-Unsubscribe=One-Click`);
   }
 
+  // Threading headers — used when this message is a reply to an existing thread.
+  // Message ids must be wrapped in angle brackets per RFC 5322. We accept ids
+  // either bare ("abc@example.com") or already-bracketed ("<abc@example.com>")
+  // and normalise to the bracketed form.
+  function normaliseId(id) {
+    if (!id) return null;
+    const trimmed = String(id).trim();
+    if (!trimmed) return null;
+    return trimmed.startsWith('<') ? trimmed : `<${trimmed}>`;
+  }
+  const irt = normaliseId(inReplyTo);
+  if (irt) headers.push(`In-Reply-To: ${irt}`);
+  if (references) {
+    // References is a space-separated chain of message ids. The caller can
+    // pass either a single id or a pre-built chain. We split on whitespace,
+    // normalise each, and rejoin.
+    const chain = String(references).split(/\s+/).map(normaliseId).filter(Boolean).join(' ');
+    if (chain) headers.push(`References: ${chain}`);
+  }
+
   headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
 
   // Encode bodies as base64 with hard line wraps at 76 chars (RFC 2045).
@@ -182,10 +208,14 @@ function buildRawEmail({ to, toName, fromName, fromEmail, replyTo, subject, html
 // Tracking is per-signal opt-in via track_opens / track_clicks / track_unsub.
 // listUnsubUrl is added to MIME headers only when track_unsub is true.
 // Returns { messageId } — used by sendCampaign to map bounces/complaints back.
+//
+// inReplyTo / references — optional, used by the customer-portal reply route
+// to thread outbound messages with the inbound message they're answering.
 export async function sendEmail({
   to, toName, fromName, fromEmail, replyTo, subject, htmlBody, plainBody,
   campaignId, subscriberId, baseUrl,
   track_opens = false, track_clicks = false, track_unsub = false,
+  inReplyTo = null, references = null,
 }) {
   let finalHtml = htmlBody;
   let listUnsubUrl = null;
@@ -206,6 +236,7 @@ export async function sendEmail({
   const raw = buildRawEmail({
     to, toName, fromName, fromEmail, replyTo, subject,
     htmlBody: finalHtml, plainBody, listUnsubUrl,
+    inReplyTo, references,
   });
 
   const xml = await sesRequest({

@@ -22,6 +22,8 @@ import { regenerateSinglePost } from '../services/openai.js';
 import { generateImage } from '../services/gemini.js';
 import { uploadImageToR2 } from '../services/r2.js';
 import { queuePost } from '../services/supergrow.js';
+import { sendEmail } from '../services/ses.js';
+import { v4 as uuid } from 'uuid';
 
 const router = Router();
 router.use(requirePortalSession);
@@ -42,6 +44,28 @@ function resolveLinkedinClientId(emailClientId) {
     SELECT linkedin_client_id FROM email_clients WHERE id = ?
   `).get(emailClientId);
   return legacy?.linkedin_client_id || null;
+}
+
+// ─── Helper: resolve the linked email_clients id for this portal customer ────
+//
+// The portal customer (e.g. Cube6) is itself a row in email_clients, but their
+// inbox mailboxes and email campaigns might live under a different email_clients
+// row (e.g. mail.engineersolutions.co.uk). The customer_services table joins them
+// via service_key='email' — linked_external_id points at the email_clients row
+// that owns the actual mailboxes. Falls back to the customer's own id when the
+// service is self-linked (the natural default — see Decision #14 in the blueprint).
+// Returns null when the customer doesn't have email service enabled.
+function resolveEmailClientId(portalEmailClientId) {
+  const cs = db.prepare(`
+    SELECT linked_external_id FROM customer_services
+    WHERE email_client_id = ? AND service_key = 'email'
+  `).get(portalEmailClientId);
+  // No subscription → no email service.
+  if (!cs) return null;
+  // Subscription exists but no link → email is enabled, defaulting to the
+  // customer's own row (legacy bool toggle).
+  if (!cs.linked_external_id) return portalEmailClientId;
+  return cs.linked_external_id;
 }
 
 /**
@@ -696,6 +720,229 @@ router.get('/campaigns-history', (req, res) => {
   });
 
   res.json({ campaigns, not_subscribed: false });
+});
+
+// ─── 3b-ii: Inbox routes ──────────────────────────────────────────────────────
+// All filter by the email-service-linked email_client (see resolveEmailClientId
+// above). When the customer doesn't have email service, GET /inbox returns
+// empty with not_subscribed=true; the per-id routes 404.
+//
+// Per-customer security: every query passes the resolved email_client_id as a
+// filter. We never trust an id from the URL or body. 404 (not 403) for cross-
+// tenant lookups so we don't leak existence of other customers' replies.
+
+// ─── GET /api/portal/inbox ────────────────────────────────────────────────────
+// Recent replies for this customer's mailboxes. Frontend renders each row with
+// from name + address, subject, snippet, classification badge (Prospect / OOO /
+// Unsub'd / Neutral), received_at (relative time), and the campaign title if
+// the reply matched a campaign.
+//
+// Limit 100 so the page stays responsive on large mailboxes.
+router.get('/inbox', (req, res) => {
+  const linkedEmailClientId = resolveEmailClientId(req.portalClient.id);
+  if (!linkedEmailClientId) {
+    return res.json({ replies: [], not_subscribed: true });
+  }
+
+  const rows = db.prepare(`
+    SELECT
+      r.id, r.from_address, r.from_name, r.subject, r.body_text, r.received_at,
+      r.classification, r.auto_unsubscribed, r.matched_campaign_id,
+      c.title AS campaign_title
+    FROM email_replies r
+    LEFT JOIN email_campaigns c ON c.id = r.matched_campaign_id
+    WHERE r.email_client_id = ?
+    ORDER BY r.received_at DESC
+    LIMIT 100
+  `).all(linkedEmailClientId);
+
+  // Build a short snippet (first ~160 chars of body_text, or empty). This is
+  // what the inbox row preview shows; full body comes from GET /replies/:id.
+  const replies = rows.map(r => ({
+    id:                r.id,
+    from_address:      r.from_address,
+    from_name:         r.from_name || (r.from_address || '').split('@')[0],
+    subject:           r.subject || '(no subject)',
+    snippet:           (r.body_text || '').replace(/\s+/g, ' ').slice(0, 160).trim(),
+    received_at:       r.received_at,
+    classification:    r.classification || 'neutral',
+    auto_unsubscribed: !!r.auto_unsubscribed,
+    campaign_title:    r.campaign_title || null,
+    step_number:       null, // step number isn't currently stored on email_replies
+  }));
+
+  res.json({ replies, not_subscribed: false });
+});
+
+// ─── GET /api/portal/replies/:id ──────────────────────────────────────────────
+// Full reply detail. Returns body_html (preferred for the threaded view) and
+// body_text (fallback). 404 (not 403) when the reply belongs to a different
+// customer's email_client — leaks no info about whether the id exists.
+router.get('/replies/:id', (req, res) => {
+  const linkedEmailClientId = resolveEmailClientId(req.portalClient.id);
+  if (!linkedEmailClientId) return res.status(404).json({ error: 'Not found' });
+
+  const row = db.prepare(`
+    SELECT
+      r.id, r.email_client_id, r.inbox_id, r.message_id,
+      r.from_address, r.from_name, r.subject, r.body_text, r.body_html,
+      r.received_at, r.classification, r.auto_unsubscribed,
+      r.matched_campaign_id, r.in_reply_to, r.references_header,
+      c.title AS campaign_title,
+      i.email_address AS mailbox_address
+    FROM email_replies r
+    LEFT JOIN email_campaigns c ON c.id = r.matched_campaign_id
+    LEFT JOIN email_inboxes i ON i.id = r.inbox_id
+    WHERE r.id = ?
+  `).get(req.params.id);
+
+  if (!row || row.email_client_id !== linkedEmailClientId) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  res.json({
+    id:                row.id,
+    from_address:      row.from_address,
+    from_name:         row.from_name || (row.from_address || '').split('@')[0],
+    subject:           row.subject || '(no subject)',
+    body_text:         row.body_text || '',
+    body_html:         row.body_html || null,
+    received_at:       row.received_at,
+    classification:    row.classification || 'neutral',
+    auto_unsubscribed: !!row.auto_unsubscribed,
+    campaign_title:    row.campaign_title || null,
+    mailbox_address:   row.mailbox_address || null,
+  });
+});
+
+// ─── POST /api/portal/replies/:id/send ────────────────────────────────────────
+// Send a reply via SES. Body: { cc, body }.
+//
+// From-address: the mailbox the original reply was received on (locked-in
+// product decision — natural threading, mailbox already SES-verified). The
+// signed-in portal user's display name is used so the recipient sees who
+// at the customer is replying.
+//
+// Threading: In-Reply-To = the reply's message_id; References = chain of
+// references_header + message_id. Gmail/Outlook use these to thread the new
+// outbound message into the existing conversation.
+//
+// We store one row in email_outbound regardless of SES outcome. error column
+// captures the failure when SES throws — surfaces to admin via audit/log
+// without losing the body the customer typed.
+router.post('/replies/:id/send', async (req, res) => {
+  const linkedEmailClientId = resolveEmailClientId(req.portalClient.id);
+  if (!linkedEmailClientId) return res.status(404).json({ error: 'Not found' });
+
+  const { cc = '', body = '' } = req.body || {};
+  const bodyText = String(body || '').trim();
+  const ccText   = String(cc   || '').trim();
+
+  if (!bodyText) {
+    return res.status(400).json({ error: 'Reply body cannot be empty.' });
+  }
+
+  // Resolve the reply + the mailbox it came in on. Same 404 rule as GET /:id.
+  const reply = db.prepare(`
+    SELECT
+      r.id, r.email_client_id, r.inbox_id, r.message_id,
+      r.from_address, r.from_name, r.subject,
+      r.in_reply_to, r.references_header,
+      i.email_address AS mailbox_address
+    FROM email_replies r
+    LEFT JOIN email_inboxes i ON i.id = r.inbox_id
+    WHERE r.id = ?
+  `).get(req.params.id);
+
+  if (!reply || reply.email_client_id !== linkedEmailClientId) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  if (!reply.mailbox_address) {
+    return res.status(500).json({ error: 'Mailbox for this reply could not be resolved.' });
+  }
+
+  // Build the threading chain. The new References header is the inbound
+  // reply's existing References + its message_id appended (per RFC 5322).
+  // We tolerate either being null.
+  const inReplyTo = reply.message_id || null;
+  const refsParts = [
+    reply.references_header || '',
+    reply.message_id || '',
+  ].filter(Boolean).join(' ').trim() || null;
+
+  // Compose subject — prefix Re: if not already present.
+  const inboundSubject = reply.subject || '';
+  const replySubject = /^re:/i.test(inboundSubject)
+    ? inboundSubject
+    : `Re: ${inboundSubject || '(no subject)'}`;
+
+  // From-name: use the portal user's username as a friendly label. Recipient
+  // sees "Dave <david@mail.engineersolutions.co.uk>". When email column has
+  // a value we prefer username over email for the display name.
+  const fromName  = req.portalUser.username || 'Reply';
+  const fromEmail = reply.mailbox_address;
+
+  // HTML wrapper around the plain body — keeps formatting predictable and
+  // gives Outlook/Gmail a clean threaded display. Plain newlines become <br>.
+  const htmlBody = `<div>${bodyText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>')}</div>`;
+
+  // Persist the outbound row up front (with no message_id yet). If SES throws
+  // we update with error; on success we update with the SES MessageId. Either
+  // way the customer's typed body is never lost.
+  const outboundId = `eo_${uuid()}`;
+  db.prepare(`
+    INSERT INTO email_outbound (
+      id, email_client_id, in_reply_to_reply_id, client_user_id,
+      from_address, to_address, cc_address, subject,
+      body_text, body_html,
+      message_id, in_reply_to_header, references_header
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    outboundId,
+    linkedEmailClientId,
+    reply.id,
+    req.portalUser.id,
+    fromEmail,
+    reply.from_address,
+    ccText || null,
+    replySubject,
+    bodyText,
+    htmlBody,
+    null,
+    inReplyTo,
+    refsParts,
+  );
+
+  try {
+    const { messageId } = await sendEmail({
+      to:        reply.from_address,
+      toName:    reply.from_name || null,
+      fromName,
+      fromEmail,
+      replyTo:   fromEmail,
+      subject:   replySubject,
+      htmlBody,
+      plainBody: bodyText,
+      // No tracking on portal-sent replies — they're 1:1 conversations,
+      // not campaign sends.
+      track_opens:  false,
+      track_clicks: false,
+      track_unsub:  false,
+      // Threading.
+      inReplyTo,
+      references: refsParts,
+    });
+
+    db.prepare(`UPDATE email_outbound SET message_id = ? WHERE id = ?`)
+      .run(messageId || null, outboundId);
+
+    res.json({ ok: true, message_id: messageId, outbound_id: outboundId });
+  } catch (err) {
+    console.error(`[portal] reply send failed for ${req.params.id}:`, err.message);
+    db.prepare(`UPDATE email_outbound SET error = ? WHERE id = ?`)
+      .run(err.message.slice(0, 500), outboundId);
+    res.status(502).json({ error: `Send failed: ${err.message}` });
+  }
 });
 
 export default router;

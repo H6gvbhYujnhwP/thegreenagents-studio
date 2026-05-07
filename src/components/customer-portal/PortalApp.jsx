@@ -1363,46 +1363,124 @@ function HistoryCampaignCard({ campaign, expanded, onToggle,
 
 // ── INBOX PAGE ───────────────────────────────────────────────────────────────
 function PortalInbox() {
-  const stats = aggregateStats(mockCampaigns);
-  const [openReply, setOpenReply] = useState(null);
-  const [composing, setComposing] = useState(null);  // reply object being replied to
+  const [replies, setReplies]         = useState(null);  // null=loading, []=none, [...]=list
+  const [notSubscribed, setNotSubscribed] = useState(false);
+  const [loadError, setLoadError]     = useState(null);
+  const [openReply, setOpenReply]     = useState(null);   // full reply detail (after fetch)
+  const [openLoading, setOpenLoading] = useState(false);
+  const [composing, setComposing]     = useState(null);
+  const [sendError, setSendError]     = useState(null);
+
+  useEffect(() => {
+    fetch('/api/portal/inbox', { credentials:'include' })
+      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+      .then(d => {
+        setReplies(d.replies || []);
+        setNotSubscribed(!!d.not_subscribed);
+      })
+      .catch(e => {
+        setLoadError(String(e));
+        setReplies([]);
+      });
+  }, []);
+
+  // Click on a reply row → fetch full detail (with body_html) before showing
+  // the modal. The list endpoint only returns the snippet for performance,
+  // so the modal needs a second call to get the full message body.
+  async function openReplyDetail(reply) {
+    setOpenLoading(true);
+    try {
+      const r = await fetch(`/api/portal/replies/${encodeURIComponent(reply.id)}`, { credentials:'include' });
+      if (!r.ok) {
+        setLoadError(`Couldn't load reply (HTTP ${r.status})`);
+        return;
+      }
+      const d = await r.json();
+      setOpenReply(d);
+    } catch (e) {
+      setLoadError(`Network error: ${e.message}`);
+    } finally {
+      setOpenLoading(false);
+    }
+  }
+
+  if (loadError && !replies) {
+    return (
+      <div>
+        <h2 style={pageTitle()}>Inbox</h2>
+        <div style={{
+          padding:'12px 16px', background:'#fbe9e9', color:DANGER,
+          borderRadius:8, fontSize:13, marginTop:18,
+        }}>Couldn't load inbox: {loadError}</div>
+      </div>
+    );
+  }
+
+  if (replies === null) {
+    return (
+      <div>
+        <h2 style={pageTitle()}>Inbox</h2>
+        <p style={pageSub()}>Loading replies…</p>
+      </div>
+    );
+  }
 
   return (
     <div>
-      <h2 style={pageTitle()}>Email campaigns</h2>
-      <p style={pageSub()}>Across all campaigns sent for your account.</p>
+      <h2 style={pageTitle()}>Inbox</h2>
+      <p style={pageSub()}>Replies received to your campaigns. Click any row to read or reply.</p>
 
-      {/* Stats */}
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:10, marginBottom:16 }}>
-        <StatCard label="Sent"    value={stats.sent.toLocaleString()} />
-        <StatCard label="Opens"   value={stats.opens}   sub={`${stats.openRate}% across ${stats.trackable.toLocaleString()} trackable`} />
-        <StatCard label="Clicks"  value={stats.clicks}  sub={`${stats.clickRate}% across ${stats.trackable.toLocaleString()} trackable`} />
-        <StatCard label="Replies" value={stats.replies} sub={`${mockReplies.filter(r => r.classification==='positive').length} marked positive`} />
-      </div>
-
-      {/* Trackability note */}
-      {stats.untracked > 0 && (
+      {loadError && (
         <div style={{
-          padding:'10px 12px', background:BLUE_BG, color:BLUE,
-          borderRadius:8, fontSize:12, marginBottom:16, lineHeight:1.5,
+          padding:'10px 14px', background:'#fbe9e9', color:DANGER,
+          borderRadius:8, marginBottom:12, fontSize:12, display:'flex', alignItems:'center', gap:10,
         }}>
-          <strong style={{ fontWeight:500 }}>{stats.untracked.toLocaleString()} sends had tracking disabled to maximise inbox deliverability.</strong>
-          {' '}Open and click rates above are calculated from the {stats.trackable.toLocaleString()} trackable sends.
+          <span style={{ flex:1 }}>{loadError}</span>
+          <button onClick={() => setLoadError(null)} style={{
+            background:'transparent', border:'none', color:DANGER, cursor:'pointer', fontSize:14, padding:0,
+          }} aria-label="Dismiss">×</button>
         </div>
       )}
 
-      {/* Replies table */}
-      <div style={{
-        background:CARD, borderRadius:8, border:`0.5px solid ${BORDER}`, overflow:'hidden',
-      }}>
+      {sendError && (
         <div style={{
-          fontSize:11, color:MUTED, textTransform:'uppercase', letterSpacing:'0.06em',
-          padding:'14px 14px 8px', borderBottom:`0.5px solid ${BORDER}`,
-        }}>Recent replies — click to read &amp; reply</div>
-        {mockReplies.map(r => (
-          <ReplyRow key={r.id} reply={r} onClick={() => setOpenReply(r)} />
-        ))}
-      </div>
+          padding:'10px 14px', background:'#fbe9e9', color:DANGER,
+          borderRadius:8, marginBottom:12, fontSize:12, display:'flex', alignItems:'center', gap:10,
+        }}>
+          <span style={{ flex:1 }}>{sendError}</span>
+          <button onClick={() => setSendError(null)} style={{
+            background:'transparent', border:'none', color:DANGER, cursor:'pointer', fontSize:14, padding:0,
+          }} aria-label="Dismiss">×</button>
+        </div>
+      )}
+
+      {replies.length === 0 ? (
+        <div style={{
+          marginTop:18, padding:'40px 32px', background:CARD,
+          borderRadius:8, border:`0.5px dashed ${BORDER}`,
+          textAlign:'center',
+        }}>
+          <div style={{ fontSize:14, color:TEXT, marginBottom:6, fontWeight:500 }}>
+            No replies yet
+          </div>
+          <div style={{ fontSize:13, color:MUTED, lineHeight:1.5, maxWidth:440, margin:'0 auto' }}>
+            When someone replies to one of your campaigns, it will land here.
+          </div>
+        </div>
+      ) : (
+        <div style={{
+          background:CARD, borderRadius:8, border:`0.5px solid ${BORDER}`, overflow:'hidden',
+          opacity: openLoading ? 0.7 : 1, transition:'opacity 0.15s',
+        }}>
+          <div style={{
+            fontSize:11, color:MUTED, textTransform:'uppercase', letterSpacing:'0.06em',
+            padding:'14px 14px 8px', borderBottom:`0.5px solid ${BORDER}`,
+          }}>Recent replies — click to read &amp; reply</div>
+          {replies.map(r => (
+            <ReplyRow key={r.id} reply={r} onClick={() => openReplyDetail(r)} />
+          ))}
+        </div>
+      )}
 
       {openReply && !composing && (
         <ReplyDetailModal reply={openReply}
@@ -1413,10 +1491,26 @@ function PortalInbox() {
       {composing && (
         <ComposeReplyModal reply={composing}
           onClose={() => setComposing(null)}
-          onSend={(payload) => {
-            alert(`(Demo) Send: ${payload.body.slice(0,60)}...\nCC: ${payload.cc || '(none)'}`);
-            setComposing(null);
-            setOpenReply(null);
+          onSend={async (payload) => {
+            setSendError(null);
+            try {
+              const r = await fetch(`/api/portal/replies/${encodeURIComponent(composing.id)}/send`, {
+                method:'POST', credentials:'include',
+                headers:{ 'Content-Type':'application/json' },
+                body: JSON.stringify({ cc: payload.cc, body: payload.body }),
+              });
+              const d = await r.json().catch(() => ({}));
+              if (!r.ok || !d.ok) {
+                setSendError(d.error || `Send failed (HTTP ${r.status})`);
+                return false;
+              }
+              setComposing(null);
+              setOpenReply(null);
+              return true;
+            } catch (e) {
+              setSendError(`Network error: ${e.message}`);
+              return false;
+            }
           }}
         />
       )}
@@ -1448,7 +1542,7 @@ function ReplyRow({ reply, onClick }) {
     >
       <div style={{ fontWeight:500, color:TEXT, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
         {reply.from_name}
-        <div style={{ fontWeight:400, color:TERTIARY_TEXT, fontSize:11 }}>{reply.from_addr}</div>
+        <div style={{ fontWeight:400, color:TERTIARY_TEXT, fontSize:11 }}>{reply.from_address}</div>
       </div>
       <div style={{ color:MUTED, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
         <div style={{ color:TEXT, marginBottom:2 }}>{reply.subject}</div>
@@ -1475,25 +1569,51 @@ function badgeStyle() {
 }
 
 // ── REPLY DETAIL MODAL ───────────────────────────────────────────────────────
+// Renders a received reply in a full-body, email-client-style layout. When
+// body_html is available we use it directly (dangerouslySetInnerHTML) so the
+// sender's formatting — paragraph breaks, links, signatures — comes through
+// as it would in Gmail/Outlook. Falls back to body_text in pre-wrap when no
+// HTML body was captured by the IMAP poller.
+//
+// The HTML is content the customer received in their own inbox — there's no
+// new untrusted vector here that didn't already exist in their mail client.
+// We do still want the rendered HTML scoped (no global style bleed), so we
+// wrap it in a div with isolation styles.
 function ReplyDetailModal({ reply, onClose, onCompose }) {
   return (
     <Modal title="Reply" onClose={onClose} wide>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:14 }}>
         <div>
           <div style={{ fontSize:14, fontWeight:500, color:TEXT }}>{reply.from_name}</div>
-          <div style={{ fontSize:12, color:MUTED }}>{reply.from_addr}</div>
+          <div style={{ fontSize:12, color:MUTED }}>{reply.from_address}</div>
         </div>
         <ClassifyBadge reply={reply} />
       </div>
-      <div style={{ fontSize:13, color:TEXT, marginBottom:6 }}>{reply.subject}</div>
+      <div style={{ fontSize:13, color:TEXT, marginBottom:6, fontWeight:500 }}>{reply.subject}</div>
       <div style={{ fontSize:11, color:MUTED, marginBottom:14 }}>
         Received {relTime(reply.received_at)}
-        {reply.campaign_title && <> · in reply to <em>{reply.campaign_title}</em>{reply.step_number ? ` (step ${reply.step_number})` : ''}</>}
+        {reply.campaign_title && <> · in reply to <em>{reply.campaign_title}</em></>}
+        {reply.mailbox_address && <> · to {reply.mailbox_address}</>}
       </div>
+
+      {/* Full message body — preserves the sender's formatting like a normal
+          email client. Scrolls within a fixed max-height so very long emails
+          don't blow up the modal. */}
       <div style={{
-        padding:14, background:'#fafaf8', borderRadius:6, fontSize:13,
-        color:TEXT, lineHeight:1.6, marginBottom:18, whiteSpace:'pre-wrap',
-      }}>{reply.snippet}{'\n\n— End of message —'}</div>
+        padding:'14px 16px', background:'#fafaf8', borderRadius:6, fontSize:13,
+        color:TEXT, lineHeight:1.6, marginBottom:18,
+        maxHeight:'50vh', overflowY:'auto',
+        border:`0.5px solid ${BORDER}`,
+      }}>
+        {reply.body_html ? (
+          <div className="portal-email-body" dangerouslySetInnerHTML={{ __html: reply.body_html }} />
+        ) : (
+          <div style={{ whiteSpace:'pre-wrap', fontFamily:'inherit' }}>
+            {reply.body_text || '(empty message)'}
+          </div>
+        )}
+      </div>
+
       <div style={{ display:'flex', justifyContent:'flex-end', gap:8 }}>
         <BtnSecondary onClick={onClose}>Close</BtnSecondary>
         <BtnPrimary onClick={onCompose}>Reply</BtnPrimary>
@@ -1508,20 +1628,23 @@ function ComposeReplyModal({ reply, onClose, onSend }) {
   const [body, setBody] = useState('');
   const [busy, setBusy] = useState(false);
 
-  function send() {
+  async function send() {
     if (!body.trim()) return;
     setBusy(true);
-    // TODO(backend): POST /api/portal/replies/:id/send  body: { cc, body }
-    //   - server uses SES with proper In-Reply-To / References headers
-    //   - server stores the sent reply in email_sends or a new email_outbound table
-    //   - on success returns { ok: true }
-    setTimeout(() => onSend({ cc: cc.trim(), body }), 400);
+    try {
+      const ok = await onSend({ cc: cc.trim(), body });
+      // Parent closes the modal on success; on failure we stay open so the
+      // customer can fix and resend, and the parent surfaces the error banner.
+      if (!ok) setBusy(false);
+    } catch (_) {
+      setBusy(false);
+    }
   }
 
   return (
     <Modal title={`Reply to ${reply.from_name}`} onClose={() => !busy && onClose()} wide>
       <div style={{ fontSize:11, color:MUTED, marginBottom:10 }}>
-        To: <strong style={{ color:TEXT, fontWeight:500 }}>{reply.from_addr}</strong> ·
+        To: <strong style={{ color:TEXT, fontWeight:500 }}>{reply.from_address}</strong> ·
         {' '}Subject: <strong style={{ color:TEXT, fontWeight:500 }}>Re: {reply.subject}</strong>
       </div>
 
