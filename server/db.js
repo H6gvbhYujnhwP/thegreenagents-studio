@@ -52,6 +52,33 @@ db.exec(`
 // ── Logo column migration (added for logo overlay feature) ──────────────────
 try { db.exec('ALTER TABLE clients ADD COLUMN logo_url TEXT'); } catch (_) {}
 
+// ── deployed_by column migration ──────────────────────────────────────────────
+// Records which side of the platform deployed a finished campaign:
+//   'admin'  — admin clicked the deploy-to-Supergrow button on the review screen
+//   'portal' — customer clicked Approve all in their portal, posts auto-pushed
+// Used by the admin campaign-card status pill so support can tell at a glance
+// whether the operator finished the campaign or the customer self-served.
+try { db.exec("ALTER TABLE campaigns ADD COLUMN deployed_by TEXT"); } catch (_) {}
+
+// ── One-shot fix: collapse legacy 'deployed' stage into 'done' ────────────────
+// During customer-portal chunk 3b, the approve-all flow set stage='deployed'.
+// That value isn't recognised by the admin's CampaignProgress UI (which knows
+// 'awaiting_approval' → 'deploying' → 'done'), so deployed campaigns showed up
+// with a broken progress bar and re-rendered the post-edit grid as if the
+// campaign were still mid-flight. The decision was to collapse 'deployed' into
+// 'done' (the existing terminal stage) and use the new deployed_by column to
+// distinguish the two paths instead. This UPDATE backfills any campaigns that
+// were already approved via the portal during testing.
+try {
+  db.prepare(`
+    UPDATE campaigns
+       SET stage = 'done',
+           status = 'completed',
+           deployed_by = COALESCE(deployed_by, 'portal')
+     WHERE stage = 'deployed'
+  `).run();
+} catch (_) {}
+
 // ── Email module tables ───────────────────────────────────────────────────────
 // email_clients is completely separate from the LinkedIn 'clients' table
 db.exec(`
@@ -846,9 +873,11 @@ db.exec(`
 // posts_json, mutating the relevant array entry, and writing back.
 //
 // On "Approve all" success and full Supergrow push, the LinkedIn campaign's
-// stage flips from 'awaiting_approval' to 'deployed'. The portal then hides
-// the batch (next call to GET /api/portal/posts returns empty list because
-// no awaiting_approval campaigns remain).
+// stage flips from 'awaiting_approval' to 'done' (with deployed_by='portal'
+// so the admin UI shows a 'Customer approved' status pill instead of the
+// usual 'Deployed' one). The portal then hides the batch (next call to
+// GET /api/portal/posts returns empty list because no awaiting_approval
+// campaigns remain).
 //
 // PARTIAL FAILURE policy: if Supergrow accepts some queue_post calls but
 // errors on a later one, the stage stays at 'awaiting_approval'. Posts that

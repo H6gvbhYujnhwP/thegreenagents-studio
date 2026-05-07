@@ -225,6 +225,13 @@ export default function CampaignProgress({ campaignId, onComplete }) {
   const isDone        = campaign?.status === 'completed';
   const isFailed      = campaign?.status === 'failed';
   const isRunning     = !isDone && !isFailed && !isAwaiting;
+  // Distinguishes campaigns that finished via the customer portal (customer
+  // clicked Approve all → posts auto-pushed to Supergrow's live queue) from
+  // campaigns that finished via the admin's Send-to-Supergrow button (admin
+  // pushed drafts → customer approves later in Supergrow's Kanban). Drives
+  // banner copy and locks the per-card Edit/Rewrite/New image buttons so a
+  // stale tab can't blow away posts that are already live.
+  const isPortalDeployed = isDone && campaign?.deployed_by === 'portal';
 
   return (
     <div style={{ padding: '24px 32px', width: '100%', boxSizing: 'border-box' }}>
@@ -232,10 +239,11 @@ export default function CampaignProgress({ campaignId, onComplete }) {
       {/* Header */}
       <div style={{ marginBottom: 24 }}>
         <h2 style={{ fontSize: 18, fontWeight: 600, color: '#1a1a1a', margin: 0 }}>
-          {isAwaiting ? '👁️ Review posts before sending to Supergrow' :
-           isDone      ? '✅ Campaign complete' :
-           isFailed    ? '❌ Campaign failed' :
-                         '⟳ Campaign in progress'}
+          {isAwaiting          ? '👁️ Review posts before sending to Supergrow' :
+           isPortalDeployed    ? '✅ Customer approved & sent to Supergrow' :
+           isDone              ? '✅ Campaign complete' :
+           isFailed            ? '❌ Campaign failed' :
+                                 '⟳ Campaign in progress'}
         </h2>
         {isRunning && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 6 }}>
@@ -329,8 +337,11 @@ export default function CampaignProgress({ campaignId, onComplete }) {
             </div>
           )}
 
-          {/* Done banner */}
-          {isDone && (
+          {/* Done banner — admin-deployed variant.
+              Customer-portal-deployed campaigns show a different banner just
+              below this one (no Re-send button — those posts are already in
+              Supergrow's live queue, not drafts). */}
+          {isDone && !isPortalDeployed && (
             <div style={{
               background: LIGHT, border: `1px solid ${BORDER}`, borderRadius: 10,
               padding: '12px 16px', marginBottom: 20,
@@ -351,6 +362,25 @@ export default function CampaignProgress({ campaignId, onComplete }) {
               >
                 {deploying ? 'Re-sending...' : 'Re-send all to Supergrow'}
               </button>
+            </div>
+          )}
+
+          {/* Done banner — customer-portal-deployed variant.
+              These posts are already live in Supergrow's scheduled queue
+              (queue_post, not draft) so a Re-send button would be wrong —
+              it'd duplicate live posts. The whole post grid below renders
+              read-only: Edit/Rewrite/New image buttons are gated out. */}
+          {isPortalDeployed && (
+            <div style={{
+              background: '#E0EAFA', border: '1px solid #B8CDF0', borderRadius: 10,
+              padding: '12px 16px', marginBottom: 20,
+            }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: '#1A3A7A' }}>
+                ✓ Customer approved{campaign.completed_at ? ` on ${new Date(campaign.completed_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}` : ''}
+              </div>
+              <div style={{ fontSize: 12, color: '#3A5A9A', marginTop: 4 }}>
+                All {campaign.posts_deployed || posts.length} posts pushed to Supergrow's scheduled queue. Editing and regeneration are locked because the posts are already live.
+              </div>
             </div>
           )}
 
@@ -384,7 +414,7 @@ export default function CampaignProgress({ campaignId, onComplete }) {
                         <span style={{ fontSize: 11, color: DARK, fontWeight: 500 }}>Generating…</span>
                       </div>
                     )}
-                    {(isAwaiting || isDone) && !isBusy && (
+                    {isAwaiting && !isBusy && (
                       <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleRegenImage(i); }} title="Regenerate image"
                         style={{ position: 'absolute', bottom: 8, left: 8, background: 'rgba(255,255,255,0.92)', border: '1px solid #ddd', borderRadius: 6, padding: '4px 8px', fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, color: '#333' }}>
                         New image
@@ -443,8 +473,13 @@ export default function CampaignProgress({ campaignId, onComplete }) {
                       </>
                     )}
 
-                    {/* Action buttons */}
-                    {(isAwaiting || isDone) && !isEditing && (
+                    {/* Action buttons — only visible during the review stage.
+                        Once the campaign is deployed (admin or customer-portal),
+                        the posts are either live in Supergrow's queue or sitting
+                        as drafts the customer is reviewing — admin shouldn't be
+                        able to overwrite them from this screen. The view here
+                        becomes read-only. */}
+                    {isAwaiting && !isEditing && (
                       <div style={{ display: 'flex', gap: 6, marginTop: 10, borderTop: '1px solid #f0f0ec', paddingTop: 10 }}>
                         <button onClick={() => startEdit(i, post.linkedin_post_text)} disabled={isBusy}
                           style={{ flex: 1, fontSize: 11, padding: '5px 0', background: '#f5f5f3', border: '1px solid #ddd', borderRadius: 6, cursor: isBusy ? 'not-allowed' : 'pointer', color: '#333' }}>

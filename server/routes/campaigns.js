@@ -117,6 +117,15 @@ router.post('/:id/regenerate-image/:postIndex', requireAuth, async (req, res) =>
   const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
   if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
 
+  // Don't let a stale admin tab regenerate posts on a campaign that's already
+  // been deployed (either by admin or by customer-portal approve-all). The
+  // posts are already live in Supergrow's queue at this point — overwriting
+  // them in the DB would create a desync between what the customer signed off
+  // on and what's about to publish.
+  if (campaign.stage === 'done') {
+    return res.status(400).json({ error: 'Campaign is already deployed — regeneration is locked.' });
+  }
+
   const postIndex = parseInt(req.params.postIndex, 10);
   const posts = JSON.parse(campaign.posts_json || '[]');
   if (postIndex < 0 || postIndex >= posts.length) {
@@ -162,6 +171,12 @@ router.post('/:id/regenerate-post/:postIndex', requireAuth, async (req, res) => 
   const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
   if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
 
+  // See the equivalent guard on regenerate-image — blocks regeneration once
+  // posts have been pushed to Supergrow.
+  if (campaign.stage === 'done') {
+    return res.status(400).json({ error: 'Campaign is already deployed — regeneration is locked.' });
+  }
+
   const postIndex = parseInt(req.params.postIndex, 10);
   const posts = JSON.parse(campaign.posts_json || '[]');
   if (postIndex < 0 || postIndex >= posts.length) {
@@ -204,6 +219,13 @@ router.post('/:id/regenerate-post/:postIndex', requireAuth, async (req, res) => 
 router.patch('/:id/edit-post/:postIndex', requireAuth, (req, res) => {
   const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
   if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+
+  // See the regenerate guards above — once a campaign has been deployed to
+  // Supergrow, the admin can't edit text on the stored posts because that'd
+  // create a desync between what's in our DB and what's in Supergrow's queue.
+  if (campaign.stage === 'done') {
+    return res.status(400).json({ error: 'Campaign is already deployed — editing is locked.' });
+  }
 
   const postIndex = parseInt(req.params.postIndex, 10);
   const posts = JSON.parse(campaign.posts_json || '[]');
@@ -475,6 +497,7 @@ async function deployToDrafts(campaignId, client, posts) {
   updateCampaign(campaignId, {
     status: 'completed',
     stage: 'done',
+    deployed_by: 'admin',
     progress: 100,
     posts_deployed: deployed,
     posts_json: JSON.stringify(posts),

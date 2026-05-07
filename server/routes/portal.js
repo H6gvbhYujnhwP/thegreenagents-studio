@@ -553,7 +553,8 @@ router.post('/posts/:id/regenerate-image', async (req, res) => {
 // to Supergrow as live queue_post calls in posts_json order.
 //
 // Behaviour:
-//   - All posts succeed   → flip stage to 'deployed', return ok=true
+//   - All posts succeed   → flip stage='done', status='completed',
+//                           deployed_by='portal'. Return ok=true.
 //   - Some posts fail     → leave stage at 'awaiting_approval', mark only the
 //                           successfully-pushed ones with client_approved_at,
 //                           return ok=false + per-post error array. The portal
@@ -644,7 +645,20 @@ router.post('/campaigns/:id/posts/approve-all', async (req, res) => {
   const allSucceeded = succeeded === posts.length;
 
   if (allSucceeded) {
-    db.prepare(`UPDATE campaigns SET stage = 'deployed' WHERE id = ?`).run(campaign.id);
+    // End-state on customer-portal approve-all matches admin-side deploy:
+    //   stage='done', status='completed' — both terminal values that the
+    //   admin's CampaignProgress UI already recognises. deployed_by='portal'
+    //   is the only thing that distinguishes the two paths, used by the admin
+    //   campaign card to render a 'Customer approved' pill instead of the
+    //   normal 'Deployed' one.
+    db.prepare(`
+      UPDATE campaigns
+         SET stage = 'done',
+             status = 'completed',
+             deployed_by = 'portal',
+             completed_at = datetime('now')
+       WHERE id = ?
+    `).run(campaign.id);
     audit('portal_approve_all', req, campaign.id, {
       campaign_id: campaign.id,
       posts_total: posts.length,
@@ -652,7 +666,7 @@ router.post('/campaigns/:id/posts/approve-all', async (req, res) => {
     });
     return res.json({
       ok: true,
-      stage: 'deployed',
+      stage: 'done',
       total: posts.length,
       succeeded,
       failed: 0,
@@ -683,9 +697,11 @@ router.post('/campaigns/:id/posts/approve-all', async (req, res) => {
 
 // ─── GET /api/portal/campaigns-history ────────────────────────────────────────
 // Read-only history of past campaigns for this customer's LinkedIn client.
-// Returns campaigns where the work is done — either the customer approved them
-// via approve-all (stage = 'deployed') or admin pushed them direct to Supergrow
-// drafts before the portal existed (stage = 'done'). Newest first.
+// A campaign is in history once the work is finished — either the customer
+// approved it via approve-all OR admin pushed it direct to Supergrow drafts.
+// Both paths now end on stage='done' (the legacy 'deployed' value was migrated
+// into 'done' on boot — see db.js). The deployed_by column distinguishes the
+// two paths if support ever needs to know who finished a given campaign.
 //
 // Each campaign comes back with its full projected posts array so the frontend
 // can expand a card without a second round-trip. Posts that aren't approved
@@ -700,7 +716,7 @@ router.get('/campaigns-history', (req, res) => {
   const rows = db.prepare(`
     SELECT id, stage, posts_json, created_at, completed_at
     FROM campaigns
-    WHERE client_id = ? AND stage IN ('deployed', 'done')
+    WHERE client_id = ? AND stage = 'done'
     ORDER BY COALESCE(completed_at, created_at) DESC
   `).all(linkedinClientId);
 

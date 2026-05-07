@@ -263,14 +263,24 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
 function CampaignCard({ campaign, onView, onDelete }) {
   const [hovered, setHovered] = useState(false);
 
+  // Status pill is driven by campaign.status with one extra check: when a
+  // completed campaign was deployed via the customer portal (deployed_by ===
+  // 'portal'), the pill says 'Customer approved' in a distinct colour so we
+  // can tell at a glance who finished it. Falls back to the original 'Deployed'
+  // pill for admin-deployed and for any old completed campaigns that predate
+  // the deployed_by column.
+  const isPortalDeployed = campaign.status === 'completed' && campaign.deployed_by === 'portal';
+
   const STATUS = {
-    completed:         { label: 'Deployed',        bg: '#E1F5EE', color: '#085041' },
-    running:           { label: 'Running',          bg: '#FAEEDA', color: '#633806' },
-    awaiting_approval: { label: 'Ready to review',  bg: '#FFF3CD', color: '#7a4a00' },
-    failed:            { label: 'Failed',           bg: '#FCEBEB', color: '#501313' },
-    pending:           { label: 'Queued',           bg: '#E6F1FB', color: '#0C447C' },
+    completed:         { label: 'Deployed',          bg: '#E1F5EE', color: '#085041' },
+    running:           { label: 'Running',           bg: '#FAEEDA', color: '#633806' },
+    awaiting_approval: { label: 'Ready to review',   bg: '#FFF3CD', color: '#7a4a00' },
+    failed:            { label: 'Failed',            bg: '#FCEBEB', color: '#501313' },
+    pending:           { label: 'Queued',            bg: '#E6F1FB', color: '#0C447C' },
   };
-  const cfg  = STATUS[campaign.status] || STATUS.pending;
+  const cfg  = isPortalDeployed
+    ? { label: 'Customer approved', bg: '#E0EAFA', color: '#1A3A7A' }
+    : (STATUS[campaign.status] || STATUS.pending);
   const date = new Date(campaign.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 
   const viewLabel =
