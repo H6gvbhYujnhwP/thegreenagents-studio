@@ -359,8 +359,30 @@ async function applyClassification(reply, result) {
     JSON.stringify({ classification: result.classification, confidence: result.confidence, reason: result.reason })
   );
 
-  // Auto-unsubscribe for negatives. User confirmed: BOTH hard and soft trigger.
-  if (result.classification === 'hard_negative' || result.classification === 'soft_negative') {
+  // Auto-unsubscribe for negatives — but ONLY for replies that were matched
+  // to a campaign send. The classifier runs on every email in the customer's
+  // INBOX (vendor newsletters, transactional notifications, signup confirms)
+  // because we want every row in the inbox view to have a sensible badge.
+  // But "negative-sounding" content in random vendor mail is meaningless —
+  // we should never act on a Formspree marketing email's "remove me" wording
+  // by unsubscribing some unrelated subscriber who happens to share that
+  // sender address.
+  //
+  // matched_campaign_id is non-null only when the inbound message threaded
+  // back to a known campaign send (via In-Reply-To, References, or sender
+  // lookup against subscribers we sent to). That's the only case where the
+  // recipient's negative classification is a real "no" we should respect.
+  // The customer-portal inbox already shows a neutral "Normal email" badge
+  // on rows with matched_campaign_id IS NULL — this gate makes the backend
+  // behaviour line up with that frontend story: if it's not a campaign
+  // reply, no action gets taken on it.
+  //
+  // User confirmed: BOTH hard and soft negatives trigger the unsubscribe
+  // when the message IS a campaign reply.
+  if (
+    reply.matched_campaign_id &&
+    (result.classification === 'hard_negative' || result.classification === 'soft_negative')
+  ) {
     autoUnsubscribeSender(reply, result);
   }
 }
