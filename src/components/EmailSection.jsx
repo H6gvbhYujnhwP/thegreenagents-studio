@@ -2554,9 +2554,6 @@ export default function EmailSection({initialTab='customers'}){
             </div>
           ))}
         </div>
-        <div style={{padding:12,borderTop:`0.5px solid ${BORDER}`}}>
-          <Btn variant="primary" style={{width:'100%',justifyContent:'center'}} onClick={()=>setModal('new-client')}>+ New client</Btn>
-        </div>
       </div>
 
       {selectedClient?(
