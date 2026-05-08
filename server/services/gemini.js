@@ -125,16 +125,41 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
   // composited logo looks visibly "boxed in" — a chunky white rectangle
   // around the wordmark on every generated image.
   //
-  // sharp().trim() detects the edge colour from the top-left pixel and
-  // crops away any solid-colour border that matches. For a JPEG with white
-  // padding it strips the white. For a transparent PNG it strips the
-  // transparency. For a logo that's already tightly cropped, it's a no-op.
-  // If trim throws (e.g. the entire image is one colour — extreme edge
-  // case), we fall back to the original buffer so image generation still
-  // succeeds.
+  // We branch on whether the source is transparent or opaque, because the
+  // two cases need different handling:
+  //
+  //   Opaque source (JPEG, opaque PNG with built-in white padding):
+  //     Trim with a generous threshold (30) to catch JPEG compression noise
+  //     around artwork edges that would otherwise read as a coloured tint
+  //     when placed on a dark base image. Flatten onto pure white so the
+  //     corner pixels my downstream detection samples are unambiguous.
+  //
+  //   Transparent source (real PNG with alpha):
+  //     Trim removes the transparent border (tighter crop of just artwork).
+  //     We do NOT flatten — that'd fill the artwork's transparent regions
+  //     with white and remove the customer's reliance on the auto-patch
+  //     path. Output keeps its alpha so my downstream detection sees
+  //     transparent corners and adds the white patch behind it.
+  //
+  // For tightly-cropped logos either way, trim is a no-op. If trim throws
+  // (e.g. entire image is one colour — extreme edge case) we fall back to
+  // the original buffer so image generation still succeeds.
   let logoForResize = logoBuffer;
   try {
-    logoForResize = await sharp(logoBuffer).trim().png().toBuffer();
+    const srcMeta = await sharp(logoBuffer).metadata();
+    const srcHasAlpha = srcMeta.channels === 4 || srcMeta.hasAlpha;
+    if (srcHasAlpha) {
+      logoForResize = await sharp(logoBuffer)
+        .trim({ threshold: 30 })
+        .png()
+        .toBuffer();
+    } else {
+      logoForResize = await sharp(logoBuffer)
+        .trim({ threshold: 30 })
+        .flatten({ background: '#ffffff' })
+        .png()
+        .toBuffer();
+    }
   } catch (err) {
     console.warn(`[gemini] Logo trim failed (using untrimmed): ${err.message}`);
   }
