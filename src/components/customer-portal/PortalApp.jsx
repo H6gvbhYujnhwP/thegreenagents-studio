@@ -1191,27 +1191,28 @@ function PostCard({ post, totalPosts, busy, expanded, readOnly, onToggleExpand, 
         }}>{expanded ? '▲ Collapse' : '▼ Read full post'}</button>
 
         {/* Action row — four buttons, mirroring admin's Edit / Rewrite / New image
-            plus the customer-only Approve. Hidden in readOnly (history) view. */}
+            plus the customer-only Approve. Hidden in readOnly (history) view.
+            Style choice: all four buttons solid TGA brand green with white text,
+            same size and weight. Disabled state dims to ~55% opacity. */}
         {!readOnly && (
           <div style={{ display:'flex', gap:5, marginTop:10, paddingTop:10, borderTop:`0.5px solid ${BORDER}` }}>
-            <button onClick={onEdit} disabled={isAnyBusy} style={cardBtn(null, isAnyBusy)}>
+            <button onClick={onEdit} disabled={isAnyBusy} style={cardBtn(isAnyBusy)}>
               Edit text
             </button>
-            <button onClick={onRegenText} disabled={isAnyBusy} style={cardBtn(null, isAnyBusy)}>
+            <button onClick={onRegenText} disabled={isAnyBusy} style={cardBtn(isAnyBusy)}>
               Rewrite post
             </button>
-            <button onClick={onRegenImage} disabled={isAnyBusy} style={cardBtn(null, isAnyBusy)}>
+            <button onClick={onRegenImage} disabled={isAnyBusy} style={cardBtn(isAnyBusy)}>
               New image
             </button>
             {post.approved
               ? <button disabled style={{
-                  ...cardBtn(),
-                  background:TGA_GREEN_HI, color:'white', borderColor:TGA_GREEN_HI, cursor:'default',
+                  ...cardBtn(false),
+                  background: TGA_GREEN_LO, cursor:'default', opacity: 1,
                 }}>✓ Approved</button>
-              : <button onClick={onApprove} disabled={isAnyBusy} style={{
-                  ...cardBtn(null, isAnyBusy),
-                  background: isApproving ? TGA_GREEN_LO : 'transparent',
-                }}>{isApproving ? 'Approving…' : 'Approve'}</button>
+              : <button onClick={onApprove} disabled={isAnyBusy} style={cardBtn(isAnyBusy)}>
+                  {isApproving ? 'Approving…' : 'Approve'}
+                </button>
             }
           </div>
         )}
@@ -1220,10 +1221,19 @@ function PostCard({ post, totalPosts, busy, expanded, readOnly, onToggleExpand, 
   );
 }
 
-function cardBtn(color, disabled) {
+// All four post-card action buttons share this style: solid TGA brand green
+// background, white text, no border (the green provides the affordance).
+// Disabled state dims to 55% opacity so the user can see what they clicked.
+function cardBtn(disabled) {
   return {
-    flex:1, padding:5, fontSize:11, border:`0.5px solid ${BORDER}`,
-    background:'transparent', color: color || TEXT, borderRadius:5,
+    flex: 1,
+    padding: '7px 5px',
+    fontSize: 11,
+    fontWeight: 500,
+    border: 'none',
+    background: TGA_GREEN,
+    color: '#ffffff',
+    borderRadius: 5,
     cursor: disabled ? 'not-allowed' : 'pointer',
     opacity: disabled ? 0.55 : 1,
   };
