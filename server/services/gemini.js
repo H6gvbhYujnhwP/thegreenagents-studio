@@ -126,51 +126,66 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
   const logoW    = logoMeta.width;
   const logoH    = logoMeta.height;
 
-  // Auto-detect whether the logo has its own opaque background.
+  // Auto-detect whether the logo has its own opaque, light background.
   //
   // The original design assumed all logos were transparent PNGs and added a
   // contrasting white/black patch behind every one for readability. But some
   // customers upload logos that already have a built-in white background
   // (e.g. Tower Leasing). For those, the patch is redundant and produces a
-  // visible thin line where the patch edge meets the logo's own rectangle —
-  // two near-white shapes overlapping on a darker base image.
+  // visible thin line where the patch edge meets the logo's own rectangle.
   //
-  // We sample the four corner pixels' alpha channel:
-  //   - All four corners opaque (alpha=255) → logo has its own background,
-  //     skip the patch.
-  //   - Any corner has transparency → logo expects a patch behind it, keep
-  //     the existing behaviour.
+  // We sample the four corner pixels and ask two questions:
+  //   1. Are they fully opaque (alpha=255)?
+  //   2. Are they near-white (luminance > ~235)?
+  //
+  // Both must be true to skip the patch. This catches a real failure mode
+  // we saw with one customer who uploaded a JPEG renamed to .png — JPEGs
+  // can't have transparency, so the alpha test alone said "logo has own
+  // background" and the system pasted a black-cornered logo straight onto
+  // generated images. By requiring near-white corners as well, we now treat
+  // any logo with dark or coloured corners as "needs a patch" and force a
+  // white panel behind it. Three real cases:
+  //   - Transparent PNG (Cube6) → corners alpha=0 → patch added (correct)
+  //   - White-bg PNG (Tower Leasing) → corners opaque+white → no patch (correct)
+  //   - Black-bg JPEG-as-PNG (Sweetbyte) → corners opaque+dark → patch added (correct)
   //
   // The middle of every logo is opaque (that's the artwork), so we can't
-  // sample there. Corners are reliable: a transparent-background logo has
-  // alpha=0 at the corners; a logo with rounded-corner artwork on a coloured
-  // background still has alpha=255 at the rectangle corners. Errors fall
-  // through to "keep the patch" — safer than accidentally dropping it.
+  // sample there. Errors fall through to "keep the patch" — safer than
+  // accidentally dropping it.
+  const NEAR_WHITE_LUMINANCE = 235; // 0–255 scale; allows ~off-white papers
   let logoHasOwnBackground = false;
+  let logoHasOpaqueDarkCorners = false; // broken file: JPEG-as-PNG with dark fill
   try {
     const logoRaw = await sharp(logoResized).raw().toBuffer({ resolveWithObject: true });
     const channels = logoRaw.info.channels;
-    if (channels === 4) {
-      const data = logoRaw.data;
-      const w = logoRaw.info.width;
-      const h = logoRaw.info.height;
-      // Index of alpha byte for pixel (x, y) is (y * w + x) * 4 + 3.
-      const alphaAt = (x, y) => data[(y * w + x) * 4 + 3];
-      const corners = [
-        alphaAt(0, 0),
-        alphaAt(w - 1, 0),
-        alphaAt(0, h - 1),
-        alphaAt(w - 1, h - 1),
-      ];
-      logoHasOwnBackground = corners.every(a => a === 255);
-    }
-    // channels === 3 means the PNG was saved without an alpha channel at all
-    // (fully opaque). That's also "logo has its own background."
-    if (channels === 3) {
-      logoHasOwnBackground = true;
+    const data = logoRaw.data;
+    const w = logoRaw.info.width;
+    const h = logoRaw.info.height;
+    // Returns { alpha, luminance } for a corner pixel. Luminance uses the
+    // standard Rec. 601 formula — same one we use elsewhere in this file
+    // for the patch-colour decision.
+    const sampleCorner = (x, y) => {
+      const i = (y * w + x) * channels;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const alpha = channels === 4 ? data[i + 3] : 255;
+      const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+      return { alpha, luminance };
+    };
+    const corners = [
+      sampleCorner(0, 0),
+      sampleCorner(w - 1, 0),
+      sampleCorner(0, h - 1),
+      sampleCorner(w - 1, h - 1),
+    ];
+    logoHasOwnBackground       = corners.every(c => c.alpha === 255 && c.luminance >= NEAR_WHITE_LUMINANCE);
+    logoHasOpaqueDarkCorners   = corners.every(c => c.alpha === 255) && !logoHasOwnBackground;
+    if (logoHasOpaqueDarkCorners) {
+      console.warn(`[gemini] Logo at ${logoUrl} has opaque dark corners — likely a JPEG renamed to .png. Forcing a white patch behind it. Customer should re-upload a transparent PNG for cleaner output.`);
     }
   } catch (err) {
-    console.warn(`[gemini] Logo alpha sample failed (keeping patch): ${err.message}`);
+    console.warn(`[gemini] Logo corner sample failed (keeping patch): ${err.message}`);
   }
 
   const patchW = logoW + PADDING * 2;
@@ -207,9 +222,12 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
   }
   const avgLuminance = totalLuminance / pixelCount;
 
-  // Dark corner → white patch; Light corner → dark patch
-  // Use high opacity so logos of any colour stand out clearly
-  const useDarkPatch = avgLuminance > 128;
+  // Dark corner → white patch; Light corner → dark patch.
+  // BUT if the logo has dark opaque corners (broken source file), we override
+  // to white regardless — a dark patch would merge with the logo's own bad
+  // dark background and make the rendering worse. Use high opacity so logos
+  // of any colour stand out clearly.
+  const useDarkPatch = !logoHasOpaqueDarkCorners && avgLuminance > 128;
   const patchRgba    = useDarkPatch ? 'rgba(10,10,10,0.92)' : 'rgba(255,255,255,0.95)';
 
   const patchSvg = `<svg width="${patchW}" height="${patchH}">
