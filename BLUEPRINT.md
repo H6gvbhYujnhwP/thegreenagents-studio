@@ -48,7 +48,7 @@ Both products share a database (better-sqlite3), an admin UI, and a per-customer
 
 10. **Reply classifier uses three passes, fastest-first** — regex → heuristic → Haiku. Cost ~$0.001 per AI-classified reply.
 
-### Customer-portal architecture (locked in this chat)
+### Customer-portal architecture (locked in earlier chats)
 
 11. **Two parallel "client" tables exist by design** — `clients` (LinkedIn-side, Supergrow workspaces) and `email_clients` (email-side, send domains). They were built independently and DO NOT share IDs. The customer portal links them via `customer_services.linked_external_id`. **Don't try to merge them** — too much code reads from each, and the portal layer handles the join cleanly.
 
@@ -68,7 +68,7 @@ Both products share a database (better-sqlite3), an admin UI, and a per-customer
 
 19. **Admin sets initial portal passwords; portal shows "your password is temporary" banner on first sign-in.** No invite-link flow. Reset emails work the normal way for forgotten passwords later.
 
-### Customer-portal final-mile decisions (locked in this chat)
+### Customer-portal final-mile decisions (locked in earlier chats)
 
 20. **The customer portal mirrors the admin post-card layout exactly — image at natural aspect (no cropping), full body text with "Read full post" expand, content_pillar · format meta line, "📅 Day Time" schedule, four action buttons (Edit text / Rewrite post / New image / Approve).** The customer reviews exactly what'll be posted to LinkedIn — no truncated previews. Spinner overlays cover the card during text regen and sit over the image during image regen, with a "Please wait while your image/text is being regenerated" helper message.
 
@@ -83,6 +83,41 @@ Both products share a database (better-sqlite3), an admin UI, and a per-customer
 25. **`generatePosts` runs without web search.** The web_search tool was the root cause of the 2026-05-07 Cube6 failure ("I need to conduct the required research before generating the posts" — Claude returned that as text and never produced JSON). The LinkedIn algorithm context now comes from the stored `algorithm_brief` (set by the admin "LinkedIn Algorithm" button). If the brief is null or older than 14 days, the campaign log shows a non-blocking warning. Both `generatePosts` and `regenerateSinglePost` also got an automatic JSON-parse retry — up to 2 attempts, with the second using an aggressive "JSON ONLY" override system message.
 
 26. **Customer-portal reply send uses the mailbox the original arrived on.** Decision locked in chunk 3b-ii. The `email_inboxes.email_address` becomes the `From:` of the outbound. Maintains threading because (a) the recipient sees the same address that originally received them, (b) that mailbox is already SES-verified, (c) `In-Reply-To` and `References` headers wire the new message into the existing thread in Gmail/Outlook.
+
+### Customer-portal further decisions (locked this chat)
+
+27. **The legacy `'deployed'` campaign stage is dead — collapsed into `'done'` with a `deployed_by` column.** Earlier work set `stage='deployed'` on customer-portal approve-all, which the admin's CampaignProgress UI didn't recognise (its STAGES list goes `awaiting_approval → deploying → done`). Result: the admin opened a deployed campaign and saw a broken progress bar with active regen buttons that could overwrite live posts in Supergrow's queue. **Fix shipped:** customer approve-all now sets `stage='done', status='completed', deployed_by='portal'`. Admin deploy sets `deployed_by='admin'`. A one-shot migration in `db.js` converts any existing `'deployed'` rows to `'done'+deployed_by='portal'` on next boot. **Don't reintroduce a `'deployed'` stage value.**
+
+28. **Admin regen/edit endpoints are stage-locked once a campaign is `done`.** `regenerate-image`, `regenerate-post`, and `edit-post` in `routes/campaigns.js` all return 400 if `stage === 'done'`. The admin UI also hides those buttons when `isDone`. Belt-and-braces: prevents stale browser tabs from blowing away posts already pushed to Supergrow.
+
+29. **Admin sees "Customer approved" pill + read-only banner for portal-deployed campaigns.** Status pill in the campaign list reads "Customer approved" (blue) instead of "Deployed" (green) when `deployed_by='portal'`. Inside CampaignProgress, the header reads "✅ Customer approved & sent to Supergrow" and a blue banner says "All N posts pushed to Supergrow's scheduled queue. Editing and regeneration are locked because the posts are already live." The "Re-send all to Supergrow" button does NOT appear (re-sending live queued posts would duplicate them).
+
+30. **The temporary-password banner on the customer portal is permanently removed.** Was a yellow strip at the top of the portal that nudged customers to change their initial password. Wez explicitly killed it — "I do not want this shown period." The `must_change_password` flag still flows from `/auth/check` (no DB change, no API change) but is no longer surfaced anywhere in the UI. Don't reintroduce.
+
+31. **Customer-portal posts grid uses responsive auto-fill columns matching admin exactly.** Was hardcoded `'1fr 1fr'` (forced 2 columns regardless of viewport). Now `'repeat(auto-fill, minmax(340px, 1fr))'` with 16px gap — same rule the admin uses. On a wide screen this gives 4 columns; narrower viewports automatically reflow. Both the live review grid and the past-campaigns history expansion grid use the same value.
+
+32. **Customer portal sidebar groups social services under "Social media" (not "Social posts").** The section was renamed to fit Facebook Pixels (a tracking service, not a posting one). All five items live there: LinkedIn Posts, Facebook Posts, Instagram, TikTok, Facebook Pixels.
+
+33. **Three new social services seeded as `state='coming_soon'` in the catalogue: instagram, tiktok, facebook_pixels.** These join the existing `linkedin`, `facebook`, `email`. The admin Manage panel automatically shows them as "Coming soon" entries (no checkbox available). The customer portal automatically shows them in the sidebar with a sales pitch on click. Adding a new service in future is still a DB insert + frontend NavItem.
+
+34. **`services.customer_pitch` column holds customer-facing sales copy.** Separate from the existing `description` column which is admin-facing operator text. Two audiences, two columns. Pitch text is re-applied on every boot via the seed block in `db.js` so wording tweaks ship via deploy with no manual DB work. Pitches landed for: facebook, instagram, tiktok, facebook_pixels, email. (linkedin pitch is null — that service is enabled for everyone who has it, never gated for sales.)
+
+35. **`services` payload from `/api/portal/auth/check` now returns `{state, label, pitch}` per service, not bare strings.** Was `{linkedin: 'enabled'}` previously, now `{linkedin: {state: 'enabled', label: 'LinkedIn Posts', pitch: null}}`. All read sites in PortalApp.jsx updated to use `svc.linkedin?.state`. ServiceGate is defensive — handles either shape so a stale browser cache doesn't crash.
+
+36. **Customer-side ServiceGate shows "Not Subscribed" + sales pitch — never "Coming soon".** Both `coming_soon` and `not_required` states render identically on the customer side. The customer doesn't need to know the DB-level distinction (which exists only to gate the admin's Manage panel checkbox). Pill says "Not Subscribed" in neutral grey. Body shows the service-specific sales pitch from `services.customer_pitch`.
+
+37. **Admin sidebar has a single placeholder screen (`AdminComingSoon`) re-used for unbuilt services.** Four sidebar items — Facebook Posts, Instagram, TikTok, Facebook Pixels — all route to the same generic "Coming soon — Feature in development" component in `Dashboard.jsx`. Each has a "Soon" badge in the sidebar (admin needs to know which screens are real and which are placeholders). When a real admin tool ships for any of these, replace its branch in Dashboard's view router with a real component mount.
+
+38. **Auto-detect logo background type when compositing onto generated images.** Three real cases handled:
+    - Transparent PNG (Cube6) → corners alpha=0 → white auto-contrasting patch added behind it
+    - White-background PNG (Tower Leasing) → corners opaque AND near-white (luminance ≥ 235) → no patch, logo placed directly
+    - Dark-corner JPEG-renamed-to-PNG (Sweetbyte initial file) → corners opaque but dark → white patch forced (overrides the usual brightness-based patch colour decision)
+
+    Detection happens by sampling four corner pixels' alpha + luminance. Lives in `compositeLogoBottomRight()` in `services/gemini.js`.
+
+39. **Logo trim before resize, branched on transparency.** Some customers upload logos with built-in white margin around the artwork — without a trim step, the resize preserves that padding and the composited logo looks visibly "boxed in" on every post. Sharp's `.trim({ threshold: 30 })` strips the solid-colour border before resize. **Critical branch:** if the source has alpha (transparent PNG), we trim then keep alpha. If the source is opaque (JPEG, opaque PNG), we trim then `.flatten({ background: '#ffffff' })` onto pure white. The flatten kills JPEG compression noise on edges (which would otherwise read as a coloured tint when composited on a dark base) AND guarantees the corner pixels my downstream detection samples are unambiguous (255,255,255). Threshold of 30 was chosen because logo artwork colours are usually 60+ luminance units away from white — safe to trim that aggressively without cutting into the logo itself.
+
+40. **IMAP poller crashes are logged, not fatal.** ImapFlow emits `error` events on the EventEmitter when sockets time out. Without listeners, Node treats them as unhandled and kills the entire process — taking the drip ticker and reply classifier with it. Fix shipped: `client.on('error', handler)` attached to every ImapFlow client at construction (both `pollOneInbox` and `testImapCredentials`). Belt-and-braces: top-level `process.on('uncaughtException')` and `process.on('unhandledRejection')` handlers in `server/index.js` log and continue rather than crashing.
 
 ---
 
@@ -225,7 +260,7 @@ A per-customer portal at `/c/<slug>` where each portal customer's contact (e.g. 
 - `GET /by-slug/:slug` — public; returns `{ client_name, slug }`
 - `POST /auth/login` — generic 401 on failure; lockout: 10 fails / 15 min per `(email_client_id, username)` triggers a 15-min cooldown
 - `POST /auth/logout` — kills CURRENT session only
-- `GET /auth/check` — validates cookie, bumps idle expiry, returns `{ user, client, services }`
+- `GET /auth/check` — validates cookie, bumps idle expiry, returns `{ user, client, services }`. The `services` payload is now a map of `{state, label, pitch}` per service, not bare strings. Read sites must use `svc.linkedin?.state`, etc. ServiceGate tolerates either shape for stale-cache safety.
 - `POST /auth/change-password` — kills all OTHER sessions, keeps current; clears any pending reset tokens
 - `POST /auth/forgot-password` — always returns 200; sends SES email from `studio@thegreenagents.com` if user exists; reset URL is `/c/<slug>?reset=<token>`
 - `POST /auth/reset-password` — kills ALL sessions including current; user has to sign in fresh
@@ -241,10 +276,10 @@ Posts (3a + 3b-i):
 - `POST /posts/:id/regenerate` — combined regen (text + image). Kept for safety but no longer wired to a UI.
 - `POST /posts/:id/regenerate-text` — text-only regen via `regenerateSinglePost` (Anthropic). Drops approval, counts against 30/day cap.
 - `POST /posts/:id/regenerate-image` — image-only regen via Gemini + R2 upload. Drops approval, counts against 30/day cap.
-- `POST /campaigns/:id/posts/approve-all` — bulk approve. On full success: pushes posts sequentially to Supergrow as live `queue_post` calls in `posts_json` order, then flips campaign stage to `deployed`. On partial failure: stops at the first failure (no out-of-order queue), keeps stage at `awaiting_approval`, marks only the successful ones with `client_approved_at`, audits the partial state. Returns 207 with details.
+- `POST /campaigns/:id/posts/approve-all` — bulk approve. On full success: pushes posts sequentially to Supergrow as live `queue_post` calls in `posts_json` order, then sets `stage='done', status='completed', deployed_by='portal', completed_at=now()` so the campaign reaches the same terminal state as an admin push. On partial failure: stops at the first failure (no out-of-order queue), keeps stage at `awaiting_approval`, marks only the successful ones with `client_approved_at`, audits the partial state. Returns 207 with details.
 
 History (3b-i):
-- `GET /campaigns-history` — all campaigns where `stage IN ('deployed', 'done')` for the linked LinkedIn client. Returns full projected posts arrays so the frontend can expand a card without a second fetch.
+- `GET /campaigns-history` — all campaigns where `stage = 'done'` for the linked LinkedIn client. `'done'` is now the single terminal stage; the legacy `'deployed'` value was migrated into `'done'+deployed_by='portal'` on next boot (decision #27). Returns full projected posts arrays so the frontend can expand a card without a second fetch.
 
 Inbox (3b-ii):
 - `GET /inbox` — last 100 replies for the customer's mailboxes (resolved via `customer_services` email link). Returns rows with `from_address`, `from_name`, snippet, classification, received_at, matched_campaign_title.
@@ -264,20 +299,24 @@ Campaigns (3b-iii):
 
 **`services` table** — catalogue:
 ```
-service_key   TEXT PRIMARY KEY
-display_name  TEXT NOT NULL
-description   TEXT
-state         TEXT NOT NULL DEFAULT 'live'   -- 'live' | 'coming_soon' | 'retired'
-link_table    TEXT                            -- SQL table for picker options, NULL for plain on/off
-link_label    TEXT                            -- friendly label for the picker
-sort_order    INTEGER NOT NULL DEFAULT 100
-created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+service_key      TEXT PRIMARY KEY
+display_name     TEXT NOT NULL
+description      TEXT                            -- admin-facing operator notes
+customer_pitch   TEXT                            -- customer-facing sales copy
+state            TEXT NOT NULL DEFAULT 'live'    -- 'live' | 'coming_soon' | 'retired'
+link_table       TEXT                             -- SQL table for picker options, NULL for plain on/off
+link_label       TEXT                             -- friendly label for the picker
+sort_order       INTEGER NOT NULL DEFAULT 100
+created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 ```
 
-Currently seeded with three rows:
-- `linkedin` → `link_table = 'clients'`, sort 10
-- `facebook` → `state = 'coming_soon'`, sort 20
-- `email`    → `link_table = 'email_clients'`, sort 30
+Currently seeded with six rows (re-seeded every boot, idempotent — wording tweaks ship via deploy with no manual DB work):
+- `linkedin` → `state='live'`, `link_table='clients'`, sort 10
+- `facebook` → `state='coming_soon'`, sort 20, with sales pitch
+- `instagram` → `state='coming_soon'`, sort 25, with sales pitch
+- `tiktok` → `state='coming_soon'`, sort 28, with sales pitch
+- `facebook_pixels` → `state='coming_soon'`, sort 29, with sales pitch
+- `email` → `state='live'`, `link_table='email_clients'`, sort 30, with sales pitch
 
 **To add SEO** in the future:
 ```sql
@@ -326,18 +365,35 @@ Indexes:
 
 ## What's NOT done (priorities for next chat)
 
-### 1. Real-world testing of chunk 3b (TOP PRIORITY)
+### 1. Customer-portal smoke tests — what was verified this chat
 
-All chunk 3b backend + frontend work is shipped and parse-clean. What hasn't happened yet:
+Several end-to-end flows were tested and confirmed working in production:
 
-- **End-to-end test of customer-portal Approve all → Supergrow push.** Cube6 hasn't yet had a successful test where the customer clicks "Approve all remaining" and sees posts land in Supergrow's live `queue_post`. Wez tried generating a new campaign for Cube6 on 2026-05-07 and hit the JSON-parse failure that has now been fixed (decision #25), but a fresh test cycle hasn't completed.
-- **Inbox reply send via SES with threading.** Code shipped, not yet tested with a real reply.
-- **Campaigns view with real numbers.** Code shipped, depends on the customer having real email_campaigns rows on their linked email_client.
-- **History card expansion.** Code shipped, depends on having at least one `deployed` or `done` campaign.
+- **Approve all → Supergrow live queue** ✅ Wez ran a 12-post campaign for Cube6 (and later Sweetbyte), customer clicked Approve all, posts landed in Supergrow's scheduled queue in order. Confirmed.
+- **Branding tile on Settings** ✅ Was hardcoded "Tower Leasing" mock data — replaced with real client object from `/auth/check`.
+- **Inbox badge for non-campaign emails** ✅ Was misleadingly applying classifier output to random INBOX traffic. Now shows neutral grey "Normal email" badge when `campaign_title` is null.
+- **Customer portal grid layout** ✅ Was forced 2-column; matches admin's responsive auto-fill now.
+- **Past-campaign history** ✅ Visible after deploy fix (legacy `'deployed'` rows migrated to `'done'`).
+- **Customer-approved campaign read-only view** ✅ Admin opens a deployed campaign → blue banner, no regen buttons, no Re-send button. Header reads "Customer approved & sent to Supergrow."
 
-The next chat should start by asking Wez to run a smoke test on each of these and reporting what works / what breaks. Don't add features until the existing ones are verified.
+Still NOT confirmed end-to-end:
 
-### 2. Phase 4 multi-step follow-up sequences — runtime + UI
+- **Inbox reply send via SES with threading.** Code shipped, but no verified test of a real reply landing back in Gmail/Outlook with proper `In-Reply-To` and `References` headers. Worth testing with `Show original` next chat.
+- **Campaigns view with real numbers.** Code shipped, depends on the customer having real `email_campaigns` rows on their linked email_client.
+
+### 2. Active polish backlog from this chat
+
+Items raised during this chat that are real bugs or improvements but not yet shipped:
+
+- **Auto-unsubscribe spillage on non-campaign emails.** The classifier in `services/classify-replies.js` runs on every email in the customer's INBOX (not just campaign replies) and the auto-unsubscribe path fires on any `hard_negative`/`soft_negative` classification. This is poisoning the unsubscribe list — e.g. `cole@formspree.io` sending a marketing email containing "please remove me" got auto-unsubscribed from a customer's outreach list it was never on. **Fix needed:** skip auto-unsub when `matched_campaign_id IS NULL`. Also worth checking the live database to assess how widespread the spillage is. Wez aware, deferred to a future chat.
+- **Gmail spam folder isn't polled.** `imap-poller.js` opens `INBOX` only. Real campaign replies that Gmail's spam filter shoves into `[Gmail]/Spam` are invisible to the portal. Worth adding a second pass that polls Spam and surfaces matches with a "Gmail thinks this is spam — but it's a reply to your campaign" indicator.
+- **Sweetbyte's logo file is a JPEG renamed to .png.** With trim+flatten, output is now clean. Real fix is to ask the customer to upload a proper transparent PNG. Console warning shipped to surface this for future cases.
+- **Old Gemini model fallback wastes ~150ms per image generation.** Logs show `gemini-2.5-flash-preview-image-generation` returning 404, then falling back to `gemini-2.5-flash-image`. The fallback list should be reordered (working model first) — minor, not blocking.
+- **Mock data constants left declared.** `mockReplies`, `mockCampaigns`, `mockClient` at the top of `PortalApp.jsx` are no longer referenced — harmless unused JS but worth a small cleanup.
+- **Orphan `src/components/PortalApp.jsx` (no subfolder).** The active portal lives in `src/components/customer-portal/PortalApp.jsx`. The orphan is the misplaced original from a build-failure fix and nothing imports it. Wez to delete locally on Windows.
+- **Rich-text editor still uses inline padding.** Recipient-side rendering in Outlook still depends on `wrapBodyWithEmailCss`. Decision unchanged from previous chat.
+
+### 3. Phase 4 multi-step follow-up sequences — runtime + UI
 
 Schema is in db.js. What's left:
 
@@ -352,19 +408,6 @@ Schema is in db.js. What's left:
 - Stop-condition filter querying `email_replies`
 - Sequence editor UI in CampaignModal — **mockup first**
 - Per-step stats columns
-
-### 3. Customer portal polish (small, low priority)
-
-These came up during chunk 3b development but were deliberately deferred:
-
-- **Mock data constants left declared.** `mockReplies` and `mockCampaigns` at the top of `PortalApp.jsx` are no longer referenced — they're harmless unused JS but worth a small cleanup.
-- **The legacy combined `POST /posts/:id/regenerate` route** is no longer wired to a UI but kept in place. Can be removed in a future cleanup.
-- **Stale-brief warning** is currently 14 days. May want tuning based on observed cadence.
-- **Reply send retry on transient SES failure.** Currently fails fast with a 502 + error banner. Could add 1 retry with backoff for transient throttle errors.
-- **Inbox infinite scroll / search.** Capped at 100 most-recent replies. If a customer has thousands, older ones are invisible.
-- Visible feedback when a service is set to "Not required" (subtle warning text on the Manage panel).
-- Banner at top of Manage panel when zero services are subscribed: "This customer has no services enabled — they'll see 'Not required' on every tab."
-- Greater visual distinction for the Save Services button when dirty (currently relies on opacity change which can be missed).
 
 ### 4. SNS subscription wiring (USER ACTION ONLY, no code)
 
@@ -392,6 +435,12 @@ Direct user to set up `postmaster.google.com` and `sendersupport.olc.protection.
 - **Audit-log viewer** UI for `GET /api/email/audit-log`
 - **`export default router` mid-file in routes/email.js** — cosmetic, not blocking
 - **Drip reset on edit confirmation dialog** — currently changes apply tomorrow
+- **Stale-brief warning** is currently 14 days. May want tuning based on observed cadence.
+- **Reply send retry on transient SES failure.** Currently fails fast with a 502 + error banner. Could add 1 retry with backoff for transient throttle errors.
+- **Inbox infinite scroll / search.** Capped at 100 most-recent replies. If a customer has thousands, older ones are invisible.
+- **Visible feedback when a service is set to "Not required"** — subtle warning text on the Manage panel.
+- **Banner at top of Manage panel when zero services are subscribed:** "This customer has no services enabled — they'll see 'Not Subscribed' on every tab."
+- **Greater visual distinction for the Save Services button when dirty** — currently relies on opacity change which can be missed.
 
 ---
 
@@ -418,8 +467,9 @@ Migrations run on every boot in `server/db.js`. SQLite at `/var/data/studio.db` 
 - `client_login_attempts (id, email_client_id, username, attempted_at)` — for brute-force lockout
 - `client_post_regens (id, email_client_id, client_user_id, campaign_id, post_id, created_at)` — for daily 30/customer regen cap
 - `email_outbound (id, email_client_id, in_reply_to_reply_id, client_user_id, from_address, to_address, cc_address, subject, body_text, body_html, message_id, in_reply_to_header, references_header, sent_at, error)` — outbound SES sends from the portal reply form
-- `services (service_key, display_name, description, state, link_table, link_label, sort_order, created_at)` — services catalogue, seeded with linkedin/facebook/email
+- `services (service_key, display_name, description, customer_pitch, state, link_table, link_label, sort_order, created_at)` — services catalogue, six rows seeded (linkedin/facebook/instagram/tiktok/facebook_pixels/email)
 - `customer_services (id, email_client_id, service_key, linked_external_id, enabled_at, enabled_by)` — subscriptions, with two UNIQUE indexes (one full, one partial-and-self-link-exempt)
+- `campaigns.deployed_by` column — `'admin'` or `'portal'`. Distinguishes admin-deployed campaigns from customer-portal-deployed ones. Drives the "Customer approved" pill + read-only banner in the admin UI.
 
 ### Per-post approval state (inside `posts_json`, not a table)
 Each post object inside `campaigns.posts_json` may have:
@@ -539,7 +589,7 @@ src/
 
 10. **Phantom `last_uid`** — mailboxes connected pre-3.1.5 had `last_uid` set to current. Resync button forces fresh 30-day backfill.
 
-### Lessons specific to the customer-portal work (this chat)
+### Lessons specific to the customer-portal work (earlier chats)
 
 11. **Don't confuse "admin can save it" with "deployed and tested."** When Wez saves a service config, the database changes — but the customer-side portal might be cached, signed in pre-config, etc. Always tell Wez to hard-refresh (Ctrl+F5) the customer side after admin changes, especially if testing in a different tab.
 
@@ -555,7 +605,7 @@ src/
 
 17. **Don't fake tool calls.** I made one mistake this chat where I wrote `[USl_replace]` and "Successfully replaced string" as plain text instead of actually calling tools. No edits happened. The user caught it. **Always use real tool calls; if you see plain-text "tool result" lines without a real tool call confirmation, redo the work.**
 
-### Lessons specific to chunk 3b (this chat)
+### Lessons specific to chunk 3b (earlier chat)
 
 18. **Read the Render logs before guessing.** When the user reported HTTP 500 on GET /posts after chunk 3b-i deploy, I spent multiple turns inspecting code looking for an import error. The actual cause was a `SELECT id, title, ... FROM campaigns` — `title` doesn't exist as a column on the `campaigns` table — and was visible in the logs immediately. Lesson: when a 500 hits, **ask for the Render log first**, don't guess from the code.
 
@@ -567,20 +617,35 @@ src/
 
 22. **Mirror-the-admin meant exactly that.** The customer-portal post card had been built independently with truncated text, force-cropped 1.91:1 images, two action buttons. The admin used full text + natural-aspect images + three action buttons. Customer's instruction was "mirror the admin exactly" — which surfaced a series of decisions (separate Rewrite/New image buttons, hide "View in Supergrow", combined or separate regen cap) that needed pre-confirmation before code. Building those mockups first, getting calls on each, then writing code in one shot was the right path.
 
-23. **Static asset convention: `public/` directory.** The repo had no images bundled anywhere — even the favicon was inline SVG. I created `public/tga-logo.png` as the convention going forward. Vite serves `public/*` from the URL root with no config changes. Future image assets should follow this pattern.
+### Lessons specific to this chat (campaign desync + logo handling + services expansion)
+
+24. **Two stages doing the same job is one too many.** Customer-portal approve-all originally wrote `stage='deployed'`, while admin deploy wrote `stage='done'`. The admin's STAGES list only knew `done`. Result: opening a customer-deployed campaign showed broken UI with active regen buttons that could overwrite live posts. Lesson: when adding a workflow that ends in the same place an existing workflow ends, **use the same terminal value and add a discriminator column** (e.g. `deployed_by`) — don't create a parallel terminal value.
+
+25. **Stage guards belong on every endpoint that mutates campaign state.** Once a campaign is deployed (live in Supergrow's queue), edit-post, regenerate-post, and regenerate-image all need to refuse. Easy to forget one. Wez surfaced this when he opened a deployed campaign and the UI offered regen buttons that would have blown away live posts.
+
+26. **The IMAP poller bug had been there from day one.** ImapFlow emits `error` events on the EventEmitter that, without listeners, kill the Node process. Dropped seconds of sleeping connections all the way back to Phase 3.1. Render auto-restarts the process, masking the issue — but each crash also kills the drip ticker and reply classifier. Lesson: **when seeing process restarts in Render logs, look for unhandled emitter errors before assuming it's a deploy event.** Always `process.on('uncaughtException', ...)` and `process.on('unhandledRejection', ...)` at boot — belt-and-braces.
+
+27. **Auto-detect logo background, don't assume a single shape.** Three real customer cases fell out from "logos" being treated as one thing: transparent PNG (Cube6), opaque white-bg PNG (Tower Leasing), JPEG-renamed-to-PNG with dark fill (Sweetbyte). The original code added a contrast patch to all of them, which produced visible artifacts on Tower Leasing and a black rectangle on Sweetbyte. Lesson: when handling user-uploaded image assets, **inspect the actual pixel data and branch on what's actually there**, don't trust file extensions or assume one canonical shape.
+
+28. **JPEG noise is a real concern for image compositing.** Sweetbyte's JPEG had pure-white corners (255,255,255) but JPEG compression introduces mild colour noise at flat-area boundaries — values like (252,253,255) right at the edge of the wordmark. Sharp's default trim threshold (10) was too tight to catch that noise; the trimmed result had near-but-not-exactly-white edges that read as a coloured tint when composited on a dark base. Lesson: **bump trim thresholds when working with JPEGs**, and `.flatten({ background: '#ffffff' })` after trimming to kill any residual transparency that'd let the dark base bleed through.
+
+29. **Don't flatten transparent PNGs.** Initially shipped a "flatten everything onto white" step. That broke transparent PNG logos (Cube6) — flattening turned their transparent corners into white, which made my downstream auto-detect think "this logo has its own background, skip the patch." Result: Cube6's logo dropped onto a generated image with no contrast patch behind it. Fix: branch on `srcMeta.hasAlpha` — flatten only opaque sources.
+
+30. **The "Coming soon" pill is the wrong story to tell customers.** When the customer portal showed Instagram/TikTok/Facebook Pixels with a "Coming soon" blue pill, customers (correctly) read it as "this is in development, you can't have it yet." Wrong story — the services ARE coming soon on the platform side, but from the customer's perspective the relevant question is "do I have it." So the customer portal collapses both `coming_soon` and `not_required` into a single "Not Subscribed" state. The DB-level `coming_soon` distinction still matters for the admin's Manage panel (no checkbox available) but the customer never sees that nuance.
+
+31. **Adding services should be DB-driven and require minimal frontend churn.** When Wez asked for Instagram + TikTok + Facebook Pixels, three new services landed via `INSERT OR IGNORE` in the seed block. The admin's Manage panel automatically picked them up. The customer portal needed three new NavItems and three new render branches — five lines per service in PortalApp.jsx. Lesson confirmed from chunk 3a: the generic services design pays off every time we add a service.
+
+32. **Mock fallback objects must match the real shape.** When I changed `/auth/check`'s services payload from bare strings to `{state, label, pitch}` objects, I missed a default-object fallback in PortalChrome that still had the old string shape. The chrome would crash on first render before `services` arrived from the server. Fix: kept the fallback in sync. Lesson: when changing the shape of an API payload, **grep for all fallbacks/defaults** that mock the same shape on the frontend.
 
 ---
 
 ## What to do first in next chat
 
 1. **Read this whole blueprint.**
-2. **Ask Wez what's been tested and what's not.** Chunk 3b is fully shipped (backend + frontend + parse-clean) but real-world end-to-end tests of approve-all → Supergrow push, inbox reply send, campaigns view, and history expansion may not all have happened. The next chat's first job is verifying what works. Don't add features until existing ones are confirmed working.
-3. **If Wez surfaces bugs from the chunk 3b deploy, fix those first.** Common things to check based on this chat's experience:
-   - Is the algorithm_brief populated? `generatePosts` now relies on it. If null, posts generate from Claude's built-in knowledge (good but not customer-specific). If older than 14 days, the campaign log shows a non-blocking warning.
-   - Are reply send threading headers landing correctly? Check Gmail/Outlook's "show original" on a customer-portal-sent reply to confirm `In-Reply-To` and `References` are wired.
-   - Does the customer's linked email_client have an `email_inboxes` row? The reply-send route 500s if the mailbox can't be resolved — the helper returns null which the route handles, but verify in practice.
-4. **Once chunk 3b is verified, the customer portal is functionally complete.** Next priority is **finishing Phase 4 multi-step sequences** (schema is in, runtime + UI still missing). Get the four design pre-decisions confirmed before writing code.
-5. **Smaller backlog items** (see "What's NOT done" §3) are polish — don't pick those up before bigger pieces unless Wez asks.
+2. **Ask Wez what's been tested and what's not.** Most of the customer portal is shipped, deployed, and verified working in production now (see "What's NOT done" §1 for the verified list). What still needs end-to-end testing: inbox reply send (with `Show original` confirmation in Gmail/Outlook) and Campaigns view with real numbers. Don't assume — confirm.
+3. **The auto-unsubscribe spillage bug is the most consequential active issue.** The classifier runs on every email in the customer's INBOX (not just campaign replies) and the auto-unsub fires on `hard_negative`/`soft_negative` regardless of whether `matched_campaign_id` is null. This means random inbound mail (newsletters, vendor emails, password resets containing "remove me") is being added to the customer's unsubscribe list. Wez aware. Fix is small: skip auto-unsub when `matched_campaign_id IS NULL`. Worth assessing the live database for spillage scope at the same time.
+4. **Once chunk 3b is verified and the unsub-spillage is fixed, the customer portal is functionally complete.** Next priority is **finishing Phase 4 multi-step sequences** (schema is in, runtime + UI still missing). Get the four design pre-decisions confirmed before writing code.
+5. **Smaller backlog items** (see "What's NOT done" §2 and §7) are polish — don't pick those up before bigger pieces unless Wez asks.
 
 ---
 
@@ -588,4 +653,4 @@ src/
 
 The user is patient, curious, and a great collaborator. They put genuine effort into testing each phase and report back with screenshots + Render logs. They want this to be a real product they could one day sell to other companies. Treat the project that way — quality matters more than speed. When in doubt, ask.
 
-— Claude (end-of-chat handoff after customer-portal chunk 3b complete + admin-mirroring + history + post-generation reliability fix + sidebar parity)
+— Claude (end-of-chat handoff after admin/portal campaign-state alignment, IMAP crash safety net, social-services expansion, logo auto-detect + trim, branding fixes)
