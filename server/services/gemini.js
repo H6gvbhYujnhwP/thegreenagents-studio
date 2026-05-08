@@ -25,8 +25,25 @@ export async function generateImage(imagePrompt, client = {}, post = {}) {
     ? 'This is a CAROUSEL COVER SLIDE — title must be provocative and short (max 8 words) to force the viewer to swipe next.'
     : 'Standard LinkedIn post image.';
 
+  // BOTTOM RIGHT CORNER instruction (logo customers only).
+  //
+  // Earlier wording asked Gemini to "leave the bottom-right 320x140px area
+  // relatively clear (no text, no important design elements)." That worked
+  // for protecting the logo zone from being covered by content — but it
+  // also caused Gemini to render a visibly LIGHTER, cleaner-looking patch
+  // in that exact rectangle, treating the instruction as a positive design
+  // brief rather than a constraint. On busy/dirty backgrounds (e.g. Cube6's
+  // factory-floor scenes) the lighter patch was clearly visible as a faint
+  // halo extending above and left of our actual white logo panel.
+  //
+  // Softer wording below: still tells Gemini not to put text or the focal
+  // subject in the bottom-right (so our panel doesn't cover important
+  // content), but without the dimensions and "clear area" framing that was
+  // producing the halo. The panel itself is opaque white so anything
+  // underneath the panel is hidden anyway — the only thing we actually
+  // need from Gemini is "don't put your main subject there."
   const brandSignatureRule = hasLogo
-    ? `7. BOTTOM RIGHT CORNER: Leave the bottom-right 320x140px area relatively clear (no text, no important design elements) — a logo will be composited there in post-processing.`
+    ? `7. BOTTOM RIGHT CORNER: Don't place text or the main subject in the bottom-right corner — a small logo will be added there in post-processing.`
     : `7. BRAND SIGNATURE: The text "${brandName}" MUST appear clearly at the bottom right in a clean professional font. If background is dark use white text; if light use dark text.`;
 
   const nanoBananaPrompt = `Generate a LinkedIn post visual in the NANO BANNA style for ${brandName}.
