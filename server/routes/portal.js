@@ -192,7 +192,7 @@ function findPostForPortalUser(req, postId) {
   // open (admin error, partial-failure retry) we still let the customer act
   // on it.
   const campaigns = db.prepare(`
-    SELECT id, stage, posts_json, created_at
+    SELECT id, client_id, stage, posts_json, created_at
     FROM campaigns
     WHERE client_id = ? AND stage = 'awaiting_approval'
     ORDER BY created_at DESC
