@@ -117,7 +117,29 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
   const LOGO_MAX_H = 100;
   const PADDING    = 16;
 
-  const logoResized = await sharp(logoBuffer)
+  // Trim solid-colour padding off the file before resizing.
+  //
+  // Some customers upload logos with built-in white margin around the actual
+  // artwork (e.g. a 2586x669 file where the wordmark only fills the middle
+  // 60%). Without this trim, our resize step preserves the padding and the
+  // composited logo looks visibly "boxed in" — a chunky white rectangle
+  // around the wordmark on every generated image.
+  //
+  // sharp().trim() detects the edge colour from the top-left pixel and
+  // crops away any solid-colour border that matches. For a JPEG with white
+  // padding it strips the white. For a transparent PNG it strips the
+  // transparency. For a logo that's already tightly cropped, it's a no-op.
+  // If trim throws (e.g. the entire image is one colour — extreme edge
+  // case), we fall back to the original buffer so image generation still
+  // succeeds.
+  let logoForResize = logoBuffer;
+  try {
+    logoForResize = await sharp(logoBuffer).trim().png().toBuffer();
+  } catch (err) {
+    console.warn(`[gemini] Logo trim failed (using untrimmed): ${err.message}`);
+  }
+
+  const logoResized = await sharp(logoForResize)
     .resize(LOGO_MAX_W, LOGO_MAX_H, { fit: 'inside', withoutEnlargement: true })
     .png()
     .toBuffer();
