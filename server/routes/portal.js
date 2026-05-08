@@ -190,7 +190,17 @@ function findPostForPortalUser(req, postId) {
   for (const campaign of campaigns) {
     let posts = [];
     try { posts = JSON.parse(campaign.posts_json || '[]'); } catch (_) { posts = []; }
-    const idx = posts.findIndex(p => (p.id || '') === postId);
+    // Match against either the raw post.id OR the synthesised id projectPost
+    // emits (`post_<index+1>`) when post.id is missing. Without this match-
+    // both behaviour, customers on campaigns whose posts_json doesn't include
+    // an id field hit "Post not found" on every Edit/Approve/Rewrite/New image
+    // action — the frontend has been told the id is "post_1" but the lookup
+    // only checks the raw .id. Tower Leasing's campaign was the case that
+    // surfaced this bug.
+    const idx = posts.findIndex((p, i) => {
+      const synthId = `post_${i + 1}`;
+      return (p.id && p.id === postId) || (!p.id && postId === synthId);
+    });
     if (idx !== -1) {
       return { campaign, posts, postIndex: idx, post: posts[idx] };
     }
