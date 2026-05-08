@@ -2111,7 +2111,7 @@ function ListsTable({emailClient,lists,onNewList,onImport,onView,onDelete,onRefr
 }
 
 // ── Campaign Queue table (Variant 3) ──────────────────────────────────────────
-function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
+function CampaignQueue({emailClient,lists,onViewReport,onRefresh,onClientUpdated}){
   const [campaigns,setCampaigns]=useState([]);
   const [loading,setLoading]=useState(true);
   const [modal,setModal]=useState(null);
@@ -2126,40 +2126,55 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
 
   // When the operator switches between customers in the left sidebar, the
   // emailClient prop changes but the local state would otherwise hold the
-  // previous customer's values. Resync from the new prop on every change.
+  // previous customer's values. Resync from the new prop only on customer
+  // switch — we deliberately do NOT depend on the individual field values,
+  // because the parent's clients array is updated in place after each save
+  // (via onClientUpdated) and re-running this effect mid-typing would
+  // overwrite what the operator is currently entering.
   useEffect(()=>{
     setTestEmail(emailClient.test_email||'');
     setDefaultFromName(emailClient.default_from_name||'');
     setDefaultFromEmail(emailClient.default_from_email||'');
-  },[emailClient.id, emailClient.test_email, emailClient.default_from_name, emailClient.default_from_email]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[emailClient.id]);
 
   // Save to server when any of the three header fields change. Debounced 800ms
   // so we don't fire a request on every keystroke. One timer per field — they
   // save independently. The PUT route accepts partial bodies so we only send
-  // the field that changed.
+  // the field that changed. After the save returns, we update the parent's
+  // in-memory clients list (via onClientUpdated) so the New Campaign modal,
+  // List modal, and a re-mounted header on customer switch all see the fresh
+  // values without a full refetch.
   const testEmailTimer = useRef(null);
   const fromNameTimer  = useRef(null);
   const fromEmailTimer = useRef(null);
+  async function saveField(body){
+    try{
+      const r=await fetch(`/api/email/clients/${emailClient.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      if(!r.ok)return;
+      const updated=await r.json();
+      if(onClientUpdated)onClientUpdated(updated);
+    }catch(e){
+      // Network error — leave local state alone. The user can retry by typing
+      // again. Silent failure is intentional here so a transient blip doesn't
+      // throw an alert mid-edit.
+      console.warn('[CampaignQueue] field save failed:',e);
+    }
+  }
   function handleTestEmailChange(val){
     setTestEmail(val);
     clearTimeout(testEmailTimer.current);
-    testEmailTimer.current=setTimeout(()=>{
-      fetch(`/api/email/clients/${emailClient.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({test_email:val})});
-    },800);
+    testEmailTimer.current=setTimeout(()=>saveField({test_email:val}),800);
   }
   function handleDefaultFromNameChange(val){
     setDefaultFromName(val);
     clearTimeout(fromNameTimer.current);
-    fromNameTimer.current=setTimeout(()=>{
-      fetch(`/api/email/clients/${emailClient.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({default_from_name:val.trim()||null})});
-    },800);
+    fromNameTimer.current=setTimeout(()=>saveField({default_from_name:val.trim()||null}),800);
   }
   function handleDefaultFromEmailChange(val){
     setDefaultFromEmail(val);
     clearTimeout(fromEmailTimer.current);
-    fromEmailTimer.current=setTimeout(()=>{
-      fetch(`/api/email/clients/${emailClient.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({default_from_email:val.trim()||null})});
-    },800);
+    fromEmailTimer.current=setTimeout(()=>saveField({default_from_email:val.trim()||null}),800);
   }
   const [testStatus,setTestStatus]=useState({});
   const [sendStatus,setSendStatus]=useState({});
@@ -2227,16 +2242,19 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
   return(<div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0}}>
     <div style={{padding:'10px 16px',borderBottom:`0.5px solid ${BORDER}`,background:CARD,display:'flex',alignItems:'flex-end',gap:14,flexWrap:'wrap'}}>
       {/* Default From name. Auto-fills the From name on every new campaign
-          and list for this customer. Saved on debounce. */}
+          and list for this customer. Saved on debounce. No placeholder text
+          intentionally — operator wants the field genuinely blank when unset
+          rather than showing a ghost example that looks like a real value. */}
       <div style={{display:'flex',flexDirection:'column',gap:3}}>
         <label style={{fontSize:11,color:MUTED}}>Default From name</label>
-        <input value={defaultFromName} onChange={e=>handleDefaultFromNameChange(e.target.value)} placeholder="John Wicks" style={{fontSize:12,padding:'5px 10px',border:`0.5px solid ${BORDER}`,borderRadius:6,color:TEXT,background:BG,outline:'none',width:170}}/>
+        <input value={defaultFromName} onChange={e=>handleDefaultFromNameChange(e.target.value)} style={{fontSize:12,padding:'5px 10px',border:`0.5px solid ${BORDER}`,borderRadius:6,color:TEXT,background:BG,outline:'none',width:170}}/>
       </div>
       {/* Default From email. Also used as the default Reply-to on new campaigns
-          (the operator confirmed reply-to should always equal the From). */}
+          (the operator confirmed reply-to should always equal the From). Same
+          no-placeholder rule as the From name field above. */}
       <div style={{display:'flex',flexDirection:'column',gap:3}}>
         <label style={{fontSize:11,color:MUTED}}>Default From email</label>
-        <input value={defaultFromEmail} onChange={e=>handleDefaultFromEmailChange(e.target.value)} placeholder={`hello@${emailClient.name}`} style={{fontSize:12,padding:'5px 10px',border:`0.5px solid ${BORDER}`,borderRadius:6,color:TEXT,background:BG,outline:'none',width:210}}/>
+        <input value={defaultFromEmail} onChange={e=>handleDefaultFromEmailChange(e.target.value)} style={{fontSize:12,padding:'5px 10px',border:`0.5px solid ${BORDER}`,borderRadius:6,color:TEXT,background:BG,outline:'none',width:210}}/>
       </div>
       {/* Test send address. Same field as before, just relabelled to match
           the two new ones above. */}
@@ -2371,7 +2389,7 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
 }
 
 // ── Client panel ──────────────────────────────────────────────────────────────
-function ClientPanel({emailClient,onRefresh,onEditClient}){
+function ClientPanel({emailClient,onRefresh,onClientUpdated,onEditClient}){
   const [tab,setTab]=useState('campaigns');
   const [lists,setLists]=useState([]);
   const [loading,setLoading]=useState(false);
@@ -2421,7 +2439,7 @@ function ClientPanel({emailClient,onRefresh,onEditClient}){
     </div>
 
     <div style={{flex:1,overflow:'hidden',display:'flex',flexDirection:'column',background:BG}}>
-      {tab==='campaigns'&&<CampaignQueue emailClient={emailClient} lists={lists} onViewReport={setViewingReport} onRefresh={()=>{loadLists();onRefresh();}}/>}
+      {tab==='campaigns'&&<CampaignQueue emailClient={emailClient} lists={lists} onViewReport={setViewingReport} onRefresh={()=>{loadLists();onRefresh();}} onClientUpdated={onClientUpdated}/>}
       {tab==='lists'&&(
         <div style={{flex:1,overflow:'auto',padding:20}}>
           {loading?<div style={{color:MUTED,textAlign:'center',padding:40}}>Loading…</div>
@@ -2480,6 +2498,27 @@ export default function EmailSection({initialTab='customers'}){
   const filtered=clients.filter(c=>c.name.toLowerCase().includes(search.toLowerCase()));
   const selectedClient=clients.find(c=>c.id===selected);
 
+  // Update one customer in our in-memory list when a save returns a fresh row
+  // from the server. Used by the inline-editable header fields (Default From
+  // name / Default From email / Test send) on the customer detail page so that
+  // navigating away and back, or opening the New Campaign modal, sees the
+  // values the operator just typed instead of the stale ones from page load.
+  // Important: the GET /clients query computes list_count, subscriber_count,
+  // and campaign_count via subqueries. The PUT /clients/:id route returns a
+  // bare SELECT * from email_clients which does NOT include those counts. We
+  // explicitly preserve them so the sidebar list doesn't blank out the
+  // "N lists · M subs" line on every save.
+  function updateClientLocally(updated){
+    if(!updated||!updated.id)return;
+    setClients(cs=>cs.map(c=>c.id===updated.id?{
+      ...c,
+      ...updated,
+      list_count: c.list_count,
+      subscriber_count: c.subscriber_count,
+      campaign_count: c.campaign_count,
+    }:c));
+  }
+
   if(isMailboxesView)return <MailboxesSection/>;
 
   if(isDomainView)return(
@@ -2521,7 +2560,7 @@ export default function EmailSection({initialTab='customers'}){
       </div>
 
       {selectedClient?(
-        <ClientPanel key={selectedClient.id} emailClient={selectedClient} onRefresh={loadAll} onEditClient={c=>{setModalData(c);setModal('edit-client');}}/>
+        <ClientPanel key={selectedClient.id} emailClient={selectedClient} onRefresh={loadAll} onClientUpdated={updateClientLocally} onEditClient={c=>{setModalData(c);setModal('edit-client');}}/>
       ):(
         <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',background:BG,flexDirection:'column',gap:12}}>
           <div style={{fontSize:14,color:MUTED}}>Select a client to get started</div>
