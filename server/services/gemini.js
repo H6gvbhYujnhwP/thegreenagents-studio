@@ -176,83 +176,29 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
   const logoW    = logoMeta.width;
   const logoH    = logoMeta.height;
 
-  // Detect the JPEG-renamed-to-PNG case (decision #38, third real customer
-  // case — Sweetbyte). These files have opaque corners with dark/coloured
-  // fill that, if we let our patch-colour heuristic see them, can produce a
-  // dark patch on a light image and merge with the logo's own bad dark
-  // background. So we sample the four corner pixels — if all four are
-  // opaque AND not near-white (luminance < ~200), we know the logo has dark
-  // baked-in corners and force a WHITE patch regardless of what the image's
-  // bottom-right luminance says.
-  //
-  // We previously also branched on "logo has its own white background → skip
-  // the panel entirely" for files like Tower Leasing's. That branch has been
-  // removed: it produced inconsistent results across runs (Sharp's trim is
-  // data-dependent and the same file could pass or fail the four-corner
-  // test on consecutive generations) and customers with white-bg logos
-  // looked visibly cropped against the image. Every logo now gets the same
-  // panel treatment. The customer's own white background simply blends into
-  // the panel — no harm, fully consistent.
-  //
-  // Errors fall through to "no override" — safer than accidentally forcing
-  // white in cases that don't need it.
-  const NEAR_WHITE_LUMINANCE = 200;
-  let logoHasOpaqueDarkCorners = false;
-  try {
-    const logoRaw = await sharp(logoResized).raw().toBuffer({ resolveWithObject: true });
-    const channels = logoRaw.info.channels;
-    const data = logoRaw.data;
-    const w = logoRaw.info.width;
-    const h = logoRaw.info.height;
-    const sampleCorner = (x, y) => {
-      const i = (y * w + x) * channels;
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      const alpha = channels === 4 ? data[i + 3] : 255;
-      const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-      return { alpha, luminance };
-    };
-    const corners = [
-      sampleCorner(0, 0),
-      sampleCorner(w - 1, 0),
-      sampleCorner(0, h - 1),
-      sampleCorner(w - 1, h - 1),
-    ];
-    logoHasOpaqueDarkCorners = corners.every(c => c.alpha === 255 && c.luminance < NEAR_WHITE_LUMINANCE);
-    if (logoHasOpaqueDarkCorners) {
-      console.warn(`[gemini] Logo at ${logoUrl} has opaque dark corners — likely a JPEG renamed to .png. Forcing a white patch behind it. Customer should re-upload a transparent PNG for cleaner output.`);
-    }
-  } catch (err) {
-    console.warn(`[gemini] Logo corner sample failed (no patch override): ${err.message}`);
-  }
-
   const patchW = logoW + PADDING * 2;
   const patchH = logoH + PADDING * 2;
   const patchX = width  - patchW - 16;
   const patchY = height - patchH - 16;
 
-  // Analyse corner brightness to determine patch colour
-  const cornerPixels = await sharp(imageBuffer)
-    .extract({ left: Math.max(0, patchX), top: Math.max(0, patchY), width: patchW, height: patchH })
-    .flatten({ background: '#ffffff' })
-    .raw()
-    .toBuffer();
-
-  let totalLuminance = 0;
-  const pixelCount = cornerPixels.length / 3;
-  for (let i = 0; i < cornerPixels.length; i += 3) {
-    totalLuminance += 0.299 * cornerPixels[i] + 0.587 * cornerPixels[i+1] + 0.114 * cornerPixels[i+2];
-  }
-  const avgLuminance = totalLuminance / pixelCount;
-
-  // Dark corner → white patch; Light corner → dark patch.
-  // BUT if the logo has dark opaque corners (broken source file), we override
-  // to white regardless — a dark patch would merge with the logo's own bad
-  // dark background and make the rendering worse. Use high opacity so logos
-  // of any colour stand out clearly.
-  const useDarkPatch = !logoHasOpaqueDarkCorners && avgLuminance > 128;
-  const patchRgba    = useDarkPatch ? 'rgba(10,10,10,0.92)' : 'rgba(255,255,255,0.95)';
+  // Panel is always solid white. We previously had a heuristic that picked
+  // dark-vs-white based on the image's bottom-right brightness, plus a
+  // separate dark-corners override for JPEG-as-PNG logos. Both are gone.
+  //
+  // Why: every real customer logo we've shipped (Cube6's dark-on-transparent,
+  // Tower Leasing's dark-green-on-white, Sweetbyte's dark-on-dark JPEG-fill)
+  // reads cleanly on white. The only case where white fails is a white-on-
+  // transparent logo (light wordmark for dark backgrounds) — none of our
+  // customers have one, and if a future customer did the right answer is to
+  // ask them for a darker version of the file rather than re-introduce
+  // detection branching.
+  //
+  // Predictability beats cleverness — same principle as decision #42 (one
+  // unified panel path for every logo, no skip-the-panel branch). The
+  // heuristic version produced a dark panel on Sweetbyte's regen because
+  // the image's bottom-right orange band was bright, even though Sweetbyte's
+  // logo is also dark — dark-on-dark, illegible.
+  const patchRgba = 'rgba(255,255,255,1.0)';
 
   const patchSvg = `<svg width="${patchW}" height="${patchH}">
     <rect width="${patchW}" height="${patchH}" rx="6" ry="6" fill="${patchRgba}"/>
