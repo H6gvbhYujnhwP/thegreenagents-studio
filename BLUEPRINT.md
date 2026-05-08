@@ -119,6 +119,18 @@ Both products share a database (better-sqlite3), an admin UI, and a per-customer
 
 40. **IMAP poller crashes are logged, not fatal.** ImapFlow emits `error` events on the EventEmitter when sockets time out. Without listeners, Node treats them as unhandled and kills the entire process — taking the drip ticker and reply classifier with it. Fix shipped: `client.on('error', handler)` attached to every ImapFlow client at construction (both `pollOneInbox` and `testImapCredentials`). Belt-and-braces: top-level `process.on('uncaughtException')` and `process.on('unhandledRejection')` handlers in `server/index.js` log and continue rather than crashing.
 
+### Customer-portal further decisions (locked in this chat — 2026-05-08)
+
+41. **`email_clients.source` column distinguishes real email customers from portal anchor rows.** Three values: `'aws_domain'` (auto-pulled from AWS verified domains, or matched to one when manually added), `'manual'` (operator-created with a name that's not a verified SES domain — vanishingly rare), `'portal'` (auto-created as a portal anchor when a LinkedIn-only customer like Cube6 had a portal enabled — these rows have no email-sending purpose). The Email Campaigns Customers list filters `WHERE source IN ('aws_domain', 'manual')` so portal anchors don't pollute the list. Migration on first boot classified the 13 existing rows: any `portal_enabled=1` row with no email activity (no lists, subs, campaigns, or inboxes) → `'portal'`; everything else → `'aws_domain'`. Self-healing: if a portal-only customer ever becomes a real email-sending customer the activity check would flip them automatically — but this would be rare enough that the operator would just manually update the row.
+
+42. **Logo compositor uses one unified path for every customer — no "skip the panel for white-bg logos" branch.** Earlier code tried to detect when a logo had its own white background (e.g. Tower Leasing) and skip the contrast panel, placing the logo directly. That branch produced inconsistent results across runs (Sharp's `.trim()` is data-dependent, so the same file could pass or fail the four-corner test on consecutive generations) and customers with white-bg logos looked visibly cropped against the image. The branch is removed. Every logo now goes through the same panel path: trim → resize → place on a soft white panel with rounded corners. White-bg logos blend into the panel — no harm, fully consistent. The dark-corners-detection (decision #38, third case — Sweetbyte's JPEG-as-PNG) is kept because it still legitimately overrides the panel colour to white when the image's bottom-right would otherwise produce a dark patch. Panel padding is 20px (was 16px). The Gemini fallback model order was also reordered so the working `gemini-2.5-flash-image` is tried first instead of falling back from a 404 on every generation (~150ms saved per image).
+
+43. **Phase 4 multi-step sequence editor is fully built, not "schema only".** The blueprint-as-of-2026-05-07 said "Sequence editor UI in CampaignModal — mockup first" was still missing. Wrong. The campaign modal has tab-strip UI ("1st contact / 2nd contact / 3rd contact / + Add contact") with per-step body editors and a delay-days input that shows on every step after the 1st. Steps are saved via `PUT /api/email/campaigns/:id/steps`; they're sent by the drip ticker which extends the candidate list with follow-ups whose previous step's send timestamp is `delay_days` ago. Up to 10 steps per campaign. Step 1's `html_body` is mirrored to `email_campaigns.html_body` for legacy code paths. Step removal warns if the step has already been sent to anyone.
+
+44. **Subject line is per-step, not campaign-wide.** Each follow-up in a sequence can have its own subject — e.g. "Quick question, {{first_name}}" → "Re: my last note" → "One more thought". Stored as `email_campaign_steps.subject TEXT` (NULL means "fall back to the campaign-wide subject at send time"). Step 1's subject is required and is mirrored to `email_campaigns.subject` so test sends, previews, and the legacy single-step send path keep working unchanged. Steps 2+ subjects are optional. The `sendCampaign` function in `services/ses.js` accepts a `subjectOverride` parameter mirroring the existing `bodyOverride`; the drip ticker passes the step's subject through. The campaign modal moved the subject input out of the campaign-level header and into the per-step tab panel above the body editor. Step 1's tab labels it "Email subject *"; later tabs label it "Email subject for this contact (leave blank to reuse the 1st contact subject)".
+
+45. **Rich-text editor defaults to Verdana 12pt; operator can change via toolbar.** Was Arial 14pt. Toolbar gained a font-family picker (8 email-safe fonts: Verdana, Arial, Helvetica, Tahoma, Trebuchet MS, Georgia, Times New Roman, Courier New). The font-size picker also got 10px and 11px added to the smaller end. The recipient-side CSS in `services/ses.js` `wrapBodyWithEmailCss` was updated to match — defaults to Verdana 12 — so the body of a new campaign authored in the editor renders identically in Gmail/Outlook. Existing campaigns that had inline `<span style="font-family:Arial; font-size:14px">` from previous authoring keep those styles (inline overrides the wrapper CSS), so no visual change to in-flight or already-sent drafts.
+
 ---
 
 ## Current state — what's deployed and working
@@ -179,21 +191,23 @@ Both products share a database (better-sqlite3), an admin UI, and a per-customer
 - **Default sender per client** — `email_clients.default_from_email`/`default_from_name`
 - **Line-spacing fix Option A** — `wrapBodyWithEmailCss()` in ses.js wraps every body with a CSS reset before SES base64. Outlook default `<p>` margins are normalised; empty `<p><br></p>` placeholders hidden.
 
-### Phase 4 multi-step sequences (SCHEMA ONLY — runtime + UI not yet built)
+### Phase 4 multi-step sequences (BUILT and live, not schema-only)
 
-DB layer is in. Runtime + sequence editor are not.
+The blueprint previously said this was schema-only. Wrong — corrected this chat.
 
-**What landed:**
-- `email_campaign_steps(id, campaign_id, step_number, html_body, delay_days, created_at)` + unique on `(campaign_id, step_number)`
-- `email_sends.step_number INTEGER NOT NULL DEFAULT 1` + `idx_email_sends_campaign_subscriber_step`
+**What's live:**
+- `email_campaign_steps(id, campaign_id, step_number, subject, html_body, delay_days, created_at)` + UNIQUE on `(campaign_id, step_number)`
+- `email_sends.step_number INTEGER NOT NULL DEFAULT 1` + index `(campaign_id, subscriber_id, step_number)`
 - Backfill: every existing campaign auto-gets a step_1 row from its `html_body` on first boot
-- `sendCampaign()` accepts `stepNumber` and `bodyOverride` parameters
+- Per-step subject (decision #44): `subject TEXT` column on `email_campaign_steps`. NULL = fall back to `email_campaigns.subject`.
+- `sendCampaign()` accepts `stepNumber`, `bodyOverride`, and `subjectOverride` parameters
+- **Drip-ticker extension is built and running.** `services/drip-ticker.js` queries the step list per campaign, finds subscribers due for step N+1 (where their last send was ≥ `delay_days` ago), and combines them with step-1 first-time candidates into the same daily burst budget. `_stepNumber` flows through the `toSendNow` array and back to `sendCampaign`.
+- **Sequence editor UI is built and live.** `CampaignModal` in `EmailSection.jsx` has the tab strip ("1st contact / 2nd contact / + Add contact"), per-step body editor, per-step subject field, per-step delay-days input. Up to 10 steps, with a remove confirmation that warns if the step has already been sent to anyone.
 
-**Still missing:**
-- Drip-ticker extension to pick up due follow-up sends
-- Stop-condition filter (skip step N+1 if `email_replies` has a halting classification)
-- Sequence editor UI in CampaignModal (mockup-first per lessons learned)
-- Per-step reporting in `CampaignRecipientsPanel`
+**Still missing (real backlog for next chat):**
+- **Stop-condition filter.** The drip ticker doesn't yet halt the sequence for subscribers who replied with `positive` / `soft_negative` / `hard_negative`. They keep getting follow-ups. Fix is small: extend the candidate query with `AND NOT EXISTS (SELECT 1 FROM email_replies WHERE matched_campaign_id = c.id AND from_subscriber_id = s.id AND classification IN ('positive','soft_negative','hard_negative'))`.
+- **Per-step reporting in `CampaignRecipientsPanel`.** Recipients view doesn't currently show "last step sent". Useful for operators to see how far through the sequence each subscriber has reached.
+- **Edit-warning toast for already-sent steps.** State is wired (sent_count > 0 flag), but the modal doesn't yet show a confirmation "this step has been sent to N people, your edit applies to the rest only" before save. Helper text shows on the step itself but doesn't gate the save.
 
 ---
 
@@ -387,27 +401,20 @@ Items raised during this chat that are real bugs or improvements but not yet shi
 
 - **Auto-unsubscribe spillage on non-campaign emails.** The classifier in `services/classify-replies.js` runs on every email in the customer's INBOX (not just campaign replies) and the auto-unsubscribe path fires on any `hard_negative`/`soft_negative` classification. This is poisoning the unsubscribe list — e.g. `cole@formspree.io` sending a marketing email containing "please remove me" got auto-unsubscribed from a customer's outreach list it was never on. **Fix needed:** skip auto-unsub when `matched_campaign_id IS NULL`. Also worth checking the live database to assess how widespread the spillage is. Wez aware, deferred to a future chat.
 - **Gmail spam folder isn't polled.** `imap-poller.js` opens `INBOX` only. Real campaign replies that Gmail's spam filter shoves into `[Gmail]/Spam` are invisible to the portal. Worth adding a second pass that polls Spam and surfaces matches with a "Gmail thinks this is spam — but it's a reply to your campaign" indicator.
-- **Sweetbyte's logo file is a JPEG renamed to .png.** With trim+flatten, output is now clean. Real fix is to ask the customer to upload a proper transparent PNG. Console warning shipped to surface this for future cases.
-- **Old Gemini model fallback wastes ~150ms per image generation.** Logs show `gemini-2.5-flash-preview-image-generation` returning 404, then falling back to `gemini-2.5-flash-image`. The fallback list should be reordered (working model first) — minor, not blocking.
+- **Sweetbyte's logo file is a JPEG renamed to .png.** With trim+flatten + the unified panel path (decision #42), output is now clean. Real fix is to ask the customer to upload a proper transparent PNG. Console warning shipped to surface this for future cases.
 - **Mock data constants left declared.** `mockReplies`, `mockCampaigns`, `mockClient` at the top of `PortalApp.jsx` are no longer referenced — harmless unused JS but worth a small cleanup.
 - **Orphan `src/components/PortalApp.jsx` (no subfolder).** The active portal lives in `src/components/customer-portal/PortalApp.jsx`. The orphan is the misplaced original from a build-failure fix and nothing imports it. Wez to delete locally on Windows.
 - **Rich-text editor still uses inline padding.** Recipient-side rendering in Outlook still depends on `wrapBodyWithEmailCss`. Decision unchanged from previous chat.
 
-### 3. Phase 4 multi-step follow-up sequences — runtime + UI
+### 3. Phase 4 multi-step follow-up sequences — what's still missing
 
-Schema is in db.js. What's left:
+Schema, runtime, and editor UI are all live (see "Phase 4 multi-step sequences" under Current state). What's left:
 
-**Design pre-decisions to confirm at start of that chat:**
-- Stop conditions: positive / soft_negative / hard_negative classifications halt the sequence; auto_reply / forwarding don't
-- Schedule inheritance: follow-ups use the same drip schedule as the original campaign
-- Sequence editor UI: stacked step blocks with delay-days fields, max 10 steps
-- Per-step reporting: "Last step" column in CampaignRecipientsPanel
+**Stop-condition filter.** The drip ticker doesn't yet halt the sequence for subscribers who replied with `positive` / `soft_negative` / `hard_negative`. They keep getting follow-ups. Fix is small: extend the candidate query in `services/drip-ticker.js` with `AND NOT EXISTS (SELECT 1 FROM email_replies WHERE matched_campaign_id = c.id AND from_subscriber_id = s.id AND classification IN ('positive','soft_negative','hard_negative'))`. This is the most consequential remaining piece — without it customers keep getting nudged after they've already said no.
 
-**Build:**
-- Drip-ticker extension to pick up due follow-up sends
-- Stop-condition filter querying `email_replies`
-- Sequence editor UI in CampaignModal — **mockup first**
-- Per-step stats columns
+**Per-step reporting in `CampaignRecipientsPanel`.** Recipients view doesn't yet show "last step sent" per row. Useful for operators to see how far through the sequence each subscriber has reached. Schema supports it (`email_sends.step_number` is populated correctly).
+
+**Edit-warning toast.** State is wired (sent_count > 0 flag flows from backend to UI per step), but the modal doesn't yet show a confirmation gate before saving an edit to a step that's already been sent. Helper text appears on the step itself but doesn't block.
 
 ### 4. SNS subscription wiring (USER ACTION ONLY, no code)
 
@@ -449,7 +456,8 @@ Direct user to set up `postmaster.google.com` and `sendersupport.olc.protection.
 Migrations run on every boot in `server/db.js`. SQLite at `/var/data/studio.db` on Render.
 
 ### Core tables (Phase 1-2)
-- `email_clients` — top-level grouping. Columns: `id, name, color, slug, default_from_email, default_from_name, portal_enabled, service_email_enabled, linkedin_client_id, logo_url, ...`
+- `email_clients` — top-level grouping. Columns: `id, name, color, slug, default_from_email, default_from_name, portal_enabled, service_email_enabled, linkedin_client_id, logo_url, source, ...`
+  - `source` (decision #41): one of `'aws_domain'` (auto-pulled from / matched to AWS verified domain), `'manual'` (operator-created with non-domain name), `'portal'` (auto-anchor for a LinkedIn-only customer's portal). The Email Campaigns Customers list filters out `'portal'` rows. Migration on first boot classified all 13 existing rows.
 - `email_brands`, `email_lists`, `email_subscribers`, `email_campaigns`, `email_sends`, `email_link_clicks`, `email_campaign_links`, `email_sns_events`
 
 ### Phase 3 tables
@@ -457,8 +465,9 @@ Migrations run on every boot in `server/db.js`. SQLite at `/var/data/studio.db` 
 - `email_replies` — every email fetched, with classification fields
 - `email_audit_log`
 
-### Phase 4 (schema landed, runtime not built)
-- `email_campaign_steps`, `email_sends.step_number`
+### Phase 4 — multi-step sequences (BUILT and live)
+- `email_campaign_steps(id, campaign_id, step_number, subject, html_body, delay_days, created_at)` — UNIQUE on `(campaign_id, step_number)`. `subject` is NULL for steps that should fall back to `email_campaigns.subject` at send time (decision #44). Step 1 always has its subject mirrored to `email_campaigns.subject`.
+- `email_sends.step_number INTEGER NOT NULL DEFAULT 1` + index `(campaign_id, subscriber_id, step_number)`
 
 ### Customer portal (FULLY LIVE)
 - `client_users (id, email_client_id, username, email, password_hash, role, created_at, last_login_at)` — UNIQUE on `(email_client_id, username)`
@@ -527,11 +536,13 @@ server/
     clients.js                    — Supergrow clients (NOT email_clients).
                                     POST /:id/logo cross-syncs to email_clients.logo_url.
     campaigns.js                  — Supergrow campaigns (NOT email_campaigns)
-    email.js                      — ALL email-side routes. 1700+ lines. POST /clients now
-                                    auto-generates slug via db._portalUniqueSlug.
-                                    NB: export default router appears mid-file (~line 1173)
-                                    with routes after it. Works (export-binding semantics)
-                                    but confusing.
+    email.js                      — ALL email-side routes. 2050+ lines. POST /clients
+                                    auto-generates slug via db._portalUniqueSlug AND classifies
+                                    new rows as 'aws_domain' (matches verified domain) or
+                                    'manual'. GET /clients filters out source='portal' rows.
+                                    PUT /campaigns/:id/steps now accepts per-step subjects.
+                                    NB: export default router appears mid-file with routes
+                                    after it. Works (export-binding semantics) but confusing.
     algorithm.js                  — Supergrow algorithm
     portal-auth.js                — customer-portal auth + requirePortalSession middleware
                                     Exports requirePortalSession for use by portal.js.
@@ -541,10 +552,16 @@ server/
                                     POST /posts/:id/regenerate-image, POST /campaigns/:id/posts/approve-all,
                                     GET /campaigns-history, GET /inbox, GET /replies/:id,
                                     POST /replies/:id/send, GET /campaigns.
-    portal-admin.js               — admin-side customer-portal management
+    portal-admin.js               — admin-side customer-portal management. POST /customers
+                                    inserts new portal anchor rows with source='portal'.
   services/
     ses.js, tracking.js, touch-count.js, crypto-vault.js, imap-poller.js,
-    classify-replies.js, name-parser.js, drip-ticker.js,
+    classify-replies.js, name-parser.js,
+    drip-ticker.js               — extends candidate list with follow-up step sends; passes
+                                    each step's subject + body through to sendCampaign as
+                                    subjectOverride/bodyOverride.
+    gemini.js                    — Nano Banana image gen + unified-panel logo compositor
+                                    (decision #42). One panel path for every logo.
     claude.js, openai.js, supergrow.js, etc.
 src/
   App.jsx                         — auth + dashboard mount; mounts PortalApp at /c/<slug>;
@@ -554,22 +571,29 @@ src/
                                     Customer Portal. Mailboxes badge polls every 30s.
     Dashboard.jsx                 — view router (LinkedIn Posts / Customers / Domain Health /
                                     Mailboxes / Portal Customers)
-    EmailSection.jsx              — THE BIG ONE. 2600+ lines. Email-related everything.
+    EmailSection.jsx              — THE BIG ONE. 3000+ lines. Email-related everything.
+                                    CampaignModal contains the Phase 4 sequence editor:
+                                    tab strip ("1st contact / 2nd contact / + Add contact"),
+                                    per-step subject + body + delay-days. loadAll() syncs
+                                    AWS verified domains into the customers list every time
+                                    the page opens.
     ClientDetail.jsx              — LinkedIn-side client detail. Logo upload here cross-syncs
                                     to portal customers.
     PortalAdmin.jsx               — admin Customer Portal management (~1200 lines)
     customer-portal/
-      PortalApp.jsx               — full customer-facing portal (~1400 lines)
+      PortalApp.jsx               — full customer-facing portal (~2000 lines)
                                     Includes login, reset password screen, all four tabs,
                                     settings, modal forms.
-    RichTextEditor.jsx            — contentEditable wrapper
+    RichTextEditor.jsx            — contentEditable wrapper. Defaults to Verdana 12pt
+                                    (decision #45). Toolbar has font-family + font-size
+                                    pickers; operator can override per selection.
 ```
 
 ---
 
 ## Things that have caused pain (lessons)
 
-1. **Always parse-check before claiming success.** EmailSection.jsx is 2600+ lines, PortalApp.jsx is 1400+. str_replace can silently delete lines if context isn't unique. Path: `/home/claude/.npm-global/lib/node_modules/tsx/node_modules/esbuild/bin/esbuild --loader:.jsx=jsx --log-level=warning <file> > /dev/null && echo OK`. Same for Node files: `node --check <file>`.
+1. **Always parse-check before claiming success.** EmailSection.jsx is 3000+ lines, PortalApp.jsx is 2000+. str_replace can silently delete lines if context isn't unique. Path: `/home/claude/.npm-global/lib/node_modules/tsx/node_modules/esbuild/bin/esbuild --loader:.jsx=jsx --log-level=warning <file> > /dev/null && echo OK`. Same for Node files: `node --check <file>`.
 
 2. **str_replace + similar code blocks** — when several modals all start the same way, str_replace refuses with "found multiple times". Add 2-3 lines of unique surrounding context to disambiguate.
 
@@ -637,14 +661,28 @@ src/
 
 32. **Mock fallback objects must match the real shape.** When I changed `/auth/check`'s services payload from bare strings to `{state, label, pitch}` objects, I missed a default-object fallback in PortalChrome that still had the old string shape. The chrome would crash on first render before `services` arrived from the server. Fix: kept the fallback in sync. Lesson: when changing the shape of an API payload, **grep for all fallbacks/defaults** that mock the same shape on the frontend.
 
+### Lessons specific to this chat (logo unification + source column + Phase 4 corrections)
+
+33. **The blueprint can be wrong about what's built.** This chat opened with the blueprint stating Phase 4 was "schema only — runtime + UI not yet built". A user screenshot of the campaign modal showed the tab strip was already live with bodies, delays, and a working drip-ticker extension. Lesson: **don't trust the blueprint's "what's done" claims without verifying.** When the user says "we have tabs setup to send a 2nd and a 3rd", believe what they're seeing and grep the code before assuming the blueprint is current. The blueprint is a snapshot, not a spec.
+
+34. **"Auto-detect" branches multiply failure modes.** Decision #38 (auto-detect logo background type, three branches) tried to be smart about Tower Leasing's white-bg logo by skipping the contrast panel. It produced inconsistent output across runs because Sharp's `.trim()` is data-dependent — the same source file produced different post-trim corner pixels on consecutive generations, flipping the branch unpredictably. Lesson reversed this chat (decision #42): **when one path can produce multiple outcomes from the same input, the answer is one path for everyone, not better detection.** A consistent panel with 20px padding works for transparent PNGs (the panel provides contrast), white-bg PNGs (the panel blends with their background), and JPEG-as-PNG broken files (the panel covers the bad fill). Predictability beats cleverness.
+
+35. **Don't conflate "row exists" with "row is meaningful for this view."** The `email_clients` table has been used for both real cold-email customers AND portal-anchor rows for LinkedIn-only customers. The Email Campaigns Customers page listed every row indiscriminately — including portal anchors with zero email activity (Cube6, Mansons, Tower Leasing). Wez correctly read this as "LinkedIn customers got mixed into email campaigns." Fix: a `source` column on email_clients (`'aws_domain'` / `'manual'` / `'portal'`) and a `WHERE source IN ('aws_domain', 'manual')` filter on the customers query. **Lesson: when one table serves two audiences, add a discriminator column instead of trying to filter by combinations of other state.** The diagnostic SQL run on Render confirmed the data shape before the migration shipped — running diagnostics on prod data before writing migration logic is much safer than writing-then-checking.
+
+36. **`sqlite3 < file` doesn't work when the file isn't on the server.** Wez tried `sqlite3 /var/data/studio.db < /tmp/diagnose.sql` on Render shell — the file was on his laptop, not the container. The right pattern for one-off diagnostics is: open `sqlite3 /var/data/studio.db` interactively, then paste queries one at a time at the `sqlite>` prompt. Multi-line paste into bash breaks because bash sees `.headers` and `SELECT` as commands. Lesson: **when handing off SQL diagnostics, give one query per line and confirm the user is at the `sqlite>` prompt before the SELECT.**
+
+37. **Per-step subjects unlock the actual purpose of multi-step sequences.** Phase 4 had been built with shared subject across all steps, which sounds like a tiny detail but breaks the use-case: "Quick question, {{first_name}}" → ... → "Quick question, {{first_name}}" three weeks later doesn't feel like a follow-up, it feels like a duplicate. The send pipeline already had `bodyOverride` for the body; mirroring the pattern with `subjectOverride` was a small surgical addition. Lesson: **when extending a sequence/multi-step feature, every text the recipient sees should be per-step-overridable, not just the body.**
+
+38. **Default fonts in email composers matter more than they look.** Wez asked for Verdana 12 as the default. That's not just a visual preference — Arial 14 (the previous default) reads as "templated mass mail" to recipients in 2026, while Verdana 12 reads as "professional individual email." The recipient-side `wrapBodyWithEmailCss` had to match the editor-side default for the recipient to see what the operator typed. Lesson: **the operator-side default and the recipient-side fallback are two different config points; change them together.**
+
 ---
 
 ## What to do first in next chat
 
-1. **Read this whole blueprint.**
-2. **Ask Wez what's been tested and what's not.** Most of the customer portal is shipped, deployed, and verified working in production now (see "What's NOT done" §1 for the verified list). What still needs end-to-end testing: inbox reply send (with `Show original` confirmation in Gmail/Outlook) and Campaigns view with real numbers. Don't assume — confirm.
-3. **The auto-unsubscribe spillage bug is the most consequential active issue.** The classifier runs on every email in the customer's INBOX (not just campaign replies) and the auto-unsub fires on `hard_negative`/`soft_negative` regardless of whether `matched_campaign_id` is null. This means random inbound mail (newsletters, vendor emails, password resets containing "remove me") is being added to the customer's unsubscribe list. Wez aware. Fix is small: skip auto-unsub when `matched_campaign_id IS NULL`. Worth assessing the live database for spillage scope at the same time.
-4. **Once chunk 3b is verified and the unsub-spillage is fixed, the customer portal is functionally complete.** Next priority is **finishing Phase 4 multi-step sequences** (schema is in, runtime + UI still missing). Get the four design pre-decisions confirmed before writing code.
+1. **Read this whole blueprint.** The decisions list now goes up to #45 — the additions from this chat are at the bottom of the locked-in list.
+2. **Ask Wez what's been tested since this blueprint was written.** Three things shipped in this chat that weren't yet confirmed working in production at the time of writing: (a) the unified logo panel (decision #42), (b) the `email_clients.source` column + filtering (decision #41), (c) per-step subjects + Verdana 12 (decisions #44, #45). Don't assume any of them are confirmed.
+3. **The auto-unsubscribe spillage bug remains the most consequential active issue.** The classifier runs on every email in the customer's INBOX (not just campaign replies) and the auto-unsub fires on `hard_negative`/`soft_negative` regardless of whether `matched_campaign_id` is null. Random inbound mail (newsletters, vendor emails, password resets containing "remove me") is being added to the customer's unsubscribe list. Fix is small: skip auto-unsub when `matched_campaign_id IS NULL`. Worth assessing the live database for spillage scope at the same time.
+4. **The biggest remaining Phase 4 gap is the stop-condition filter.** Drip ticker keeps sending follow-ups to subscribers who already replied positive/soft_negative/hard_negative. Fix is a single `AND NOT EXISTS` clause in the candidate query.
 5. **Smaller backlog items** (see "What's NOT done" §2 and §7) are polish — don't pick those up before bigger pieces unless Wez asks.
 
 ---
@@ -653,4 +691,4 @@ src/
 
 The user is patient, curious, and a great collaborator. They put genuine effort into testing each phase and report back with screenshots + Render logs. They want this to be a real product they could one day sell to other companies. Treat the project that way — quality matters more than speed. When in doubt, ask.
 
-— Claude (end-of-chat handoff after admin/portal campaign-state alignment, IMAP crash safety net, social-services expansion, logo auto-detect + trim, branding fixes)
+— Claude (end-of-chat handoff after logo compositor unification, email_clients.source classification, Phase 4 sequence-editor + per-step-subject extensions, and Verdana 12 default font)

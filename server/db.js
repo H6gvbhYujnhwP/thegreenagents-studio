@@ -563,6 +563,22 @@ db.exec(`
   db.exec(`CREATE INDEX IF NOT EXISTS idx_email_sends_campaign_subscriber_step ON email_sends(campaign_id, subscriber_id, step_number)`);
 }
 
+// Per-step subject line. Each follow-up in a multi-step sequence can override
+// the campaign's top-level subject — e.g. step 1 "Quick question, {{first_name}}"
+// → step 2 "Re: my last note" → step 3 "One more thought". When a step's
+// subject is NULL the send pipeline falls back to email_campaigns.subject so
+// existing single-step campaigns keep working unchanged. Step 1's subject is
+// also mirrored back to email_campaigns.subject by the PUT /steps route so
+// every code path that reads campaign.subject (test sends, previews, the
+// legacy single-step send path) stays consistent.
+{
+  const stepCols = db.prepare('PRAGMA table_info(email_campaign_steps)').all().map(r => r.name);
+  if (!stepCols.includes('subject')) {
+    db.exec(`ALTER TABLE email_campaign_steps ADD COLUMN subject TEXT`);
+    console.log('[db] migration: added subject to email_campaign_steps');
+  }
+}
+
 // Backfill: any existing campaign without a step row gets one auto-created from
 // its existing html_body. Idempotent — re-runs are safe because of the UNIQUE
 // index on (campaign_id, step_number). Runs every boot but only writes once

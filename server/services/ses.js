@@ -259,8 +259,12 @@ export async function sendEmail({
 //   Default 1 — backwards compatible with all existing call sites.
 // bodyOverride (Phase 4): if provided, used as the html body INSTEAD of
 //   campaign.html_body. Used by the drip ticker when sending follow-up steps
-//   whose body lives in email_campaign_steps. Subject stays campaign-wide.
-export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm = false, onProgress, stepNumber = 1, bodyOverride = null }) {
+//   whose body lives in email_campaign_steps.
+// subjectOverride (Phase 4): if provided, used as the subject INSTEAD of
+//   campaign.subject. Per-step subjects ("Re: my last note", etc.) live on
+//   email_campaign_steps.subject; the drip ticker passes them through here.
+//   Pass null (default) to keep campaign-wide subject behaviour.
+export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm = false, onProgress, stepNumber = 1, bodyOverride = null, subjectOverride = null }) {
   const results = { sent: 0, failed: 0, skipped: 0, errors: [], tracked: 0, untracked: 0 };
   const BATCH_SIZE = 10;
   const DELAY_MS   = 800;
@@ -304,10 +308,12 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm 
   // Body for THIS send call. For step 1 (or any non-step-aware send) it's the
   // campaign's html_body. For follow-up steps the ticker passes the step body in.
   const effectiveHtmlBody = bodyOverride !== null ? bodyOverride : campaign.html_body;
+  // Subject for THIS send call. Follow-ups can override per-step.
+  const effectiveSubject  = subjectOverride !== null ? subjectOverride : campaign.subject;
   // Detect whether this body uses {{first_name}} anywhere — if it doesn't,
   // we don't need to skip subscribers with no parsed first name.
   const usesFirstName = templateUsesFirstName(
-    campaign.subject, effectiveHtmlBody, campaign.plain_body
+    effectiveSubject, effectiveHtmlBody, campaign.plain_body
   );
 
   for (let i = 0; i < subscribers.length; i += BATCH_SIZE) {
@@ -327,7 +333,7 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm 
         }
 
         const firstName = sub.first_name || '';
-        const subject   = renderTemplate(campaign.subject,    firstName);
+        const subject   = renderTemplate(effectiveSubject,    firstName);
         const htmlBody  = renderTemplate(effectiveHtmlBody,   firstName);
         const plainBody = renderTemplate(campaign.plain_body || htmlToPlain(effectiveHtmlBody || ''), firstName);
 
@@ -405,8 +411,13 @@ export async function getVerifiedDomains() {
 //     here AFTER tracking has been applied (in sendEmail caller order).
 function wrapBodyWithEmailCss(body) {
   if (!body) return '';
+  // Defaults match the RichTextEditor (Verdana 12). When the operator changes
+  // font/size in the editor, those choices are emitted as inline span styles
+  // and override these CSS defaults — so the recipient sees exactly what the
+  // editor previewed. Outlook quirks (default p margins) are normalised by
+  // the p { margin: 0 } rule.
   const css = `
-    body { margin: 0; padding: 0; line-height: 1.4; font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #1a1a1a; }
+    body { margin: 0; padding: 0; line-height: 1.4; font-family: Verdana, Geneva, sans-serif; font-size: 12px; color: #1a1a1a; }
     p { margin: 0; }
     p:empty { min-height: 1em; }
     p:has(> br:only-child) { min-height: 1em; }

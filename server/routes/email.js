@@ -1026,11 +1026,13 @@ router.delete('/campaigns/:id', (req, res) => {
 
 // GET /api/email/campaigns/:id/steps
 // Returns the ordered step list. Always includes step 1.
+// Per-step `subject` is returned alongside `html_body` and `delay_days`.
+// A NULL subject means "fall back to campaign-level subject at send time".
 router.get('/campaigns/:id/steps', (req, res) => {
-  const campaign = db.prepare('SELECT id, html_body FROM email_campaigns WHERE id=?').get(req.params.id);
+  const campaign = db.prepare('SELECT id, html_body, subject FROM email_campaigns WHERE id=?').get(req.params.id);
   if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
   let steps = db.prepare(`
-    SELECT id, step_number, html_body, delay_days, created_at
+    SELECT id, step_number, subject, html_body, delay_days, created_at
     FROM email_campaign_steps
     WHERE campaign_id=?
     ORDER BY step_number ASC
@@ -1040,10 +1042,10 @@ router.get('/campaigns/:id/steps', (req, res) => {
   // never sees an empty list. This should never happen in practice.
   if (steps.length === 0 || steps[0].step_number !== 1) {
     const synthId = `step_${campaign.id}_1_synth`;
-    db.prepare(`INSERT INTO email_campaign_steps (id, campaign_id, step_number, html_body, delay_days)
-                VALUES (?,?,1,?,0)`).run(synthId, campaign.id, campaign.html_body || '');
+    db.prepare(`INSERT INTO email_campaign_steps (id, campaign_id, step_number, subject, html_body, delay_days)
+                VALUES (?,?,1,?,?,0)`).run(synthId, campaign.id, campaign.subject || null, campaign.html_body || '');
     steps = db.prepare(`
-      SELECT id, step_number, html_body, delay_days, created_at
+      SELECT id, step_number, subject, html_body, delay_days, created_at
       FROM email_campaign_steps
       WHERE campaign_id=?
       ORDER BY step_number ASC
@@ -1064,15 +1066,18 @@ router.get('/campaigns/:id/steps', (req, res) => {
 });
 
 // PUT /api/email/campaigns/:id/steps
-// Replace the entire step list. Body: { steps: [{ step_number, html_body, delay_days }, ...] }
+// Replace the entire step list. Body: { steps: [{ step_number, subject, html_body, delay_days }, ...] }
 //   - Step 1 is always required and must have delay_days=0.
 //   - Step numbers must be contiguous starting from 1 (1,2,3,...).
 //   - Max 10 steps total.
 //   - Step 1's html_body is also written to email_campaigns.html_body so the
 //     existing send / preview code paths (which read html_body) keep working
 //     unchanged for step-1 sends.
-//   - Already-sent rows are NOT touched. Editing a step's body or delay only
-//     affects future sends. The UI surfaces a warning toast before save.
+//   - Step 1's subject is similarly mirrored to email_campaigns.subject.
+//     Steps 2+ may have a NULL subject — the send pipeline falls back to
+//     the campaign subject at send time.
+//   - Already-sent rows are NOT touched. Editing a step's body, subject, or
+//     delay only affects future sends. The UI surfaces a warning toast.
 router.put('/campaigns/:id/steps', (req, res) => {
   const campaign = db.prepare('SELECT id, status FROM email_campaigns WHERE id=?').get(req.params.id);
   if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
@@ -1087,6 +1092,8 @@ router.put('/campaigns/:id/steps', (req, res) => {
   }
   // Validate shape: step_numbers must be 1..N contiguous, html_body required, delay_days non-negative integer.
   // Step 1's delay_days must be 0; steps 2+ must have delay_days >= 1.
+  // subject is optional on every step (NULL falls back to campaign.subject at send time),
+  // but if provided it must be a non-empty string.
   const sorted = [...incoming].sort((a,b) => (a.step_number||0) - (b.step_number||0));
   for (let i = 0; i < sorted.length; i++) {
     const s = sorted[i];
@@ -1106,26 +1113,44 @@ router.put('/campaigns/:id/steps', (req, res) => {
     if (expectedNum > 1 && s.delay_days < 1) {
       return res.status(400).json({ error: `Step ${expectedNum} must have delay_days >= 1` });
     }
+    if (s.subject !== undefined && s.subject !== null) {
+      if (typeof s.subject !== 'string') {
+        return res.status(400).json({ error: `Step ${expectedNum} has an invalid subject` });
+      }
+      if (s.subject.trim().length === 0 && expectedNum === 1) {
+        return res.status(400).json({ error: 'Step 1 subject cannot be empty' });
+      }
+    }
   }
 
   const tx = db.transaction(() => {
     // Wipe and rewrite. Cleanest semantics — no orphaned step rows possible.
     db.prepare('DELETE FROM email_campaign_steps WHERE campaign_id=?').run(req.params.id);
     const insert = db.prepare(`INSERT INTO email_campaign_steps
-      (id, campaign_id, step_number, html_body, delay_days) VALUES (?,?,?,?,?)`);
+      (id, campaign_id, step_number, subject, html_body, delay_days) VALUES (?,?,?,?,?,?)`);
     for (const s of sorted) {
       const stepId = `step_${req.params.id}_${s.step_number}_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
-      insert.run(stepId, req.params.id, s.step_number, s.html_body, s.delay_days);
+      // Treat empty strings as NULL so the fallback-to-campaign-subject logic
+      // at send time is unambiguous (only NULL falls back).
+      const subj = (typeof s.subject === 'string' && s.subject.trim().length > 0) ? s.subject : null;
+      insert.run(stepId, req.params.id, s.step_number, subj, s.html_body, s.delay_days);
     }
-    // Mirror step 1's body to email_campaigns.html_body so existing code paths
+    // Mirror step 1's body and subject to email_campaigns so existing code paths
     // (test-send, preview, send) keep reading the right thing.
-    db.prepare('UPDATE email_campaigns SET html_body=? WHERE id=?')
-      .run(sorted[0].html_body, req.params.id);
+    const step1 = sorted[0];
+    const step1Subj = (typeof step1.subject === 'string' && step1.subject.trim().length > 0) ? step1.subject : null;
+    if (step1Subj !== null) {
+      db.prepare('UPDATE email_campaigns SET html_body=?, subject=? WHERE id=?')
+        .run(step1.html_body, step1Subj, req.params.id);
+    } else {
+      db.prepare('UPDATE email_campaigns SET html_body=? WHERE id=?')
+        .run(step1.html_body, req.params.id);
+    }
   });
   tx();
 
   const out = db.prepare(`
-    SELECT id, step_number, html_body, delay_days, created_at
+    SELECT id, step_number, subject, html_body, delay_days, created_at
     FROM email_campaign_steps
     WHERE campaign_id=?
     ORDER BY step_number ASC

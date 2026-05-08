@@ -951,12 +951,13 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
     send_order:         initial?.send_order         ?? 'top',
   });
   // Phase 4: multi-step sequence. steps[0] is always step 1; later entries
-  // are follow-ups with delay_days >= 1. New campaigns start with one step
-  // pre-filled with DEFAULT_BODY. Editing fetches the saved step list.
+  // are follow-ups with delay_days >= 1. Each step has its own subject —
+  // step 1's subject is also mirrored to email_campaigns.subject. New
+  // campaigns start with one step pre-filled with DEFAULT_BODY.
   const [steps, setSteps] = useState(
     editing
-      ? [{ step_number: 1, html_body: initial?.html_body || '', delay_days: 0, sent_count: 0 }]
-      : [{ step_number: 1, html_body: DEFAULT_BODY, delay_days: 0, sent_count: 0 }]
+      ? [{ step_number: 1, subject: initial?.subject || '', html_body: initial?.html_body || '', delay_days: 0, sent_count: 0 }]
+      : [{ step_number: 1, subject: '', html_body: DEFAULT_BODY, delay_days: 0, sent_count: 0 }]
   );
   const [activeStep, setActiveStep] = useState(1);
   const [stepsLoaded, setStepsLoaded] = useState(!editing);
@@ -974,9 +975,10 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
         if (Array.isArray(d.steps) && d.steps.length > 0) {
           setSteps(d.steps.map(s => ({
             step_number: s.step_number,
-            html_body: s.html_body,
-            delay_days: s.delay_days,
-            sent_count: s.sent_count || 0,
+            subject:     s.subject || '',
+            html_body:   s.html_body,
+            delay_days:  s.delay_days,
+            sent_count:  s.sent_count || 0,
           })));
         }
         setStepsLoaded(true);
@@ -1002,6 +1004,11 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
       s.step_number === activeStep ? { ...s, html_body: newBody } : s
     ));
   }
+  function updateStepSubject(newSubject) {
+    setSteps(prev => prev.map(s =>
+      s.step_number === activeStep ? { ...s, subject: newSubject } : s
+    ));
+  }
   function updateStepDelay(newDelay) {
     const n = parseInt(newDelay, 10);
     if (!Number.isFinite(n) || n < 1) return;
@@ -1012,7 +1019,7 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
   function addStep() {
     if (steps.length >= 10) return;  // hard cap
     const nextNumber = steps.length + 1;
-    const newStep = { step_number: nextNumber, html_body: '', delay_days: 3, sent_count: 0 };
+    const newStep = { step_number: nextNumber, subject: '', html_body: '', delay_days: 3, sent_count: 0 };
     setSteps(prev => [...prev, newStep]);
     setActiveStep(nextNumber);
   }
@@ -1039,8 +1046,14 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
     const missing=[];
     if(!form.list_id) missing.push('mailing list');
     if(!form.title)   missing.push('campaign title');
-    if(!form.subject) missing.push('email subject');
     if(!form.from_email) missing.push('from email');
+    // Step 1 subject is the campaign's primary subject (mirrored to
+    // email_campaigns.subject by the backend). Steps 2+ subjects are optional —
+    // a NULL/empty subject falls back to the campaign subject at send time.
+    const step1 = steps.find(s => s.step_number === 1);
+    if (!step1 || !step1.subject || !step1.subject.trim()) {
+      missing.push('email subject');
+    }
     // Each step must have a body. Step 1 is always present.
     for (const s of steps) {
       // Strip whitespace and inert HTML so an empty editor doesn't pass.
@@ -1056,9 +1069,18 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
     // we trust the user since they explicitly opened the tab.
     setSaving(true);setErr('');
 
-    // Step 1's body is also the campaign's html_body for legacy code paths.
-    const step1Body = steps.find(s => s.step_number === 1)?.html_body || '';
-    const campaignPayload = { ...form, html_body: step1Body, email_client_id: emailClient.id };
+    // Step 1's body and subject are also the campaign-wide values for legacy
+    // code paths (test sends, previews). The PUT /steps route mirrors them
+    // back to email_campaigns; we also include them in the campaign POST/PUT
+    // payload so the very first save creates the row with the right values.
+    const step1Body = step1.html_body || '';
+    const step1Subj = step1.subject.trim();
+    const campaignPayload = {
+      ...form,
+      subject:  step1Subj,
+      html_body: step1Body,
+      email_client_id: emailClient.id,
+    };
 
     let campaignId = initial?.id;
     try {
@@ -1075,14 +1097,16 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
       if (d.error) { setErr(d.error); setSaving(false); return; }
       campaignId = d.id || campaignId;
 
-      // 2) Save the step list. For new campaigns step 1's body was already mirrored
-      // via html_body; PUT /steps writes the canonical step rows AND mirrors step 1
-      // back to html_body again — idempotent and safe.
+      // 2) Save the step list. For new campaigns step 1's body and subject
+      // were already mirrored via the campaign POST; PUT /steps writes the
+      // canonical step rows AND mirrors step 1 back to email_campaigns.html_body
+      // and .subject again — idempotent and safe.
       const stepsPayload = {
         steps: steps.map(s => ({
           step_number: s.step_number,
-          html_body: s.html_body,
-          delay_days: s.delay_days,
+          subject:     (s.subject || '').trim() || null,
+          html_body:   s.html_body,
+          delay_days:  s.delay_days,
         })),
       };
       const sr = await fetch(`/api/email/campaigns/${campaignId}/steps`, {
@@ -1109,7 +1133,6 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
         </select>
       </div>
       <Input label="Campaign title *" value={form.title} onChange={v=>set('title',v)} placeholder="Worth fixing?" required/>
-      <Input label="Email subject *" value={form.subject} onChange={v=>set('subject',v)} placeholder="Is waiting costing your business?" required/>
       <Input label="From name" value={form.from_name} onChange={v=>set('from_name',v)} placeholder="Wez at Sweetbyte"/>
       <Input label="From email *" value={form.from_email} onChange={v=>set('from_email',v)} placeholder={`hello@${emailClient.name}`} required/>
       <Input label="Reply-to (leave blank to match from email)" value={form.reply_to} onChange={v=>set('reply_to',v)}/>
@@ -1231,6 +1254,34 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
             )}
           </div>
         )}
+        {/* Per-step subject. Step 1's subject is the campaign's primary subject
+            (required, mirrored to email_campaigns.subject by the backend).
+            Steps 2+ subjects are optional — leave blank to use step 1's subject. */}
+        <div style={{ marginBottom: 10 }}>
+          <label style={{ display: 'block', fontSize: 12, color: MUTED, marginBottom: 4 }}>
+            {activeStep === 1
+              ? 'Email subject *'
+              : 'Email subject for this contact (leave blank to reuse the 1st contact subject)'}
+          </label>
+          <input
+            type="text"
+            value={activeStepObj?.subject || ''}
+            onChange={e => updateStepSubject(e.target.value)}
+            placeholder={activeStep === 1
+              ? 'Is waiting costing your business?'
+              : 'Re: my last note'}
+            style={{
+              width: '100%',
+              padding: '8px 12px',
+              border: `0.5px solid ${BORDER}`,
+              borderRadius: 7,
+              fontSize: 13,
+              color: TEXT,
+              background: CARD,
+              boxSizing: 'border-box',
+            }}
+          />
+        </div>
         <RichTextEditor
           key={activeStep}
           value={activeStepObj?.html_body || ''}

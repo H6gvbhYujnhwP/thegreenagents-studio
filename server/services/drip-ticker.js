@@ -128,8 +128,9 @@ async function tickOneCampaign(campaign) {
   // ── PHASE 4: load step list ──────────────────────────────────────────────
   // Every campaign has at least step 1 (auto-backfilled by the migration).
   // Step 1 has delay_days=0; steps 2+ have delay_days >= 1.
+  // Per-step subject is loaded too — NULL means "use campaign.subject".
   const steps = db.prepare(`
-    SELECT step_number, html_body, delay_days
+    SELECT step_number, subject, html_body, delay_days
     FROM email_campaign_steps
     WHERE campaign_id = ?
     ORDER BY step_number ASC
@@ -137,7 +138,7 @@ async function tickOneCampaign(campaign) {
   if (steps.length === 0) {
     // Defensive: should never happen post-migration. Fall back to legacy single-step
     // behaviour using campaign.html_body so we don't strand the campaign.
-    steps.push({ step_number: 1, html_body: campaign.html_body, delay_days: 0 });
+    steps.push({ step_number: 1, subject: null, html_body: campaign.html_body, delay_days: 0 });
   }
   const stepByNumber = new Map();
   for (const s of steps) stepByNumber.set(s.step_number, s);
@@ -291,6 +292,10 @@ async function tickOneCampaign(campaign) {
         const stepNumber = sub._stepNumber || 1;
         const stepRow = stepByNumber.get(stepNumber);
         const bodyOverride = stepNumber === 1 ? null : (stepRow ? stepRow.html_body : null);
+        // Per-step subject. Step 1 always falls back to campaign.subject (it's
+        // mirrored there by the PUT /steps route anyway). Steps 2+ use the
+        // step's own subject if set, otherwise also fall back to the campaign.
+        const subjectOverride = (stepRow && stepRow.subject) ? stepRow.subject : null;
 
         // Send a "campaign" of one — sendCampaign handles personalisation, tracking,
         // and the email_sends row insertion. We give it a single subscriber, plus
@@ -302,6 +307,7 @@ async function tickOneCampaign(campaign) {
           alwaysWarm,
           stepNumber,
           bodyOverride,
+          subjectOverride,
         });
 
         // Update counters atomically
