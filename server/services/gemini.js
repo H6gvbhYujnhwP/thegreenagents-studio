@@ -118,12 +118,6 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
 
   const LOGO_MAX_W = 280;
   const LOGO_MAX_H = 100;
-  // 40px padding around each side of the wordmark on the white panel. Bumped
-  // from 20 because the operator wanted the Tower-Leasing-Post-1 look
-  // (comfortable padding around the wordmark) applied to every customer's
-  // posts uniformly. With trimming now done at upload time, the panel size
-  // is fully predictable per customer — same padding every regen forever.
-  const PADDING    = 40;
 
   // No trim step here — by design. Trim is data-dependent (Sharp's threshold
   // detection looks at actual pixel values, which can shift between calls
@@ -144,6 +138,31 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
   const logoMeta = await sharp(logoResized).metadata();
   const logoW    = logoMeta.width;
   const logoH    = logoMeta.height;
+
+  // Padding around the wordmark on the white panel is 20% of the logo's
+  // smaller dimension AFTER resize. This scales naturally:
+  //
+  //   - Tower Leasing's wide wordmark (~280x76 after resize)
+  //       smaller dim = 76 → padding ≈ 15px → panel ≈ 310x106
+  //
+  //   - Cube6's compact logo + tagline (~100x100 after resize)
+  //       smaller dim = 100 → padding ≈ 20px → panel ≈ 140x140
+  //
+  // Trade-off vs a fixed pixel padding: the panel size now varies per
+  // customer, but in a way that matches their logo's intrinsic shape — so
+  // every customer's panel reads as proportionally comfortable rather than
+  // either cramped (small logo, fixed padding too tight) or boxy (compact
+  // logo, fixed padding too generous). The previous attempt at fixed 40px
+  // produced a visibly oversized panel around Cube6's small logo.
+  //
+  // Logo dimensions are fully deterministic per customer because trimming
+  // now happens once at upload time. Same logo bytes → same resized
+  // dimensions → same padding → same panel size, every post.
+  //
+  // Floor at 8px to guarantee a sliver of breathing room even on extreme
+  // edge cases (e.g. a tiny logo that resizes to 30x30 — 20% would be 6,
+  // and 6px padding visually fuses the wordmark into the panel edge).
+  const PADDING = Math.max(8, Math.round(Math.min(logoW, logoH) * 0.20));
 
   const patchW = logoW + PADDING * 2;
   const patchH = logoH + PADDING * 2;
