@@ -321,8 +321,8 @@ router.post('/customers', (req, res) => {
 
   db.prepare(`
     INSERT INTO email_clients
-      (id, name, color, slug, portal_enabled, service_email_enabled)
-    VALUES (?, ?, ?, ?, 1, 0)
+      (id, name, color, slug, portal_enabled, service_email_enabled, source)
+    VALUES (?, ?, ?, ?, 1, 0, 'portal')
   `).run(id, trimmedName, '#1D9E75', slug);
 
   const row = db.prepare(`SELECT * FROM email_clients WHERE id = ?`).get(id);

@@ -525,18 +525,29 @@ router.get('/stats', async (req, res) => {
 // ── EMAIL CLIENTS (completely separate from LinkedIn clients) ──────────────────
 
 router.get('/clients', (req, res) => {
+  // Customers list is "real email customers" only — anything pulled from AWS
+  // verified domains, or manually added by the operator. Portal anchor rows
+  // (created when a LinkedIn-only customer like Cube6 gets a portal) live in
+  // the same table but should NOT show up here. The `source` column was added
+  // and backfilled in db.js; see the migration block there for full rationale.
+  //
+  // Defensive WHERE: rows with NULL source (shouldn't happen post-migration,
+  // but a fresh deploy and the loadAll AWS-sync race could in theory produce
+  // one) are still shown so the operator can fix them. New inserts always set
+  // source explicitly via the POST route below.
   const rows = db.prepare(`
     SELECT ec.*,
       (SELECT COUNT(*) FROM email_lists WHERE email_client_id=ec.id) as list_count,
       (SELECT COALESCE(SUM(s.cnt),0) FROM (SELECT COUNT(*) as cnt FROM email_subscribers es JOIN email_lists el ON es.list_id=el.id WHERE el.email_client_id=ec.id AND es.status='subscribed') s) as subscriber_count,
       (SELECT COUNT(*) FROM email_campaigns WHERE email_client_id=ec.id) as campaign_count
     FROM email_clients ec
+    WHERE ec.source IS NULL OR ec.source IN ('aws_domain', 'manual')
     ORDER BY ec.name ASC
   `).all();
   res.json(rows);
 });
 
-router.post('/clients', (req, res) => {
+router.post('/clients', async (req, res) => {
   const { name, color } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   const id = uuid();
@@ -546,8 +557,26 @@ router.post('/clients', (req, res) => {
   const slug = db._portalUniqueSlug
     ? db._portalUniqueSlug(name.trim(), id)
     : name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  db.prepare('INSERT INTO email_clients (id,name,color,slug) VALUES (?,?,?,?)')
-    .run(id, name.trim(), color || '#1D9E75', slug);
+
+  // Classify the new row's source. The auto-sync in EmailSection.jsx (loadAll)
+  // calls this endpoint with names that match AWS verified domains; the
+  // operator-driven "+ New client" UI calls it with arbitrary names. Both
+  // paths land here, so we look at the actual AWS list to decide.
+  // Failure to reach AWS falls through to 'manual' — safer than silently
+  // hiding a row from the very list the operator was trying to add it to.
+  let source = 'manual';
+  try {
+    const trimmed = name.trim().toLowerCase();
+    const verified = await getVerifiedDomains();
+    if (Array.isArray(verified) && verified.some(d => String(d).toLowerCase() === trimmed)) {
+      source = 'aws_domain';
+    }
+  } catch (err) {
+    console.warn(`[email/clients POST] verified-domains lookup failed, defaulting source='manual': ${err.message}`);
+  }
+
+  db.prepare('INSERT INTO email_clients (id,name,color,slug,source) VALUES (?,?,?,?,?)')
+    .run(id, name.trim(), color || '#1D9E75', slug, source);
   res.json(db.prepare('SELECT * FROM email_clients WHERE id=?').get(id));
 });
 

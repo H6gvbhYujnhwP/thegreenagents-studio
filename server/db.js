@@ -1166,6 +1166,85 @@ db.exec(`
   }
 }
 
+// ── email_clients.source classification ─────────────────────────────────────
+// Distinguishes "real email-sending customers" from "portal anchor rows".
+//
+// Background. The Email Campaigns Customers page (`GET /api/email/clients`)
+// originally listed every row in `email_clients`. That worked when every
+// row was a real cold-email customer. Once the Customer Portal shipped, any
+// LinkedIn-only customer (Cube6, Mansons, Tower Leasing) also got an
+// email_clients row created as their portal anchor — and those started
+// appearing in the Email Campaigns list, confusing the operator.
+//
+// Three values:
+//   'aws_domain' — name matches a verified SES domain; the row represents a
+//                  real (or potential) cold-email-sending customer. Auto-pulled
+//                  from AWS by the loadAll() sync in EmailSection.jsx.
+//   'manual'    — operator hit "+ New client" with a name that is NOT a
+//                  verified SES domain. Vanishingly rare today but kept for
+//                  completeness.
+//   'portal'    — created as a portal anchor for a LinkedIn-only customer.
+//                  Hidden from the Email Campaigns customers list.
+//
+// On-boot one-shot migration. For existing rows with NULL source we use a
+// conservative classifier that doesn't depend on talking to AWS:
+//   portal_enabled = 1 AND no email-sending activity     →  'portal'
+//   everything else                                       →  'aws_domain'
+// "Email-sending activity" = at least one row in email_lists, email_subscribers
+// (via lists), email_campaigns, OR email_inboxes for this client. If a portal
+// customer ever does become a real email-sending customer the row will already
+// have activity and stay classified as aws_domain — the classifier is
+// self-healing.
+//
+// The diagnostic run on 2026-05-08 confirmed this rule cleanly separates the
+// 13 existing rows: Cube6 / Mansons / Tower Leasing → portal; everything else
+// → aws_domain. No edge cases.
+{
+  const cols = db.prepare('PRAGMA table_info(email_clients)').all().map(r => r.name);
+  if (!cols.includes('source')) {
+    db.exec(`ALTER TABLE email_clients ADD COLUMN source TEXT`);
+    console.log('[db] migration: added source to email_clients');
+  }
+
+  // One-shot classification of any rows with NULL source. Idempotent — only
+  // touches rows where source IS NULL, so re-runs after the migration is
+  // already done are no-ops.
+  const unclassified = db.prepare(`
+    SELECT
+      ec.id,
+      ec.name,
+      ec.portal_enabled,
+      (SELECT COUNT(*) FROM email_lists       WHERE email_client_id = ec.id) AS lists,
+      (SELECT COUNT(*) FROM email_subscribers es
+         JOIN email_lists el ON es.list_id = el.id
+         WHERE el.email_client_id = ec.id)                                   AS subs,
+      (SELECT COUNT(*) FROM email_campaigns   WHERE email_client_id = ec.id) AS camps,
+      (SELECT COUNT(*) FROM email_inboxes     WHERE email_client_id = ec.id) AS inbox
+    FROM email_clients ec
+    WHERE ec.source IS NULL
+  `).all();
+
+  if (unclassified.length > 0) {
+    const upd = db.prepare(`UPDATE email_clients SET source = ? WHERE id = ?`);
+    let portalCount = 0;
+    let domainCount = 0;
+    db.transaction(rows => {
+      for (const r of rows) {
+        const hasActivity = r.lists > 0 || r.subs > 0 || r.camps > 0 || r.inbox > 0;
+        const isPortalOnly = r.portal_enabled === 1 && !hasActivity;
+        if (isPortalOnly) {
+          upd.run('portal', r.id);
+          portalCount++;
+        } else {
+          upd.run('aws_domain', r.id);
+          domainCount++;
+        }
+      }
+    })(unclassified);
+    console.log(`[db] migration: classified ${unclassified.length} email_clients rows (portal=${portalCount}, aws_domain=${domainCount})`);
+  }
+}
+
 // Reset any stuck algorithm analysis runs on startup
 // Also clear any partial/garbage brief (valid brief starts with # LinkedIn Algorithm)
 db.prepare("UPDATE linkedin_settings SET brief_running = 0 WHERE id = 1").run();
