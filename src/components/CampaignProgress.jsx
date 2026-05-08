@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 
 const STAGES = [
   { key: 'generating_posts',  label: 'Writing posts',  icon: '✍️' },
@@ -22,7 +22,6 @@ export default function CampaignProgress({ campaignId, onComplete }) {
   const [cancelling, setCancelling] = useState(false);
   const [expandedPost, setExpanded] = useState(null);
   const [cardState, setCardState]   = useState({});
-  const logsEndRef = useRef(null);
 
   function parsePosts(c) {
     if (c?.posts_json) {
@@ -121,9 +120,10 @@ export default function CampaignProgress({ campaignId, onComplete }) {
     return () => { es.close(); clearInterval(pollInterval); };
   }, [campaignId]);
 
-  useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
+  // Auto-scroll on new log lines was removed — it dragged the whole page
+  // to the bottom on every regen action because scrollIntoView walks up the
+  // DOM and scrolls every scrollable parent. The log terminal is now manually
+  // scrollable; new lines still appear, the page just doesn't move.
 
   async function handleDeploy() {
     setDeploying(true);
@@ -535,7 +535,6 @@ export default function CampaignProgress({ campaignId, onComplete }) {
             </div>
           ))
         }
-        <div ref={logsEndRef} />
       </div>
 
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
