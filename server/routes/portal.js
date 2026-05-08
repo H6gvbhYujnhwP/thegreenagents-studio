@@ -174,6 +174,17 @@ function findPostForPortalUser(req, postId) {
   const linkedinClientId = resolveLinkedinClientId(req.portalClient.id);
   if (!linkedinClientId) return null;
 
+  // Normalise to a string up front. Express URL params are always strings,
+  // but post.id values inside posts_json are NUMBERS (Claude's generation
+  // schema literally says "id": 1, "id": 2, ...). A strict === between a
+  // number and a string would always be false, which is the bug Tower Leasing
+  // hit on every Edit/Approve/Rewrite/New image action.
+  //
+  // Also tolerate the synthesised-id form ("post_1") that projectPost emits
+  // for the rare case of a post object that genuinely lacks an id field.
+  // Defensive — don't lose either path.
+  const wantedId = String(postId);
+
   // Scan awaiting_approval campaigns for this customer's linked client until we
   // find the post. In practice there's almost always exactly one such campaign
   // (the most recent), so this is a cheap loop. We don't restrict to the most
@@ -190,16 +201,11 @@ function findPostForPortalUser(req, postId) {
   for (const campaign of campaigns) {
     let posts = [];
     try { posts = JSON.parse(campaign.posts_json || '[]'); } catch (_) { posts = []; }
-    // Match against either the raw post.id OR the synthesised id projectPost
-    // emits (`post_<index+1>`) when post.id is missing. Without this match-
-    // both behaviour, customers on campaigns whose posts_json doesn't include
-    // an id field hit "Post not found" on every Edit/Approve/Rewrite/New image
-    // action — the frontend has been told the id is "post_1" but the lookup
-    // only checks the raw .id. Tower Leasing's campaign was the case that
-    // surfaced this bug.
     const idx = posts.findIndex((p, i) => {
       const synthId = `post_${i + 1}`;
-      return (p.id && p.id === postId) || (!p.id && postId === synthId);
+      if (p.id !== undefined && p.id !== null && String(p.id) === wantedId) return true;
+      if ((p.id === undefined || p.id === null) && wantedId === synthId) return true;
+      return false;
     });
     if (idx !== -1) {
       return { campaign, posts, postIndex: idx, post: posts[idx] };
