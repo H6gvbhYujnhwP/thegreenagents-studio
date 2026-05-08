@@ -14,6 +14,7 @@ import { startPoller } from './services/imap-poller.js';
 import { startClassifier } from './services/classify-replies.js';
 import { startDripTicker } from './services/drip-ticker.js';
 import { selfTest as cryptoSelfTest } from './services/crypto-vault.js';
+import { backfillLogos } from './services/logo-backfill.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app  = express();
@@ -78,4 +79,12 @@ app.listen(PORT, () => {
   // Start the drip ticker — sends scheduled campaigns batch by batch in their
   // chosen window. Doesn't depend on encryption or Anthropic; just SES + DB.
   startDripTicker();
+
+  // Backfill any logos uploaded before the trim-at-upload pipeline shipped.
+  // Fire-and-forget — runs in the background, logs progress, doesn't block
+  // anything else. Idempotent (skips rows already marked processed) so it's
+  // a no-op on subsequent boots once everything is migrated.
+  backfillLogos().catch(err => {
+    console.error('[logo-backfill] Top-level failure:', err && err.stack ? err.stack : err);
+  });
 });

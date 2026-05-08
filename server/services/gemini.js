@@ -118,56 +118,25 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
 
   const LOGO_MAX_W = 280;
   const LOGO_MAX_H = 100;
-  const PADDING    = 20;
+  // 40px padding around each side of the wordmark on the white panel. Bumped
+  // from 20 because the operator wanted the Tower-Leasing-Post-1 look
+  // (comfortable padding around the wordmark) applied to every customer's
+  // posts uniformly. With trimming now done at upload time, the panel size
+  // is fully predictable per customer — same padding every regen forever.
+  const PADDING    = 40;
 
-  // Trim solid-colour padding off the file before resizing.
+  // No trim step here — by design. Trim is data-dependent (Sharp's threshold
+  // detection looks at actual pixel values, which can shift between calls
+  // due to compression noise, anti-aliasing, or floating-point rounding).
+  // Earlier versions trimmed inline on every regen, which produced the
+  // "Post 1's logo panel is bigger than Post 2's" variance bug on Tower
+  // Leasing.
   //
-  // Some customers upload logos with built-in white margin around the actual
-  // artwork (e.g. a 2586x669 file where the wordmark only fills the middle
-  // 60%). Without this trim, our resize step preserves the padding and the
-  // composited logo looks visibly "boxed in" — a chunky white rectangle
-  // around the wordmark on every generated image.
-  //
-  // We branch on whether the source is transparent or opaque, because the
-  // two cases need different handling:
-  //
-  //   Opaque source (JPEG, opaque PNG with built-in white padding):
-  //     Trim with a generous threshold (30) to catch JPEG compression noise
-  //     around artwork edges that would otherwise read as a coloured tint
-  //     when placed on a dark base image. Flatten onto pure white so the
-  //     corner pixels my downstream detection samples are unambiguous.
-  //
-  //   Transparent source (real PNG with alpha):
-  //     Trim removes the transparent border (tighter crop of just artwork).
-  //     We do NOT flatten — that'd fill the artwork's transparent regions
-  //     with white and remove the customer's reliance on the auto-patch
-  //     path. Output keeps its alpha so my downstream detection sees
-  //     transparent corners and adds the white patch behind it.
-  //
-  // For tightly-cropped logos either way, trim is a no-op. If trim throws
-  // (e.g. entire image is one colour — extreme edge case) we fall back to
-  // the original buffer so image generation still succeeds.
-  let logoForResize = logoBuffer;
-  try {
-    const srcMeta = await sharp(logoBuffer).metadata();
-    const srcHasAlpha = srcMeta.channels === 4 || srcMeta.hasAlpha;
-    if (srcHasAlpha) {
-      logoForResize = await sharp(logoBuffer)
-        .trim({ threshold: 30 })
-        .png()
-        .toBuffer();
-    } else {
-      logoForResize = await sharp(logoBuffer)
-        .trim({ threshold: 30 })
-        .flatten({ background: '#ffffff' })
-        .png()
-        .toBuffer();
-    }
-  } catch (err) {
-    console.warn(`[gemini] Logo trim failed (using untrimmed): ${err.message}`);
-  }
-
-  const logoResized = await sharp(logoForResize)
+  // Trim now happens once, at upload time, in services/logo-prep.js. The
+  // file in R2 is the canonical pre-trimmed form. Compositor just resizes
+  // it — every post gets identical bytes, identical dimensions, identical
+  // panel size. See services/logo-prep.js for full rationale.
+  const logoResized = await sharp(logoBuffer)
     .resize(LOGO_MAX_W, LOGO_MAX_H, { fit: 'inside', withoutEnlargement: true })
     .png()
     .toBuffer();

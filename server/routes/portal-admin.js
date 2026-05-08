@@ -27,6 +27,7 @@ import multer from 'multer';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
+import { prepareLogoForStorage } from '../services/logo-prep.js';
 
 const router = Router();
 const BCRYPT_COST = 12;
@@ -179,15 +180,20 @@ function findPortalCustomersLinkedTo(linkedinClientId) {
  * shared by both portal-admin and clients logo upload routes (this file
  * also exports it via the helper module pattern, but for simplicity it
  * lives here and clients.js will get the same behaviour via a small edit).
+ *
+ * The file is trimmed via prepareLogoForStorage BEFORE upload so the bytes
+ * sitting in R2 are the canonical, ready-to-composite form. Every regen
+ * later just downloads and resizes — no trim, no variance. See
+ * services/logo-prep.js for the full reasoning.
  */
 async function uploadLogoToR2(file, scope, ownerId) {
-  const ext = (file.originalname.split('.').pop() || 'png').toLowerCase();
-  const key = `logos/${scope}/${ownerId}/logo-${uuid()}.${ext}`;
+  const prepped = await prepareLogoForStorage(file.buffer, file.mimetype);
+  const key = `logos/${scope}/${ownerId}/logo-${uuid()}.${prepped.ext}`;
   await s3.send(new PutObjectCommand({
     Bucket:      process.env.R2_BUCKET_NAME,
     Key:         key,
-    Body:        file.buffer,
-    ContentType: file.mimetype,
+    Body:        prepped.buffer,
+    ContentType: prepped.mimetype,
   }));
   return `${process.env.R2_PUBLIC_URL}/${key}`;
 }
@@ -580,13 +586,15 @@ router.post('/customers/:id/logo', upload.single('logo'), async (req, res) => {
 
   // Update the portal customer's logo. Then propagate to any linked LinkedIn
   // record so uploads from either side keep both in sync (option Z behaviour
-  // — last write wins on both sides, which is fine in practice).
+  // — last write wins on both sides, which is fine in practice). Both sides
+  // get logo_processed_at stamped so the boot-time backfill migration
+  // (services/logo-backfill.js) skips these rows next time it runs.
   db.transaction(() => {
-    db.prepare(`UPDATE email_clients SET logo_url = ? WHERE id = ?`).run(logoUrl, req.params.id);
+    db.prepare(`UPDATE email_clients SET logo_url = ?, logo_processed_at = datetime('now') WHERE id = ?`).run(logoUrl, req.params.id);
     const linkedinId = getLinkedLinkedinClientId(req.params.id);
     if (linkedinId) {
       db.prepare(`
-        UPDATE clients SET logo_url = ?, updated_at = datetime('now') WHERE id = ?
+        UPDATE clients SET logo_url = ?, logo_processed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?
       `).run(logoUrl, linkedinId);
     }
   })();

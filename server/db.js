@@ -1272,6 +1272,35 @@ db.prepare("UPDATE linkedin_settings SET brief_running = 0 WHERE id = 1").run();
   }
 }
 
+// ── logo_processed_at columns ─────────────────────────────────────────────────
+// Marker timestamps recording that a logo file has been trimmed via
+// services/logo-prep.js and stored in its canonical pre-trimmed form in R2.
+// NULL means "this row predates the trim-at-upload pipeline and may still
+// have a raw, untrimmed logo in R2."
+//
+// The boot-time backfill in services/logo-backfill.js walks rows where this
+// column is NULL and logo_url is set, downloads the file, re-trims it,
+// uploads the trimmed version back to R2, updates logo_url to point at the
+// new key, and stamps logo_processed_at. After backfill every row is either
+// NULL+no-logo or processed-with-trimmed-logo.
+//
+// Both upload routes (POST /api/clients/:id/logo and
+// POST /api/portal-admin/customers/:id/logo) stamp this column on success so
+// the backfill skips rows it has already handled or that came in via the
+// new upload path.
+{
+  const cCols = db.prepare('PRAGMA table_info(clients)').all().map(r => r.name);
+  if (!cCols.includes('logo_processed_at')) {
+    db.exec(`ALTER TABLE clients ADD COLUMN logo_processed_at TEXT`);
+    console.log('[db] migration: added logo_processed_at to clients');
+  }
+  const eCols = db.prepare('PRAGMA table_info(email_clients)').all().map(r => r.name);
+  if (!eCols.includes('logo_processed_at')) {
+    db.exec(`ALTER TABLE email_clients ADD COLUMN logo_processed_at TEXT`);
+    console.log('[db] migration: added logo_processed_at to email_clients');
+  }
+}
+
 export default db;
 
 // ── LinkedIn Algorithm Brief ──────────────────────────────────────────────────

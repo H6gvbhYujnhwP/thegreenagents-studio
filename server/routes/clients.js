@@ -5,6 +5,7 @@ import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { listWorkspaces } from '../services/supergrow.js';
 import { extractTextFromBuffer } from '../utils/extractText.js';
+import { prepareLogoForStorage } from '../services/logo-prep.js';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 const s3 = new S3Client({
@@ -199,28 +200,36 @@ router.post('/:id/logo', requireAuth, upload.single('logo'), async (req, res) =>
   if (!client) return res.status(404).json({ error: 'Client not found' });
 
   try {
-    const ext = req.file.originalname.split('.').pop().toLowerCase();
-    const key = `logos/${req.params.id}/logo-${uuid()}.${ext}`;
+    // Trim the logo once, here at upload time, before it lands in R2. This
+    // is the canonical pre-processing step — every regen later just fetches
+    // the already-trimmed file and skips the trim. Eliminates regen-to-regen
+    // panel size variance that came from Sharp's data-dependent trim
+    // producing slightly different output on repeated calls. See
+    // services/logo-prep.js for full reasoning.
+    const prepped = await prepareLogoForStorage(req.file.buffer, req.file.mimetype);
+    const key = `logos/${req.params.id}/logo-${uuid()}.${prepped.ext}`;
 
     await s3.send(new PutObjectCommand({
       Bucket: process.env.R2_BUCKET_NAME,
       Key: key,
-      Body: req.file.buffer,
-      ContentType: req.file.mimetype
+      Body: prepped.buffer,
+      ContentType: prepped.mimetype
     }));
 
     const logoUrl = `${process.env.R2_PUBLIC_URL}/${key}`;
-    db.prepare('UPDATE clients SET logo_url = ?, updated_at = datetime(\'now\') WHERE id = ?')
+    db.prepare(`UPDATE clients SET logo_url = ?, logo_processed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`)
       .run(logoUrl, req.params.id);
 
     // Cross-sync: if any portal customer is linked to this LinkedIn client
     // (via customer_services or the legacy linkedin_client_id column), copy
     // the new logo across so the customer's portal header stays consistent.
     // Inline rather than imported helper to keep the change minimal — the
-    // mirror logic lives properly in portal-admin.js.
+    // mirror logic lives properly in portal-admin.js. Also stamps
+    // logo_processed_at on the email_clients side so the boot-time migration
+    // skips these rows next time it runs.
     db.prepare(`
       UPDATE email_clients
-      SET logo_url = ?
+      SET logo_url = ?, logo_processed_at = datetime('now')
       WHERE id IN (
         SELECT email_client_id FROM customer_services
         WHERE service_key = 'linkedin' AND linked_external_id = ?
