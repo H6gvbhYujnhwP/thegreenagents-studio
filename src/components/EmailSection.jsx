@@ -932,7 +932,9 @@ function CampaignModal({emailClient,lists,initial,onClose,onSaved}){
     title:initial?.title||'',subject:initial?.subject||'',
     from_name:  initial?.from_name  || (editing ? '' : (emailClient?.default_from_name  || '')),
     from_email: initial?.from_email || (editing ? '' : (emailClient?.default_from_email || '')),
-    reply_to:initial?.reply_to||'',
+    // Reply-to defaults to the customer's default From email — same address
+    // is used for sending and receiving replies. Operator can still override.
+    reply_to:   initial?.reply_to   || (editing ? '' : (emailClient?.default_from_email || '')),
     // Tracking fields. Default to safest (off) for new campaigns; preserve on edit.
     tracking_mode:      initial?.tracking_mode      ?? 'off',
     tracking_threshold: initial?.tracking_threshold ?? 3,
@@ -2115,14 +2117,48 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
   const [modal,setModal]=useState(null);
   const [modalData,setModalData]=useState({});
   const [testEmail,setTestEmail]=useState(emailClient.test_email||'');
+  // Default sender — one per customer, auto-fills new campaigns and lists.
+  // Lives on email_clients.default_from_name + .default_from_email. Editable
+  // here so the operator can drop in the values when a new domain auto-syncs
+  // from AWS without having to open the Edit Client modal.
+  const [defaultFromName,setDefaultFromName]=useState(emailClient.default_from_name||'');
+  const [defaultFromEmail,setDefaultFromEmail]=useState(emailClient.default_from_email||'');
 
-  // Save test email to server whenever it changes (debounced)
-  const saveTimer=useRef(null);
+  // When the operator switches between customers in the left sidebar, the
+  // emailClient prop changes but the local state would otherwise hold the
+  // previous customer's values. Resync from the new prop on every change.
+  useEffect(()=>{
+    setTestEmail(emailClient.test_email||'');
+    setDefaultFromName(emailClient.default_from_name||'');
+    setDefaultFromEmail(emailClient.default_from_email||'');
+  },[emailClient.id, emailClient.test_email, emailClient.default_from_name, emailClient.default_from_email]);
+
+  // Save to server when any of the three header fields change. Debounced 800ms
+  // so we don't fire a request on every keystroke. One timer per field — they
+  // save independently. The PUT route accepts partial bodies so we only send
+  // the field that changed.
+  const testEmailTimer = useRef(null);
+  const fromNameTimer  = useRef(null);
+  const fromEmailTimer = useRef(null);
   function handleTestEmailChange(val){
     setTestEmail(val);
-    clearTimeout(saveTimer.current);
-    saveTimer.current=setTimeout(()=>{
+    clearTimeout(testEmailTimer.current);
+    testEmailTimer.current=setTimeout(()=>{
       fetch(`/api/email/clients/${emailClient.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({test_email:val})});
+    },800);
+  }
+  function handleDefaultFromNameChange(val){
+    setDefaultFromName(val);
+    clearTimeout(fromNameTimer.current);
+    fromNameTimer.current=setTimeout(()=>{
+      fetch(`/api/email/clients/${emailClient.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({default_from_name:val.trim()||null})});
+    },800);
+  }
+  function handleDefaultFromEmailChange(val){
+    setDefaultFromEmail(val);
+    clearTimeout(fromEmailTimer.current);
+    fromEmailTimer.current=setTimeout(()=>{
+      fetch(`/api/email/clients/${emailClient.id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({default_from_email:val.trim()||null})});
     },800);
   }
   const [testStatus,setTestStatus]=useState({});
@@ -2189,10 +2225,24 @@ function CampaignQueue({emailClient,lists,onViewReport,onRefresh}){
   const getLists=()=>lists;
 
   return(<div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0}}>
-    <div style={{padding:'10px 16px',borderBottom:`0.5px solid ${BORDER}`,background:CARD,display:'flex',alignItems:'center',gap:8}}>
-      <div style={{display:'flex',gap:6,alignItems:'center',marginRight:8}}>
+    <div style={{padding:'10px 16px',borderBottom:`0.5px solid ${BORDER}`,background:CARD,display:'flex',alignItems:'flex-end',gap:14,flexWrap:'wrap'}}>
+      {/* Default From name. Auto-fills the From name on every new campaign
+          and list for this customer. Saved on debounce. */}
+      <div style={{display:'flex',flexDirection:'column',gap:3}}>
+        <label style={{fontSize:11,color:MUTED}}>Default From name</label>
+        <input value={defaultFromName} onChange={e=>handleDefaultFromNameChange(e.target.value)} placeholder="John Wicks" style={{fontSize:12,padding:'5px 10px',border:`0.5px solid ${BORDER}`,borderRadius:6,color:TEXT,background:BG,outline:'none',width:170}}/>
+      </div>
+      {/* Default From email. Also used as the default Reply-to on new campaigns
+          (the operator confirmed reply-to should always equal the From). */}
+      <div style={{display:'flex',flexDirection:'column',gap:3}}>
+        <label style={{fontSize:11,color:MUTED}}>Default From email</label>
+        <input value={defaultFromEmail} onChange={e=>handleDefaultFromEmailChange(e.target.value)} placeholder={`hello@${emailClient.name}`} style={{fontSize:12,padding:'5px 10px',border:`0.5px solid ${BORDER}`,borderRadius:6,color:TEXT,background:BG,outline:'none',width:210}}/>
+      </div>
+      {/* Test send address. Same field as before, just relabelled to match
+          the two new ones above. */}
+      <div style={{display:'flex',flexDirection:'column',gap:3}}>
+        <label style={{fontSize:11,color:MUTED}}>Test send address</label>
         <input value={testEmail} onChange={e=>handleTestEmailChange(e.target.value)} placeholder="test@youremail.com" style={{fontSize:12,padding:'5px 10px',border:`0.5px solid ${BORDER}`,borderRadius:6,color:TEXT,background:BG,outline:'none',width:200}}/>
-        <span style={{fontSize:11,color:MUTED}}>← test send address</span>
       </div>
       <div style={{marginLeft:'auto',display:'flex',gap:8}}>
         <Btn small onClick={()=>setModal('new-campaign')} variant="primary">+ New campaign</Btn>
