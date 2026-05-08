@@ -108,14 +108,9 @@ Both products share a database (better-sqlite3), an admin UI, and a per-customer
 
 37. **Admin sidebar has a single placeholder screen (`AdminComingSoon`) re-used for unbuilt services.** Four sidebar items — Facebook Posts, Instagram, TikTok, Facebook Pixels — all route to the same generic "Coming soon — Feature in development" component in `Dashboard.jsx`. Each has a "Soon" badge in the sidebar (admin needs to know which screens are real and which are placeholders). When a real admin tool ships for any of these, replace its branch in Dashboard's view router with a real component mount.
 
-38. **Auto-detect logo background type when compositing onto generated images.** Three real cases handled:
-    - Transparent PNG (Cube6) → corners alpha=0 → white auto-contrasting patch added behind it
-    - White-background PNG (Tower Leasing) → corners opaque AND near-white (luminance ≥ 235) → no patch, logo placed directly
-    - Dark-corner JPEG-renamed-to-PNG (Sweetbyte initial file) → corners opaque but dark → white patch forced (overrides the usual brightness-based patch colour decision)
+38. **(SUPERSEDED by #42 and #54.)** Originally specified auto-detect of logo background type (transparent vs white-bg vs dark-corner JPEG-as-PNG) with a different patch-colour decision per case. Both the auto-detect AND the per-case branching are gone — every logo now goes through the same upload-time trim pipeline (#54) and the same always-white compositor panel (#42). Kept here for history because earlier session lessons still reference it.
 
-    Detection happens by sampling four corner pixels' alpha + luminance. Lives in `compositeLogoBottomRight()` in `services/gemini.js`.
-
-39. **Logo trim before resize, branched on transparency.** Some customers upload logos with built-in white margin around the artwork — without a trim step, the resize preserves that padding and the composited logo looks visibly "boxed in" on every post. Sharp's `.trim({ threshold: 30 })` strips the solid-colour border before resize. **Critical branch:** if the source has alpha (transparent PNG), we trim then keep alpha. If the source is opaque (JPEG, opaque PNG), we trim then `.flatten({ background: '#ffffff' })` onto pure white. The flatten kills JPEG compression noise on edges (which would otherwise read as a coloured tint when composited on a dark base) AND guarantees the corner pixels my downstream detection samples are unambiguous (255,255,255). Threshold of 30 was chosen because logo artwork colours are usually 60+ luminance units away from white — safe to trim that aggressively without cutting into the logo itself.
+39. **(SUPERSEDED by #54.)** Originally specified that logo trim happens inline in the post compositor on every regen, branched on whether the source has alpha. The trim location moved to upload time in #54 — the file in R2 is now the canonical pre-trimmed form. The transparency branching logic itself is unchanged, just relocated to `services/logo-prep.js`. Kept here for history because earlier session lessons reference it; consult #54 for the live behaviour.
 
 40. **IMAP poller crashes are logged, not fatal.** ImapFlow emits `error` events on the EventEmitter when sockets time out. Without listeners, Node treats them as unhandled and kills the entire process — taking the drip ticker and reply classifier with it. Fix shipped: `client.on('error', handler)` attached to every ImapFlow client at construction (both `pollOneInbox` and `testImapCredentials`). Belt-and-braces: top-level `process.on('uncaughtException')` and `process.on('unhandledRejection')` handlers in `server/index.js` log and continue rather than crashing.
 
@@ -123,7 +118,7 @@ Both products share a database (better-sqlite3), an admin UI, and a per-customer
 
 41. **`email_clients.source` column distinguishes real email customers from portal anchor rows.** Three values: `'aws_domain'` (auto-pulled from AWS verified domains, or matched to one when manually added), `'manual'` (operator-created with a name that's not a verified SES domain — vanishingly rare), `'portal'` (auto-created as a portal anchor when a LinkedIn-only customer like Cube6 had a portal enabled — these rows have no email-sending purpose). The Email Campaigns Customers list filters `WHERE source IN ('aws_domain', 'manual')` so portal anchors don't pollute the list. Migration on first boot classified the 13 existing rows: any `portal_enabled=1` row with no email activity (no lists, subs, campaigns, or inboxes) → `'portal'`; everything else → `'aws_domain'`. Self-healing: if a portal-only customer ever becomes a real email-sending customer the activity check would flip them automatically — but this would be rare enough that the operator would just manually update the row.
 
-42. **Logo compositor uses one unified path for every customer — always-white panel, no detection branching.** Earlier code tried to detect when a logo had its own white background (e.g. Tower Leasing) and skip the contrast panel, plus a separate dark-corners override for JPEG-as-PNG logos that forced white panel colour. Both branches are gone. **Every logo now goes through the same path: trim → resize → place on a fully-opaque pure-white panel with rounded corners (`rgba(255,255,255,1.0)`) and 20px padding.** White-bg logos blend into the panel — no harm. The image's bottom-right brightness is no longer sampled to decide patch colour either, because that heuristic produced dark panels on Sweetbyte's regen (orange-band image bottom-right → dark panel → dark-on-dark logo, illegible). Predictability beats cleverness. The Gemini fallback model order was also reordered so the working `gemini-2.5-flash-image` is tried first (~150ms saved per image). **Known limitation:** white-on-transparent logos (light wordmark designed for dark backgrounds) would render invisibly on the white panel — none of our current customers have one, but if a future customer does the answer is "ask them for a darker version", not "re-introduce detection branching".
+42. **Logo compositor uses one unified path for every customer — always-white panel, no detection branching.** Earlier code tried to detect when a logo had its own white background (e.g. Tower Leasing) and skip the contrast panel, plus a separate dark-corners override for JPEG-as-PNG logos that forced white panel colour. Both branches are gone. **Every logo now goes through the same path: resize the (already-trimmed) canonical logo → place on a fully-opaque pure-white panel with rounded corners (`rgba(255,255,255,1.0)`) and proportional padding (20% of the logo's smaller dimension after resize, floor 8px).** White-bg logos blend into the panel — no harm. The image's bottom-right brightness is no longer sampled to decide patch colour either, because that heuristic produced dark panels on Sweetbyte's regen (orange-band image bottom-right → dark panel → dark-on-dark logo, illegible). Predictability beats cleverness. The Gemini fallback model order was also reordered so the working `gemini-2.5-flash-image` is tried first (~150ms saved per image). **Known limitation:** white-on-transparent logos (light wordmark designed for dark backgrounds) would render invisibly on the white panel — none of our current customers have one, but if a future customer does the answer is "ask them for a darker version", not "re-introduce detection branching". Two specifics later changed in the next session: (a) trim moved out of the compositor entirely — see #54 for upload-time trim; (b) padding became proportional rather than fixed-20 — see #55 for the trade-off across Tower's wide wordmark vs Cube6's compact logo.
 
 43. **Phase 4 multi-step sequence editor is fully built, not "schema only".** The blueprint-as-of-2026-05-07 said "Sequence editor UI in CampaignModal — mockup first" was still missing. Wrong. The campaign modal has tab-strip UI ("1st contact / 2nd contact / 3rd contact / + Add contact") with per-step body editors and a delay-days input that shows on every step after the 1st. Steps are saved via `PUT /api/email/campaigns/:id/steps`; they're sent by the drip ticker which extends the candidate list with follow-ups whose previous step's send timestamp is `delay_days` ago. Up to 10 steps per campaign. Step 1's `html_body` is mirrored to `email_campaigns.html_body` for legacy code paths. Step removal warns if the step has already been sent to anyone.
 
@@ -142,6 +137,20 @@ Both products share a database (better-sqlite3), an admin UI, and a per-customer
 49. **`email_clients.source` filter in admin routes hides portal-anchor rows from Email Campaigns customer list.** Decision #41 added the `source` column. The actual filtering ships in `routes/email.js` `GET /clients` with `WHERE source IS NULL OR source IN ('aws_domain', 'manual')`. The defensive `IS NULL` clause exists for race safety on a fresh deploy where the migration hasn't yet run on a row. Three real LinkedIn-only customers (Cube6, Mansons, Tower Leasing) now disappear from the Email Campaigns list while their portals continue to work. The classification on first boot was confirmed by a Render-shell diagnostic before code shipped — `portal=3, aws_domain=10` matched expectations exactly.
 
 50. **Default-sender fields are inline-editable on the customer detail page header, not buried in the Edit Client modal.** Database columns `default_from_email` and `default_from_name` already existed pre-this-session — they auto-populated new campaigns and lists, but were only editable from inside the Edit Client modal. Now they live next to the Test send address on the customer detail header (`CampaignQueue` component), each with debounced 800ms auto-save to `PUT /api/email/clients/:id`. When the operator switches between customers in the left sidebar, all three fields re-sync from the new customer's row. New campaigns now also default Reply-to to `default_from_email` (was previously left blank) — operator confirmed reply-to should always equal the From address.
+
+### Customer-portal further decisions (locked in this chat — 2026-05-08, third session)
+
+51. **Inline-editable header fields update the parent's in-memory clients list, not just local state.** Decision #50 introduced the inline header fields with debounced auto-save, but the parent (`EmailSection`) held the customers array from a single `loadAll()` at page mount and never refreshed it after a save. Result: the operator typed values that DID save to the DB, but switching customers and back showed the old empty values (component remount re-initialised local state from the stale prop), and the New Campaign / List modals read the stale prop too — so neither auto-filled. Fix: the save handlers now read the response from `PUT /api/email/clients/:id` and call a new `updateClientLocally(updated)` helper on the parent which splices the updated fields into the in-memory `clients` array (preserving `list_count` / `subscriber_count` / `campaign_count` which the GET adds via subqueries but the PUT response doesn't include — explicit preserve so the sidebar list never flashes "undefined lists · undefined subs"). Same fix also narrowed the resync `useEffect` deps from `[id, test_email, default_from_name, default_from_email]` down to `[id]` only — otherwise updating the parent's array after a save would re-fire the effect mid-typing and clobber what the user was still entering. Header inputs also lost their placeholder text ("John Wicks", "hello@…") because operator wanted them genuinely blank when unset — placeholder was reading as a real saved value.
+
+52. **Auto-unsubscribe gated on `matched_campaign_id`.** The classifier in `services/classify-replies.js` runs on every email in the customer's INBOX (so every row has a sensible badge), but the auto-unsubscribe path was firing on any `hard_negative`/`soft_negative` classification regardless of whether the inbound was a campaign reply. Random vendor mail with "remove me" footers (e.g. `cole@formspree.io`) was getting classified negative and auto-unsubscribing any subscriber on any of the customer's lists with a matching sender address — even though they'd never replied to a campaign. **Fix:** add `reply.matched_campaign_id &&` to the trigger condition in `applyClassification`. Lines up with the customer-portal "Normal email" badge logic (`PortalApp.jsx`'s `ClassifyBadge` already used `!reply.campaign_title` to neutralise the badge for non-campaign mail). If we can't tell which campaign a reply belongs to, we shouldn't act on its classification. Existing badly-unsubscribed rows from before this fix are NOT cleaned up — operator decided historical mess is fine.
+
+53. **Gemini "BOTTOM RIGHT CORNER" prompt rule softened.** Earlier wording asked Gemini to "leave the bottom-right 320x140px area relatively clear (no text, no important design elements)" so our composited logo wouldn't cover important content. Side effect: Gemini interpreted the instruction as a positive design brief and rendered a visibly LIGHTER, cleaner-looking patch in that exact rectangle. On busy/dirty backgrounds (Cube6's factory-floor scene was the surfacing case) the lighter patch was clearly visible as a faint halo extending up and left of the actual white logo panel — looked like a "second white box" floating above the logo. **New wording:** `"Don't place text or the main subject in the bottom-right corner — a small logo will be added there in post-processing."` Drops the "320×140px clear area" framing that was producing the halo, keeps the protection against Gemini placing important content where the panel will land. The panel is opaque so anything underneath is hidden anyway — the only thing actually needed from Gemini is "don't put your main subject there."
+
+54. **Logo trim moved from compositor to upload time.** Previously `compositeLogoBottomRight` in `services/gemini.js` ran Sharp's `.trim({ threshold: 30 })` inline on every regen. Sharp's trim is data-dependent — the same source file fetched twice could produce slightly different post-trim dimensions due to anti-aliasing, compression noise, or floating-point rounding. On Tower Leasing this surfaced as visible variance: Post 1's white logo panel was 320×116 pixels, Post 2's was 280×80, despite identical source logo and identical 1024×1024 underlying canvas. Diagnosed by Python script measuring the saved files. **Fix shipped:** new `services/logo-prep.js` module with `prepareLogoForStorage(buffer, mimetype)` that does the trim once at upload time. Same logic that used to live in the compositor — branch on alpha (transparent → keep alpha after trim; opaque → trim then `.flatten({ background: '#ffffff' })`), threshold 30, output as PNG (because trim can introduce alpha). SVGs pass through untouched (vector trim is meaningless). On trim failure (extreme edge case — entire image one colour) we fall back to the original buffer so the upload doesn't fail. Both upload routes (`routes/clients.js` POST `/:id/logo` and `routes/portal-admin.js` POST `/customers/:id/logo`) now call `prepareLogoForStorage` before the R2 PutObject. The shared `uploadLogoToR2` helper in `portal-admin.js` does it inline; `clients.js` mirrors the same pattern. The compositor in `gemini.js` no longer has any trim logic — it just resizes and places. Trim now happens once per upload, never per regen — every post gets identical bytes, identical dimensions, identical panel size. Two new DB columns track which rows have been processed: `clients.logo_processed_at TEXT` and `email_clients.logo_processed_at TEXT`. Both upload routes stamp this column on success. The cross-sync UPDATE that mirrors a LinkedIn-side logo across to linked email_clients rows now stamps the column on both sides simultaneously.
+
+55. **Logo panel padding is proportional, not fixed-pixel.** First attempt after #54 bumped the compositor's PADDING constant from 20 to 40 because the operator wanted Tower Leasing's "Post 1" look (the bigger 320×116 panel) applied to every customer. That was a misread: the 320×116 size was just what 20px padding produced around Tower's natural ~280×76 wordmark — the variance was only between regens of the same customer, not between different customers. Bumping to 40 broke Cube6 — Cube6's compact logo + tagline composite is only ~100×100 after resize, so 40px on each side proportionally added an entire extra logo's width of empty white per axis. **Final answer: padding = 20% of the logo's smaller dimension after resize, with a floor of 8px.** Tower's ~280×76 wordmark gets ~15px padding (smaller dim = 76, 20% = 15); Cube6's ~100×100 logo gets ~20px padding. Different shapes, proportionally similar comfort. Floor of 8px guarantees breathing room for hypothetical tiny logos that resize to 30×30 or smaller. **Lesson:** when tuning a "looks right" pixel value across customers with different logo proportions, fixed pixels will always pull in the wrong direction for SOMEONE — proportional scaling is the only stable answer.
+
+56. **Boot-time logo backfill in `services/logo-backfill.js`.** Every existing customer logo predates the trim-at-upload pipeline (#54), so they're sitting in R2 in their raw uploaded form. The backfill module walks every `clients` and `email_clients` row where `logo_url IS NOT NULL AND logo_processed_at IS NULL`, fetches the file from R2's public URL, runs it through `prepareLogoForStorage`, uploads the trimmed version to a NEW R2 key under the same prefix shape, and updates the DB row to point at the new URL with `logo_processed_at` stamped. The OLD raw file is left in place in R2 — we don't delete it, so a stale frontend tab loaded mid-deploy doesn't 404. The cross-sync between `clients` and any linked `email_clients` rows happens in the same pass, so processing a LinkedIn-side row also stamps + repoints any portal-mirror rows it's linked to. Idempotent: rows with `logo_processed_at` set are skipped, so re-running on subsequent boots is a no-op. Fire-and-forget: kicked off from `server/index.js` after `app.listen` returns, with a top-level catch so any failure logs but doesn't crash the process. Logs progress per-row as `[logo-backfill] clients[<id>] processed → <new url>` and a summary `Succeeded=N Failed=M Skipped(cross-synced)=K` at the end.
 
 ---
 
@@ -175,7 +184,7 @@ Both products share a database (better-sqlite3), an admin UI, and a per-customer
 - Three-pass classifier in `services/classify-replies.js`: regex → heuristic OOO → Haiku for the rest
 - Cron every 60s, up to 25 unclassified per tick, max 3 parallel Haiku calls
 - Strips quoted/forwarded content before running
-- Auto-unsubscribe fires on `hard_negative` AND `soft_negative`
+- Auto-unsubscribe fires on `hard_negative` AND `soft_negative` — but ONLY when `reply.matched_campaign_id` is non-null (gated by decision #52). Random vendor mail with negative wording no longer poisons the unsubscribe list.
 - Buttons: **"Classify pending"** (mailbox header), **"Classify with AI"** (reply detail)
 
 ### Phase 3.3: Per-recipient personalisation (DONE, live)
@@ -417,19 +426,20 @@ Still NOT confirmed end-to-end:
 - **Inbox reply send via SES with threading.** Code shipped, but no verified test of a real reply landing back in Gmail/Outlook with proper `In-Reply-To` and `References` headers. Worth testing with `Show original` next chat.
 - **Campaigns view with real numbers.** Code shipped, depends on the customer having real `email_campaigns` rows on their linked email_client.
 - **Per-step subject end-to-end.** No production multi-step send has happened yet — drip-ticker path with `subjectOverride` is unverified by real recipient inspection.
-- **Logo panel size variance** (see active polish backlog §2 — logged but not diagnosed).
+- **Logo trim-at-upload + proportional padding + Gemini halo fix.** Shipped this session (decisions #54/#55/#53). Wez confirmed the original variance is gone after the trim moved to upload time. Tower Leasing's regenerated Cube6-style cleared zone halo confirmed visually fixed by softening the prompt rule. Padding tuning landed on proportional 20% scaling after a brief detour through fixed 40 (too generous on Cube6) and fixed 20. Final visual confirmation across multiple customers' regens still pending.
+- **Default-sender persistence + auto-fill on New Campaign.** Shipped this session (decision #51). Wez confirmed both the persistence and the auto-fill behaviour after deploy.
+- **Auto-unsubscribe gate on `matched_campaign_id`.** Shipped this session (decision #52). Behaviour change is silent — no UI surface — so confirmation requires watching `[classifier]` log lines on Render: lines that previously read `auto-unsubscribed N subscriber(s) matching <addr>` should now only appear for sender addresses that genuinely sent into a campaign reply.
 
-### 2. Active polish backlog from this chat
+### 2. Active polish backlog
 
-Items raised during this chat that are real bugs or improvements but not yet shipped:
+Items raised across recent chats that are real bugs or improvements but not yet shipped:
 
-- **Logo panel size variance across posts.** First reported end of 2026-05-08 second session. After the always-white-panel logo fix shipped, Wez regenerated the first 4 posts of a Tower Leasing campaign and noted that Post 1's white box looked bigger than Posts 2-4. Investigation pending. Working theory: panel size in `compositeLogoBottomRight` is fixed pixels (`logoW + 40` × `logoH + 40`), but Gemini returns images at slightly different absolute pixel dimensions per post — so a fixed-pixel panel takes up a different proportion of each image. Hasn't been confirmed yet (need actual image dimensions per post). Possible fix if confirmed: scale the panel proportionally to image width (e.g. `patchW = imageWidth * 0.25`) instead of fixed pixels. Don't ship a fix until the cause is verified — could equally be that R2 is serving slightly different versions of the logo file across regens, or that trim is producing inconsistent results. Diagnostic: have Wez open each image in a new tab and report the actual pixel dimensions.
-- **Auto-unsubscribe spillage on non-campaign emails.** The classifier in `services/classify-replies.js` runs on every email in the customer's INBOX (not just campaign replies) and the auto-unsubscribe path fires on any `hard_negative`/`soft_negative` classification. This is poisoning the unsubscribe list — e.g. `cole@formspree.io` sending a marketing email containing "please remove me" got auto-unsubscribed from a customer's outreach list it was never on. **Fix needed:** skip auto-unsub when `matched_campaign_id IS NULL`. Also worth checking the live database to assess how widespread the spillage is. Wez aware, deferred to a future chat.
 - **Gmail spam folder isn't polled.** `imap-poller.js` opens `INBOX` only. Real campaign replies that Gmail's spam filter shoves into `[Gmail]/Spam` are invisible to the portal. Worth adding a second pass that polls Spam and surfaces matches with a "Gmail thinks this is spam — but it's a reply to your campaign" indicator.
-- **Sweetbyte's logo file is a JPEG renamed to .png.** With trim+flatten + the always-white-panel path (decision #42), output is now clean. Real fix is to ask the customer to upload a proper transparent PNG. Console warning shipped to surface this for future cases.
+- **Sweetbyte's logo file is a JPEG renamed to .png.** With the always-white-panel path (decision #42) and the upload-time trim+flatten (decision #54), output is now clean. Real fix is to ask the customer to upload a proper transparent PNG. Console warning shipped to surface this for future cases.
 - **Mock data constants left declared.** `mockReplies`, `mockCampaigns`, `mockClient` at the top of `PortalApp.jsx` are no longer referenced — harmless unused JS but worth a small cleanup.
 - **Orphan `src/components/PortalApp.jsx` (no subfolder).** The active portal lives in `src/components/customer-portal/PortalApp.jsx`. The orphan is the misplaced original from a build-failure fix and nothing imports it. Wez to delete locally on Windows.
 - **Rich-text editor still uses inline padding.** Recipient-side rendering in Outlook still depends on `wrapBodyWithEmailCss`. Decision unchanged from previous chats.
+- **Old un-trimmed R2 logo objects.** The boot-time backfill (#56) leaves the original raw logo files in R2 in place (it points the DB at the new trimmed file but doesn't `DeleteObject` the old one — avoids race-with-stale-frontend-tab). Storage cost is negligible at current scale; an R2 lifecycle policy could clean these up if it ever matters.
 
 ### 3. Phase 4 multi-step follow-up sequences — what's still missing
 
@@ -481,8 +491,10 @@ Direct user to set up `postmaster.google.com` and `sendersupport.olc.protection.
 Migrations run on every boot in `server/db.js`. SQLite at `/var/data/studio.db` on Render.
 
 ### Core tables (Phase 1-2)
-- `email_clients` — top-level grouping. Columns: `id, name, color, slug, default_from_email, default_from_name, portal_enabled, service_email_enabled, linkedin_client_id, logo_url, source, ...`
+- `email_clients` — top-level grouping. Columns: `id, name, color, slug, default_from_email, default_from_name, portal_enabled, service_email_enabled, linkedin_client_id, logo_url, logo_processed_at, source, ...`
   - `source` (decision #41): one of `'aws_domain'` (auto-pulled from / matched to AWS verified domain), `'manual'` (operator-created with non-domain name), `'portal'` (auto-anchor for a LinkedIn-only customer's portal). The Email Campaigns Customers list filters out `'portal'` rows. Migration on first boot classified all 13 existing rows.
+  - `logo_processed_at` (decision #54/#56): NULL for rows where the logo file in R2 is the raw uploaded form. Non-NULL ISO timestamp once `services/logo-prep.js` has trimmed the file and the canonical pre-trimmed version is what `logo_url` points at. Boot-time backfill (#56) walks NULL rows and processes them. New uploads stamp it on success.
+- `clients` — LinkedIn-side customers (separate table from `email_clients`, see decision #11). Columns include the same `logo_url` and `logo_processed_at` pair (#54/#56).
 - `email_brands`, `email_lists`, `email_subscribers`, `email_campaigns`, `email_sends`, `email_link_clicks`, `email_campaign_links`, `email_sns_events`
 
 ### Phase 3 tables
@@ -550,6 +562,9 @@ server/
                                       /api/algorithm     → algorithm.js
                                       /api/portal        → portal-auth.js (auth) + portal.js (data)
                                       /api/portal-admin  → portal-admin.js (admin-only)
+                                    After app.listen, kicks off backfillLogos() fire-
+                                    and-forget so any pre-#54 raw logo files in R2
+                                    get re-trimmed in the background (decision #56).
   db.js                           — schema + migrations (run every boot, additive only)
                                     Note: linkedin_settings UPDATE happens BEFORE its CREATE TABLE
                                     line; works on existing prod DBs because the table was
@@ -560,11 +575,18 @@ server/
     auth.js                       — admin login
     clients.js                    — Supergrow clients (NOT email_clients).
                                     POST /:id/logo cross-syncs to email_clients.logo_url.
+                                    Logo upload now trims via prepareLogoForStorage
+                                    BEFORE the R2 PutObject (decision #54) and stamps
+                                    logo_processed_at on both clients + linked
+                                    email_clients rows.
     campaigns.js                  — Supergrow campaigns (NOT email_campaigns)
     email.js                      — ALL email-side routes. 2050+ lines. POST /clients
                                     auto-generates slug via db._portalUniqueSlug AND classifies
                                     new rows as 'aws_domain' (matches verified domain) or
                                     'manual'. GET /clients filters out source='portal' rows.
+                                    PUT /clients/:id accepts partial-body updates and
+                                    returns the full row — used by the inline-editable
+                                    header fields on the customer detail page (#50/#51).
                                     PUT /campaigns/:id/steps now accepts per-step subjects.
                                     NB: export default router appears mid-file with routes
                                     after it. Works (export-binding semantics) but confusing.
@@ -579,14 +601,38 @@ server/
                                     POST /replies/:id/send, GET /campaigns.
     portal-admin.js               — admin-side customer-portal management. POST /customers
                                     inserts new portal anchor rows with source='portal'.
+                                    The shared uploadLogoToR2 helper trims via
+                                    prepareLogoForStorage before PutObject (#54). The
+                                    /customers/:id/logo route stamps logo_processed_at
+                                    on both email_clients + linked clients rows.
   services/
     ses.js, tracking.js, touch-count.js, crypto-vault.js, imap-poller.js,
-    classify-replies.js, name-parser.js,
+    name-parser.js,
+    classify-replies.js          — three-pass reply classifier. Auto-unsubscribe
+                                    path is now gated on reply.matched_campaign_id
+                                    being non-null (decision #52) so non-campaign
+                                    inbox traffic can never trigger it.
     drip-ticker.js               — extends candidate list with follow-up step sends; passes
                                     each step's subject + body through to sendCampaign as
                                     subjectOverride/bodyOverride.
     gemini.js                    — Nano Banana image gen + unified-panel logo compositor
                                     (decision #42). One panel path for every logo.
+                                    No trim step — that lives in logo-prep.js (#54).
+                                    Padding is proportional: 20% of the logo's
+                                    smaller resized dimension, floor 8px (#55).
+                                    The "BOTTOM RIGHT CORNER" prompt rule was
+                                    softened to stop Gemini rendering a visible
+                                    cleared zone behind the panel (#53).
+    logo-prep.js                 — One-shot trim at upload time. Exported
+                                    prepareLogoForStorage(buffer, mimetype) →
+                                    {buffer, mimetype, ext}. Used by both
+                                    upload routes BEFORE R2 PutObject. SVGs
+                                    pass through untouched. Decision #54.
+    logo-backfill.js             — Boot-time pass that re-trims every existing
+                                    logo (clients + email_clients rows where
+                                    logo_processed_at IS NULL). Idempotent.
+                                    Fire-and-forget from server/index.js after
+                                    app.listen. Decision #56.
     claude.js, openai.js, supergrow.js, etc.
 src/
   App.jsx                         — auth + dashboard mount; mounts PortalApp at /c/<slug>;
@@ -716,25 +762,38 @@ src/
 
 45. **Inline-editable beats modal-edit for high-frequency operator fields.** The default-sender fields lived inside the Edit Client modal — meaning every new domain required: open Customers page → click customer → click Edit → fill three fields → save → close modal → start using. Hoisting them into the customer detail header (debounced auto-save, no save button) cut that to: open Customers page → click customer → fill fields. Same pattern would help anywhere else operator state lives behind a modal. Worth scanning the rest of the admin UI for similar opportunities.
 
+### Lessons specific to this chat (persistence + logo trim-at-upload + proportional padding + auto-unsub gate)
+
+46. **Inline-editable fields aren't "done" when they save to the DB — they're done when the parent's in-memory state matches.** Decision #50 shipped a debounced PUT that wrote correctly to the database. But the parent's `clients` array was loaded once at page mount and never refreshed, so the New Campaign modal and the re-mounted header on customer-switch both read stale empty values. **Lesson: when adding inline-edit-with-debounced-save anywhere, also wire a "splice the response back into the parent's list" callback.** Otherwise the field appears to "not persist" the moment the user navigates anywhere — even though the bytes are safe in the DB. Same trap could apply to any future inline-editable field that doesn't already trigger a `loadAll()`. Generic guidance: **save endpoint returns the row → parent merges that row into its in-memory list → all consumers re-render with fresh values, no extra fetch.**
+
+47. **Placeholder text in tight inline inputs reads as a saved value.** "John Wicks" as a placeholder in the Default From name field looked indistinguishable from a real saved name on first glance — operator reasonably reported "the field has ghost text I don't want." Lesson: in a row of compact inline-editable fields with small/no labels, placeholders carry signal ("there's already a value here") that's hard to suppress visually. **Default to no placeholder unless there's a clear reason** (e.g. the field's purpose isn't obvious from the label alone). Modal-style fields with full labels above can keep the example placeholders — different visual context.
+
+48. **Sharp's `.trim()` is not idempotent on the same source bytes.** Running trim twice on the same buffer can produce subtly different results due to anti-aliasing handling at the threshold boundary. This was the root cause of the Tower Leasing "Post 1's panel is bigger than Post 2's" bug — the variance was always trim variance, not Gemini canvas variance (both posts came back at identical 1024×1024). Lesson: **treat `.trim()` as a one-shot canonicalisation step, not as something safe to run inline on every consumer.** The fix (decision #54) is structurally simple — trim once at upload time and store the trimmed buffer as canonical — but it requires a backfill (#56) for existing customers' raw files. Same shape applies to any other Sharp/image-processing operation that's data-dependent: do it once at ingest time, not per-render.
+
+49. **"Make it bigger to look like the good one" can be the wrong fix when the good one was just the same code with cleaner inputs.** When Wez said Tower's Post 1 panel was the look he wanted, my first move was to bump padding from 20 to 40px to "match" that visual. Wrong: the 320×116 panel he liked was just what 20px padding produced around Tower's natural ~280×76 wordmark. The variance on Posts 2/3/4 wasn't smaller padding — it was the trim landing in a different spot, leaving a smaller wordmark to pad around. Once trim was canonicalised, 20px padding would have produced the same 320×116 panel on every Tower post. **Lesson: before tuning a "looks right" knob, verify whether the original variance came from the knob OR from upstream input variance. The pixel-measurement diagnostic (Python script measuring saved files) was decisive — and would have prevented two rounds of padding tuning if I'd run it earlier.**
+
+50. **Proportional > fixed when the same pixel rule has to land across customers with different logo proportions.** Fixed-20 was tight on Tower (after trim variance fixed: 280×76 wordmark + 20px padding = 320×116, comfortable). Fixed-40 was overgenerous on Cube6 (100×100 logo + 40px padding = 180×180, too much white). There's no fixed-pixel value that works for both — different shapes need different absolute padding to feel proportional. **Solution: padding = 20% of logo's smaller dimension, floor 8px.** Tower gets ~15px (smaller dim 76), Cube6 gets ~20px (smaller dim 100), each landing in the comfortable range for that shape. **Lesson generalises:** any layout pattern that needs to feel right across multiple sources of varying intrinsic size should derive its measurements from the source's own dimensions, not from a constant.
+
+51. **Backend gating should match frontend storytelling.** The customer-portal inbox already showed a neutral "Normal email" badge for replies with `matched_campaign_id IS NULL` — telling customers "this isn't a campaign reply, the classification is meaningless for it." But the BACKEND was happily acting on that meaningless classification by auto-unsubscribing senders. **Lesson: when the UI tells the user "we're going to ignore this," the backend should genuinely ignore it.** The fix (decision #52) was a one-liner; the diagnostic was reading the frontend to find the equivalent gating condition that was already in place there. **Generic guidance:** if you have a "this thing isn't real / doesn't apply" UI badge, grep for actions in the backend that fire on the same row category — they probably need the same gate.
+
 ---
 
 ## What to do first in next chat
 
-1. **Read this whole blueprint.** The decisions list now goes up to #50. The lessons list goes up to #45. The additions from the most recent session are at the bottom of each list — explicitly marked.
+1. **Read this whole blueprint.** The decisions list now goes up to #56. The lessons list goes up to #51. Decisions #38 and #39 are explicitly marked superseded — read #54 and #42 (final form) for the live behaviour. Don't trust any "20px padding" mention without checking it's not from a stale comment block.
 
-2. **Ask Wez what's been tested since this blueprint was written.** From the second 2026-05-08 session, the following shipped but are NOT yet end-to-end-confirmed in production:
-   - Per-step subjects in a real multi-step send (drip-ticker path with `subjectOverride`)
-   - Verdana 12 default — needs a recipient-side test (send to a personal address, view "Show original")
-   - Logo panel size variance — diagnostic pending (Wez to send pixel dimensions of multiple regenerated posts on one campaign)
-   - Customer-portal action button styling — visually confirmed on screenshots, no functional test needed
+2. **Ask Wez what's been tested since this blueprint was written.** From the third 2026-05-08 session, the following shipped but are NOT yet fully end-to-end-confirmed in production:
+   - **Logo backfill behaviour on next deploy.** Render logs should show `[logo-backfill] Starting: N rows` at boot, then per-row `processed → <new url>` lines, then a `Done` summary. If it ran, every existing customer's logo URL points at a freshly trimmed file and every post regen from now on uses canonical bytes.
+   - **Proportional padding visual confirmation.** Tower Leasing should look the same as the "good Post 1" (~320×106 panel). Cube6 should look like the OLD Post 2 from the screenshot — tight panel around its compact logo, no surrounding white halo.
+   - **Gemini halo prompt fix.** Cube6's regenerated factory-floor scene should no longer show a faint cleaner-looking patch above/left of the logo panel.
+   - **Default-sender persistence.** Wez confirmed working in this session; no further test needed.
+   - **Auto-unsubscribe gate.** Silent backend change. Confirmation = absence of bogus `[classifier] auto-unsubscribed N subscriber(s)` lines for non-campaign sender addresses in the next week's Render logs.
 
-3. **The auto-unsubscribe spillage bug remains the most consequential active issue.** Random inbound mail (newsletters, vendor emails, password resets containing "remove me") is being added to the customer's unsubscribe list. Fix: skip auto-unsub when `matched_campaign_id IS NULL`. Worth assessing the live database for spillage scope at the same time.
+3. **The biggest remaining Phase 4 gap is the stop-condition filter.** Drip ticker keeps sending follow-ups to subscribers who already replied positive/soft_negative/hard_negative. Fix is a single `AND NOT EXISTS` clause in the candidate query in `services/drip-ticker.js`. With per-step subjects (#44) and the auto-unsub gate (#52) shipped, this is the last functional gap before Phase 4 is truly done.
 
-4. **The biggest remaining Phase 4 gap is the stop-condition filter.** Drip ticker keeps sending follow-ups to subscribers who already replied positive/soft_negative/hard_negative. Fix is a single `AND NOT EXISTS` clause in the candidate query. With per-step subjects shipped this is now the last functional gap before Phase 4 is truly done.
+4. **End-to-end verification of inbox reply-send threading.** Code shipped in chunk 3b-ii but no real reply has been verified to land back in Gmail/Outlook with proper `In-Reply-To` and `References` headers. Worth a `Show original` test next chat.
 
-5. **The logo panel size variance needs diagnosis before a fix.** End of session 2 surfaced: after the always-white-panel logo fix, the first regenerated post on Tower Leasing had a visibly bigger panel than the next three. Working theory is variable Gemini output dimensions causing fixed-pixel panels to look proportionally different — but this is unverified. Don't ship a fix until the cause is confirmed (Wez to send actual pixel dimensions of each post's image).
-
-6. **Smaller backlog items** (see "What's NOT done" §2 and §7) are polish — don't pick those up before bigger pieces unless Wez asks.
+5. **Smaller backlog items** (see "What's NOT done" §2 and §7) are polish — don't pick those up before bigger pieces unless Wez asks.
 
 ---
 
@@ -742,4 +801,4 @@ src/
 
 The user is patient, curious, and a great collaborator. They put genuine effort into testing each phase and report back with screenshots + Render logs + browser console output. They want this to be a real product they could one day sell to other companies. Treat the project that way — quality matters more than speed. When in doubt, ask.
 
-— Claude (end-of-chat handoff after logo unification round 2 to always-white-panel, three customer-portal post-action bug fixes, customer-portal action button restyle to TGA-green, and inline default-sender fields on customer detail page)
+— Claude (end-of-chat handoff after default-sender persistence + auto-fill fix, logo trim moved to upload time + boot-time backfill, proportional logo padding, Gemini halo prompt fix, and auto-unsubscribe gate on matched_campaign_id)

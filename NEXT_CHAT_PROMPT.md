@@ -2,7 +2,7 @@
 
 I'm continuing work on `studio.thegreenagents.com`. Two attachments are with this message: `BLUEPRINT.md` and a fresh zip of the repo.
 
-**Read `BLUEPRINT.md` start-to-finish before doing anything else.** It captures the full architecture, every locked-in decision (50 of them), the database schema, the file map, what's been tested vs what hasn't, and the lessons learned across previous chats. Without reading it you'll waste turns re-deriving things or re-litigating decisions that have already been settled.
+**Read `BLUEPRINT.md` start-to-finish before doing anything else.** It captures the full architecture, every locked-in decision (56 of them), the database schema, the file map, what's been tested vs what hasn't, and the lessons learned across previous chats (51 of them). Without reading it you'll waste turns re-deriving things or re-litigating decisions that have already been settled. Decisions #38 and #39 are explicitly marked SUPERSEDED with pointers to the live behaviour — don't act on those without checking the pointer first.
 
 After you've read the blueprint, walk through this prompt before suggesting any first move.
 
@@ -22,10 +22,14 @@ After you've read the blueprint, walk through this prompt before suggesting any 
 **What I value from you:**
 - **Honest pushback over agreement.** If I'm proposing something risky or a pre-decision turns out wrong once you're knee-deep in implementation, surface it. Don't sugar-coat. Don't silently work around bad assumptions. Multiple lessons in the blueprint are about times when honest pushback would have saved a turn.
 - **Read the network call / Render log / browser console BEFORE guessing the bug.** When I report a 500 or a "thing not found" error, ask for the wire-level detail (URL, status code, response body, the actual error in the log) before reading code. The blueprint has lessons #18 and #40 about this — both times I burned a turn guessing what code was wrong when the network/log would have told me directly.
+- **Measure before tuning.** When I report something looks "off" — too big, too small, wrong colour, wrong position — don't immediately start adjusting the knob. Measure the actual output first (pixel dimensions of saved image files, actual DOM measurements, actual byte sizes). Lesson #49 in the blueprint is about exactly this: I burned two rounds of padding tuning on the logo bug because I didn't measure the saved files until forced to. The Python-script-on-the-actual-file approach was decisive — and would have saved time if used earlier.
+- **Don't bump a value to "match" a good output without checking whether the good output was just the same code with cleaner inputs.** Same lesson, different angle. If one customer's regen looks good and another's looks bad, the variance might be in the input (logo file, source data, prompt seed) rather than the parameter. Check before twisting the knob.
 - **Mockups before code on bigger UI changes.** Before writing React for any new screen, build an interactive HTML mockup with `visualize:show_widget` and confirm direction with me. The blueprint covers when to do this and when to skip it.
 - **Confirm decisions before building.** When a feature requires multiple choices (e.g. how to label states, where to put nav items, what wording to use on a sales pitch), present the options and let me pick. Don't just build something and ask if it's right.
 - **Parse-check every file before claiming success.** Before telling me a file is ready, run a parse check. The blueprint has the exact commands. `EmailSection.jsx` is 3000+ lines and `PortalApp.jsx` is 2000+ — `str_replace` can silently delete content if context isn't unique.
 - **When fixing a helper, scan its full surface area.** Lessons #41 and #44 are about latent bugs in `findPostForPortalUser` that surfaced one at a time. If you're fixing a SQL helper, look at every column the SELECT returns vs every column its callers use, before claiming the fix is complete.
+- **When the UI says "we're ignoring this," the backend should genuinely ignore it.** Lesson #51 — the auto-unsubscribe gate. If there's a "Normal email" / "not applicable" / "draft" / "ignored" indicator in the frontend, grep for backend actions that fire on the same row category. They probably need the same gate.
+- **Inline-edit-with-debounced-save isn't done when it saves to the DB — it's done when the parent's in-memory state matches.** Lesson #46. Any new inline-editable field needs a "splice the response back into the parent's list" callback or it'll appear to "not persist" the moment I navigate anywhere.
 
 **How I want suggestions framed:**
 - Lay out the options with their trade-offs, then say which you'd pick and why.
@@ -41,9 +45,10 @@ After you've read the blueprint, walk through this prompt before suggesting any 
 
 ## What to do first
 
-1. **Read `BLUEPRINT.md` end-to-end.** Don't skip it.
+1. **Read `BLUEPRINT.md` end-to-end.** Don't skip it. Pay particular attention to the "Still NOT confirmed end-to-end" subsection — that's the live work pending verification, and it's where the most recent shipped-but-unconfirmed items live.
 2. **After reading, give me a short summary of where you think things stand and what you think the priority is.** Don't write code yet. Don't ask vague clarifying questions. Tell me your read on the project so I can correct any misunderstanding before we start.
-3. **Then ask me what's been tested since the last blueprint update.** Specifically the items in the blueprint's "Still NOT confirmed end-to-end" section. There are several things shipped at the end of the previous session that haven't been verified in production yet — including the most recent active issue (logo panel size variance on Tower Leasing's regenerated posts).
-4. **If I surface a bug or new task, work through it methodically.** Read the relevant files, walk me through the options, get confirmation, build, parse-check, deliver.
+3. **Then ask me what's been tested since the last blueprint update.** The blueprint's "Still NOT confirmed end-to-end" list captures the items shipped in the previous session that haven't yet been verified in production. The biggest cluster is the logo trim-at-upload + proportional padding + Gemini halo fix (decisions #53/#54/#55/#56). Backfill should have run on first deploy after the previous push — Render logs will have a `[logo-backfill] Done. Succeeded=N` line confirming. If that ran cleanly and the regenerated posts look right across multiple customers, those decisions can move from "pending" to "confirmed live."
+4. **The biggest live functional gap is the Phase 4 stop-condition filter.** Drip ticker keeps sending follow-ups to subscribers who already replied positive/soft_negative/hard_negative. With per-step subjects (#44) and the auto-unsubscribe gate (#52) shipped, this is the last functional gap before Phase 4 is properly done. Fix is a single `AND NOT EXISTS` clause in the candidate query in `services/drip-ticker.js`. Worth tackling first unless I surface something more urgent.
+5. **If I surface a bug or new task, work through it methodically.** Read the relevant files, walk me through the options, get confirmation, build, parse-check, deliver.
 
 If you start writing code or generating files before doing steps 1–3, you've moved too fast. Slow down.
