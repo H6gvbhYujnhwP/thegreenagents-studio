@@ -56,9 +56,12 @@ NANO BANNA STYLE RULES:
 
 ${brandSignatureRule}`;
 
+  // gemini-2.5-flash-image is the current working model. The other two are
+  // kept as fallbacks in case Google retires it again. Put the working model
+  // first so we skip a wasted ~150ms 404 round trip on every generation.
   const MODEL_CANDIDATES = [
-    'gemini-2.5-flash-preview-image-generation',
     'gemini-2.5-flash-image',
+    'gemini-2.5-flash-preview-image-generation',
     'gemini-2.0-flash-preview-image-generation',
   ];
 
@@ -115,7 +118,7 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
 
   const LOGO_MAX_W = 280;
   const LOGO_MAX_H = 100;
-  const PADDING    = 16;
+  const PADDING    = 20;
 
   // Trim solid-colour padding off the file before resizing.
   //
@@ -173,44 +176,34 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
   const logoW    = logoMeta.width;
   const logoH    = logoMeta.height;
 
-  // Auto-detect whether the logo has its own opaque, light background.
+  // Detect the JPEG-renamed-to-PNG case (decision #38, third real customer
+  // case — Sweetbyte). These files have opaque corners with dark/coloured
+  // fill that, if we let our patch-colour heuristic see them, can produce a
+  // dark patch on a light image and merge with the logo's own bad dark
+  // background. So we sample the four corner pixels — if all four are
+  // opaque AND not near-white (luminance < ~200), we know the logo has dark
+  // baked-in corners and force a WHITE patch regardless of what the image's
+  // bottom-right luminance says.
   //
-  // The original design assumed all logos were transparent PNGs and added a
-  // contrasting white/black patch behind every one for readability. But some
-  // customers upload logos that already have a built-in white background
-  // (e.g. Tower Leasing). For those, the patch is redundant and produces a
-  // visible thin line where the patch edge meets the logo's own rectangle.
+  // We previously also branched on "logo has its own white background → skip
+  // the panel entirely" for files like Tower Leasing's. That branch has been
+  // removed: it produced inconsistent results across runs (Sharp's trim is
+  // data-dependent and the same file could pass or fail the four-corner
+  // test on consecutive generations) and customers with white-bg logos
+  // looked visibly cropped against the image. Every logo now gets the same
+  // panel treatment. The customer's own white background simply blends into
+  // the panel — no harm, fully consistent.
   //
-  // We sample the four corner pixels and ask two questions:
-  //   1. Are they fully opaque (alpha=255)?
-  //   2. Are they near-white (luminance > ~235)?
-  //
-  // Both must be true to skip the patch. This catches a real failure mode
-  // we saw with one customer who uploaded a JPEG renamed to .png — JPEGs
-  // can't have transparency, so the alpha test alone said "logo has own
-  // background" and the system pasted a black-cornered logo straight onto
-  // generated images. By requiring near-white corners as well, we now treat
-  // any logo with dark or coloured corners as "needs a patch" and force a
-  // white panel behind it. Three real cases:
-  //   - Transparent PNG (Cube6) → corners alpha=0 → patch added (correct)
-  //   - White-bg PNG (Tower Leasing) → corners opaque+white → no patch (correct)
-  //   - Black-bg JPEG-as-PNG (Sweetbyte) → corners opaque+dark → patch added (correct)
-  //
-  // The middle of every logo is opaque (that's the artwork), so we can't
-  // sample there. Errors fall through to "keep the patch" — safer than
-  // accidentally dropping it.
-  const NEAR_WHITE_LUMINANCE = 235; // 0–255 scale; allows ~off-white papers
-  let logoHasOwnBackground = false;
-  let logoHasOpaqueDarkCorners = false; // broken file: JPEG-as-PNG with dark fill
+  // Errors fall through to "no override" — safer than accidentally forcing
+  // white in cases that don't need it.
+  const NEAR_WHITE_LUMINANCE = 200;
+  let logoHasOpaqueDarkCorners = false;
   try {
     const logoRaw = await sharp(logoResized).raw().toBuffer({ resolveWithObject: true });
     const channels = logoRaw.info.channels;
     const data = logoRaw.data;
     const w = logoRaw.info.width;
     const h = logoRaw.info.height;
-    // Returns { alpha, luminance } for a corner pixel. Luminance uses the
-    // standard Rec. 601 formula — same one we use elsewhere in this file
-    // for the patch-colour decision.
     const sampleCorner = (x, y) => {
       const i = (y * w + x) * channels;
       const r = data[i];
@@ -226,34 +219,18 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
       sampleCorner(0, h - 1),
       sampleCorner(w - 1, h - 1),
     ];
-    logoHasOwnBackground       = corners.every(c => c.alpha === 255 && c.luminance >= NEAR_WHITE_LUMINANCE);
-    logoHasOpaqueDarkCorners   = corners.every(c => c.alpha === 255) && !logoHasOwnBackground;
+    logoHasOpaqueDarkCorners = corners.every(c => c.alpha === 255 && c.luminance < NEAR_WHITE_LUMINANCE);
     if (logoHasOpaqueDarkCorners) {
       console.warn(`[gemini] Logo at ${logoUrl} has opaque dark corners — likely a JPEG renamed to .png. Forcing a white patch behind it. Customer should re-upload a transparent PNG for cleaner output.`);
     }
   } catch (err) {
-    console.warn(`[gemini] Logo corner sample failed (keeping patch): ${err.message}`);
+    console.warn(`[gemini] Logo corner sample failed (no patch override): ${err.message}`);
   }
 
   const patchW = logoW + PADDING * 2;
   const patchH = logoH + PADDING * 2;
   const patchX = width  - patchW - 16;
   const patchY = height - patchH - 16;
-
-  // If the logo has its own background, place it directly on the image with
-  // no padding patch behind it. We still inset it from the corner by the
-  // same 16px the patch path uses, so the visual position is consistent.
-  if (logoHasOwnBackground) {
-    const logoLeft = width  - logoW - 16;
-    const logoTop  = height - logoH - 16;
-    const composited = await sharp(imageBuffer)
-      .composite([
-        { input: logoResized, left: logoLeft, top: logoTop, blend: 'over' }
-      ])
-      .png()
-      .toBuffer();
-    return composited.toString('base64');
-  }
 
   // Analyse corner brightness to determine patch colour
   const cornerPixels = await sharp(imageBuffer)
