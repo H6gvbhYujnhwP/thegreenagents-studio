@@ -10,6 +10,7 @@ import algorithmRoutes from './routes/algorithm.js';
 import portalAuthRoutes from './routes/portal-auth.js';
 import portalAdminRoutes from './routes/portal-admin.js';
 import portalRoutes from './routes/portal.js';
+import idyqBridgeRoutes from './routes/idyq-bridge.js';
 import { startPoller } from './services/imap-poller.js';
 import { startClassifier } from './services/classify-replies.js';
 import { startDripTicker } from './services/drip-ticker.js';
@@ -40,14 +41,15 @@ process.on('unhandledRejection', (reason) => {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-app.use('/api/auth',      authRoutes);
-app.use('/api/clients',   clientRoutes);
-app.use('/api/campaigns', campaignRoutes);
-app.use('/api/email',     emailRoutes);
-app.use('/api/algorithm', algorithmRoutes);
-app.use('/api/portal',    portalAuthRoutes);   // customer-portal auth (login/logout/check/reset)
-app.use('/api/portal',    portalRoutes);       // customer-portal data (posts, inbox, campaigns)
+app.use('/api/auth',        authRoutes);
+app.use('/api/clients',     clientRoutes);
+app.use('/api/campaigns',   campaignRoutes);
+app.use('/api/email',       emailRoutes);
+app.use('/api/algorithm',   algorithmRoutes);
+app.use('/api/portal',      portalAuthRoutes);   // customer-portal auth (login/logout/check/reset)
+app.use('/api/portal',      portalRoutes);       // customer-portal data (posts, inbox, campaigns)
 app.use('/api/portal-admin', portalAdminRoutes); // admin-side portal management (requireAuth)
+app.use('/api/idyq-bridge', idyqBridgeRoutes);   // App integration: mints bridge tickets for the IDYQ admin embed (requireAuth)
 
 const distPath = join(__dirname, '../dist');
 app.use(express.static(distPath));
@@ -63,6 +65,8 @@ app.listen(PORT, () => {
   console.log(`[env] AWS_SECRET_ACCESS_KEY: ${process.env.AWS_SECRET_ACCESS_KEY                         ? 'SET ✓' : 'MISSING ✗'}`);
   console.log(`[env] AWS_SES_REGION:        ${process.env.AWS_SES_REGION || 'eu-north-1 (default)'}`);
   console.log(`[env] SES_CONFIGURATION_SET: ${process.env.SES_CONFIGURATION_SET || 'NOT SET (account default config set will apply)'}`);
+  console.log(`[env] IDYQ_BRIDGE_SECRET:    ${process.env.IDYQ_BRIDGE_SECRET                            ? 'SET ✓' : 'MISSING ✗ (IDYQ admin embed will not work)'}`);
+  console.log(`[env] IDYQ_BASE_URL:         ${process.env.IDYQ_BASE_URL || 'https://idoyourquotes.com (default)'}`);
   const ct = cryptoSelfTest();
   console.log(`[env] MAILBOX_ENCRYPTION_KEY: ${ct.ok ? 'SET ✓ (verified)' : `MISSING/INVALID — ${ct.reason}`}`);
   console.log(`[env] DB_PATH:               ${process.env.DB_PATH || '(default)'}`);

@@ -5,6 +5,7 @@ import NewClientModal from './NewClientModal.jsx';
 import ClientDetail from './ClientDetail.jsx';
 import EmailSection from './EmailSection.jsx';
 import PortalAdmin from './PortalAdmin.jsx';
+import IDYQAdmin from './apps/IDYQAdmin.jsx';
 
 export default function Dashboard({ onLogout }) {
   const [clients, setClients]           = useState([]);
@@ -98,6 +99,24 @@ export default function Dashboard({ onLogout }) {
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
         <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
         <PortalAdmin />
+      </div>
+    );
+  }
+
+  // ── App integration: IDYQ admin embed ─────────────────────────────────────
+  // Mounts the IdoYourQuotes admin panel inside Studio via an iframe. Auth
+  // happens via the bridge endpoint (server/routes/idyq-bridge.js mints a
+  // short-lived signed ticket; idoyourquotes.com/admin-bridge consumes it
+  // and sets a session cookie for the dedicated bridge admin user). When
+  // the view changes away from 'apps-idyq' the component unmounts; when it
+  // comes back, IDYQAdmin remounts and fetches a fresh ticket. That's the
+  // right behaviour — old tickets are 60s expiry so we always want a new
+  // one on re-entry.
+  if (view === 'apps-idyq') {
+    return (
+      <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+        <IDYQAdmin />
       </div>
     );
   }

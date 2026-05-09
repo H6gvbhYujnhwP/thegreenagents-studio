@@ -63,6 +63,16 @@ export default function Sidebar({ onLogout, activeView, onNavigate }) {
         <div style={SECTION}>Customer Portal</div>
         <SubItem id="portal-customers"    label="Portal Customers" active={activeView==='portal-customers'}  onNavigate={onNavigate} icon={<PortalIcon />} />
 
+        <hr style={DIVIDER} />
+
+        {/* App integration — external admin panels embedded inside Studio.
+            Each entry mounts an iframe of the target app's admin URL. Auth is
+            handled by a shared-secret bridge (see server/routes/idyq-bridge.js
+            and the matching /admin-bridge endpoint on the target app's server)
+            so no double-login is required. */}
+        <div style={SECTION}>App</div>
+        <SubItem id="apps-idyq"           label="IDYQ"             active={activeView==='apps-idyq'}         onNavigate={onNavigate} icon={<IdyqIcon />} />
+
       </div>
 
       <div style={{ padding:'14px 16px', borderTop:'0.5px solid rgba(255,255,255,0.1)' }}>
@@ -143,6 +153,17 @@ function PortalIcon() {
     <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
       <path d="M3 1.5A.5.5 0 013.5 1h6a.5.5 0 01.5.5v3.5h-1V2H4v12h5v-3h1v3.5a.5.5 0 01-.5.5h-6a.5.5 0 01-.5-.5v-13z"/>
       <path d="M11.5 5.5a.5.5 0 01.354.146l2.5 2.5a.5.5 0 010 .708l-2.5 2.5a.5.5 0 11-.708-.708L13.293 8.5H6.5a.5.5 0 010-1h6.793l-1.647-1.646A.5.5 0 0111.5 5.5z"/>
+    </svg>
+  );
+}
+
+function IdyqIcon() {
+  // Document-with-checkmark icon — IDYQ is a quoting platform and its logo
+  // theme is a checkmark over a document. Same hand-rolled SVG style as the
+  // other sidebar icons (single path, currentColor fill, 16x16 viewBox).
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M3.5 1.5h5.79L13 5.21V14a.5.5 0 01-.5.5h-9A.5.5 0 013 14V2a.5.5 0 01.5-.5zm.5 1V13.5h8V5.71L9 2.5H4zm5.5 0v2.5h2.5L9.5 2.5zM5.4 8.6l-.7.7 2 2 4-4-.7-.7-3.3 3.3-1.3-1.3z"/>
     </svg>
   );
 }
