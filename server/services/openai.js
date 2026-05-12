@@ -27,6 +27,31 @@ const anthropic = new Anthropic({
 
 const POSTS_PER_CAMPAIGN = 12;
 
+// ─── Robust JSON parsing for Claude responses ────────────────────────────────
+// Tries three strategies in order:
+//   1. Direct JSON.parse on the (markdown-fence-stripped) raw text
+//   2. Greedy outer-object extraction via /\{[\s\S]*\}/ and re-parse
+//   3. Repair pass — strips stray non-JSON tokens that the model occasionally
+//      hallucinates between fields (e.g. the literal word "Menu" appearing
+//      between two key-value pairs on the Manson Group 2026-05-12 run with
+//      stop_reason="end_turn"). The regex matches: between `,` and the next
+//      `"key":`, any non-quote/non-brace/non-bracket/non-comma token, and
+//      removes it. Conservative — only fires in JSON-structural positions
+//      where a key opener should follow a comma, so legitimate string values
+//      containing commas can't be damaged.
+// Returns the parsed object or null if all strategies fail.
+function tryParseClaudeJSON(raw) {
+  try { return JSON.parse(raw); } catch (_) {}
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try { return JSON.parse(match[0]); } catch (_) {}
+  try {
+    const repaired = match[0].replace(/,(\s*)[^"{}\[\],\s][^",{}\[\]]*?(\s+)"/g, ',$1$2"');
+    return JSON.parse(repaired);
+  } catch (_) {}
+  return null;
+}
+
 // ─── Stage 3 LinkedIn Content Agent System Prompt ────────────────────────────
 // This is cached by Anthropic's prompt caching — sent once, reused across
 // all posts in a campaign at ~90% token cost reduction.
@@ -320,66 +345,106 @@ For text posts and video scripts, carousel_slides must be null.`
 
   // Use streaming to avoid the SDK 10-minute non-streaming timeout.
   // stream.finalMessage() collects all streamed chunks and returns the complete message.
-  let fullResponse;
-  try {
-    const stream = anthropic.messages.stream({
-      model: 'claude-sonnet-4-5',
-      max_tokens: 64000,
-      system: [
-        {
-          type: 'text',
-          text: STAGE3_SYSTEM_PROMPT,
-          cache_control: { type: 'ephemeral' }
-        }
-      ],
-      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-      messages: [{ role: 'user', content: userContent }]
-    }, {
-      headers: { 'anthropic-beta': 'web-search-2025-03-05' }
-    });
-
-    fullResponse = await stream.finalMessage();
-    console.log('[claude] generatePosts stream complete — stop_reason:', fullResponse.stop_reason);
-  } catch (err) {
-    console.warn('[claude] Streaming with web search failed, retrying without:', err.message);
-    onProgress('Generating posts from RAG (no live search)...');
-    const stream = anthropic.messages.stream({
-      model: 'claude-sonnet-4-5',
-      max_tokens: 64000,
-      system: [
-        {
-          type: 'text',
-          text: STAGE3_SYSTEM_PROMPT,
-          cache_control: { type: 'ephemeral' }
-        }
-      ],
-      messages: [{ role: 'user', content: userContent }]
-    });
-    fullResponse = await stream.finalMessage();
-    console.log('[claude] generatePosts fallback stream complete — stop_reason:', fullResponse.stop_reason);
+  //
+  // Wrapped in a helper because we may need to call it twice — if Claude's
+  // first response can't be parsed as JSON (rare model anomaly: stray tokens
+  // hallucinated into the middle of valid JSON, e.g. the literal word "Menu"
+  // appearing between two field separators on the Manson Group run in
+  // 2026-05-12 logs — `stop_reason: end_turn` so the model THOUGHT it had
+  // finished, but the output wasn't parseable). On retry we tighten the
+  // "respond ONLY with JSON" instruction, which is usually enough.
+  async function callClaudeForPosts(extraInstruction) {
+    const userContentForCall = extraInstruction
+      ? [
+          ...userContent,
+          { type: 'text', text: extraInstruction }
+        ]
+      : userContent;
+    try {
+      const stream = anthropic.messages.stream({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 64000,
+        system: [
+          {
+            type: 'text',
+            text: STAGE3_SYSTEM_PROMPT,
+            cache_control: { type: 'ephemeral' }
+          }
+        ],
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+        messages: [{ role: 'user', content: userContentForCall }]
+      }, {
+        headers: { 'anthropic-beta': 'web-search-2025-03-05' }
+      });
+      const r = await stream.finalMessage();
+      console.log('[claude] generatePosts stream complete — stop_reason:', r.stop_reason);
+      return r;
+    } catch (err) {
+      console.warn('[claude] Streaming with web search failed, retrying without:', err.message);
+      onProgress('Generating posts from RAG (no live search)...');
+      const stream = anthropic.messages.stream({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 64000,
+        system: [
+          {
+            type: 'text',
+            text: STAGE3_SYSTEM_PROMPT,
+            cache_control: { type: 'ephemeral' }
+          }
+        ],
+        messages: [{ role: 'user', content: userContentForCall }]
+      });
+      const r = await stream.finalMessage();
+      console.log('[claude] generatePosts fallback stream complete — stop_reason:', r.stop_reason);
+      return r;
+    }
   }
 
-  // Extract the final text response
-  const textBlock = fullResponse.content.find(b => b.type === 'text');
-  if (!textBlock) throw new Error('Claude returned no text content');
+  // Try parse strategies in order of strictness (delegated to module-level
+  // tryParseClaudeJSON — see header comment for the strategy list and the
+  // Manson 2026-05-12 case the repair pass was designed for).
 
-  onProgress('Claude finished writing — parsing posts...');
+  let fullResponse;
+  let result = null;
+  let lastRaw = '';
 
-  // Strip any markdown fences if present
-  const raw = textBlock.text.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const extra = attempt === 2
+      ? 'IMPORTANT: your previous response was not valid JSON. Respond ONLY with the JSON object specified above. Do not include any other text, words, prose, or comments — not before the JSON, not after it, and not anywhere inside the JSON structure. Every character must be part of valid JSON.'
+      : null;
+    fullResponse = await callClaudeForPosts(extra);
 
-  let result;
-  try {
-    result = JSON.parse(raw);
-  } catch (err) {
-    // Try to extract JSON object from the response
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (match) {
-      try {
-        result = JSON.parse(match[0]);
-      } catch (_) {}
+    const textBlock = fullResponse.content.find(b => b.type === 'text');
+    if (!textBlock) {
+      console.warn(`[claude] generatePosts attempt ${attempt}: no text content in response`);
+      continue;
     }
-    if (!result) throw new Error(`Claude did not return valid JSON: ${raw.slice(0, 300)}`);
+
+    onProgress(attempt === 1
+      ? 'Claude finished writing — parsing posts...'
+      : 'Retrying parse with stricter JSON instruction...');
+
+    // Strip any markdown fences if present
+    const raw = textBlock.text.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
+    lastRaw = raw;
+
+    result = tryParseClaudeJSON(raw);
+    if (result) {
+      if (attempt > 1) onProgress(`✓ Recovered on retry (attempt ${attempt}).`);
+      break;
+    }
+
+    // Parse failed. Log the FULL raw response (not a 300-char slice) so we
+    // can see exactly what the model produced and improve the repair pass
+    // later if a new anomaly type appears.
+    console.warn(`[claude] generatePosts attempt ${attempt} — JSON parse failed. Raw response (${raw.length} chars):\n${raw}`);
+    if (attempt < 2) {
+      onProgress(`Claude's response wasn't valid JSON — retrying once with a stricter instruction…`);
+    }
+  }
+
+  if (!result) {
+    throw new Error(`Claude did not return valid JSON after 2 attempts. First 1000 chars of last response: ${lastRaw.slice(0, 1000)}`);
   }
 
   if (!result.posts || result.posts.length === 0) {
@@ -552,11 +617,10 @@ Respond ONLY with valid JSON, no preamble, no markdown fences:
   if (!textBlock) throw new Error('Claude returned no text for single post rewrite');
 
   const raw = textBlock.text.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
-  let result;
-  try {
-    result = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`Claude did not return valid JSON for single post: ${raw.slice(0, 200)}`);
+  const result = tryParseClaudeJSON(raw);
+  if (!result) {
+    console.warn(`[claude] regenerateSinglePost — JSON parse failed. Raw response (${raw.length} chars):\n${raw}`);
+    throw new Error(`Claude did not return valid JSON for single post. First 500 chars: ${raw.slice(0, 500)}`);
   }
 
   if (!result.linkedin_post_text) throw new Error('Claude returned no post text');
