@@ -561,14 +561,23 @@ function UsersPanel({ customer, users, onChange }) {
 
 function UserRow({ user, onChange, onResetShown }) {
   const [busy, setBusy] = useState(null);
+  const [resetOpen, setResetOpen] = useState(false);
 
-  async function reset() {
-    if (!confirm(`Reset ${user.username}'s password?\n\nThis kills any active sign-ins they have and shows you a new temporary password to give them.`)) return;
+  // Called from ResetPasswordModal once the admin has either typed a password
+  // or chosen to generate a random one. `chosenPassword` is null for the
+  // random path (backend generates), or a string for the admin-chosen path.
+  async function submitReset(chosenPassword) {
     setBusy('reset');
     try {
-      const r = await fetch(`/api/portal-admin/users/${user.id}/reset-password`, { method:'POST' });
+      const body = chosenPassword ? JSON.stringify({ new_password: chosenPassword }) : undefined;
+      const r = await fetch(`/api/portal-admin/users/${user.id}/reset-password`, {
+        method:'POST',
+        headers: chosenPassword ? { 'Content-Type': 'application/json' } : undefined,
+        body,
+      });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      setResetOpen(false);
       onResetShown({
         username: user.username,
         temporary_password: d.temporary_password,
@@ -613,13 +622,21 @@ function UserRow({ user, onChange, onResetShown }) {
         {user.last_login_at ? formatRelative(user.last_login_at) : <em>Never</em>}
       </div>
       <div style={{ display:'flex', gap:6, justifyContent:'flex-end' }}>
-        <button onClick={reset}  disabled={busy} style={btnSecondary(busy === 'reset')}>
+        <button onClick={()=>setResetOpen(true)} disabled={busy} style={btnSecondary(busy === 'reset')}>
           {busy === 'reset' ? 'Resetting…' : 'Reset password'}
         </button>
         <button onClick={remove} disabled={busy} style={{ ...btnSecondary(busy === 'delete'), color:DANGER, borderColor:'#f0c4c4' }}>
           {busy === 'delete' ? 'Removing…' : 'Remove'}
         </button>
       </div>
+      {resetOpen && (
+        <ResetPasswordModal
+          username={user.username}
+          busy={busy === 'reset'}
+          onSubmit={submitReset}
+          onClose={()=>{ if (busy !== 'reset') setResetOpen(false); }}
+        />
+      )}
     </div>
   );
 }
@@ -693,6 +710,101 @@ function AddUserModal({ customerId, existingUsernames, onClose, onCreated }) {
         <button onClick={submit} disabled={busy || !username.trim()} style={btnPrimary(busy || !username.trim())}>
           {busy ? 'Creating…' : 'Create user'}
         </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+// ── ResetPasswordModal ──────────────────────────────────────────────────────
+// Used by UserRow when admin clicks "Reset password". Lets the admin either
+// type a new password explicitly (with show/hide toggle), or click "Generate
+// random" to fall back to the original behaviour (backend generates one).
+// On submit:
+//   - If admin typed a password, sends { new_password: "<typed>" } and the
+//     backend uses that exact value after validating min-length 8.
+//   - If admin clicked "Generate random", sends no body — backend generates.
+// In both cases the TempPasswordModal opens next showing the resulting
+// password so the admin can copy it to give to the customer.
+function ResetPasswordModal({ username, busy, onSubmit, onClose }) {
+  const [pw, setPw] = useState('');
+  const [show, setShow] = useState(false);
+  const [error, setError] = useState('');
+
+  function handleSubmit() {
+    if (busy) return;
+    if (pw.length < 8) {
+      setError('Password must be at least 8 characters.');
+      return;
+    }
+    setError('');
+    onSubmit(pw);
+  }
+
+  function handleGenerate() {
+    if (busy) return;
+    setError('');
+    onSubmit(null); // null = let backend generate
+  }
+
+  return (
+    <ModalShell title={`Reset password for ${username}`} onClose={busy ? ()=>{} : onClose}>
+      <div style={{
+        padding:'10px 12px', background:AMBER_BG, color:AMBER,
+        borderRadius:6, fontSize:12, lineHeight:1.5, marginBottom:14,
+      }}>
+        This will sign {username} out of any active sessions and replace their
+        password. You'll see the new password once on the next screen so you
+        can pass it on.
+      </div>
+
+      <div style={{ marginBottom:14 }}>
+        <div style={{ fontSize:11, fontWeight:500, color:MUTED, marginBottom:6, textTransform:'uppercase', letterSpacing:'0.04em' }}>
+          New password
+        </div>
+        <div style={{ display:'flex', gap:6 }}>
+          <input
+            type={show ? 'text' : 'password'}
+            value={pw}
+            onChange={e => { setPw(e.target.value); if (error) setError(''); }}
+            placeholder="At least 8 characters"
+            disabled={busy}
+            autoFocus
+            onKeyDown={e => { if (e.key === 'Enter') handleSubmit(); }}
+            style={{
+              flex:1, padding:'8px 10px', fontSize:13,
+              border:`0.5px solid ${error ? '#d99090' : BORDER}`,
+              borderRadius:6, fontFamily:'monospace',
+              background: busy ? '#fafaf8' : '#fff',
+              color: TEXT,
+            }}
+          />
+          <button onClick={()=>setShow(s=>!s)} type="button" style={{
+            ...btnSecondary(),
+            padding:'8px 12px', fontSize:11,
+          }}>
+            {show ? 'Hide' : 'Show'}
+          </button>
+        </div>
+        {error && (
+          <div style={{ fontSize:11, color:DANGER, marginTop:6 }}>{error}</div>
+        )}
+      </div>
+
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:8 }}>
+        <button onClick={handleGenerate} disabled={busy} type="button" style={{
+          ...btnSecondary(),
+          fontSize:11,
+        }}>
+          Generate random instead
+        </button>
+        <div style={{ display:'flex', gap:8 }}>
+          <button onClick={onClose} disabled={busy} type="button" style={btnSecondary()}>
+            Cancel
+          </button>
+          <button onClick={handleSubmit} disabled={busy || pw.length < 8} type="button" style={btnPrimary(busy)}>
+            {busy ? 'Resetting…' : 'Set password'}
+          </button>
+        </div>
       </div>
     </ModalShell>
   );

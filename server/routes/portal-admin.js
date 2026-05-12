@@ -523,12 +523,30 @@ router.delete('/users/:id', (req, res) => {
 });
 
 // ─── 11. POST /api/portal-admin/users/:id/reset-password ──────────────────────
+// Body (optional): { new_password: string }
+//   - If `new_password` is provided, it's used as the new password (admin-chosen flow).
+//     Must be at least 8 characters to match portal-auth signup/reset validation.
+//   - If absent or empty, a random temporary password is generated (original behaviour).
+// In both cases the plaintext is returned to the admin once so it can be given to
+// the user. The response `kind` field is 'admin_chosen' or 'random' so the modal
+// can render slightly different copy.
 router.post('/users/:id/reset-password', async (req, res) => {
   const row = db.prepare(`SELECT * FROM client_users WHERE id = ?`).get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
 
-  const tempPw = genTempPassword();
-  const hash   = await bcrypt.hash(tempPw, BCRYPT_COST);
+  const supplied = typeof req.body?.new_password === 'string' ? req.body.new_password : '';
+  let newPw, kind;
+  if (supplied) {
+    if (supplied.length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters' });
+    }
+    newPw = supplied;
+    kind  = 'admin_chosen';
+  } else {
+    newPw = genTempPassword();
+    kind  = 'random';
+  }
+  const hash = await bcrypt.hash(newPw, BCRYPT_COST);
 
   db.transaction(() => {
     db.prepare(`
@@ -543,7 +561,8 @@ router.post('/users/:id/reset-password', async (req, res) => {
 
   res.json({
     ok: true,
-    temporary_password: tempPw,
+    temporary_password: newPw,
+    kind,
   });
 });
 
