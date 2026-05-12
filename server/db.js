@@ -52,6 +52,16 @@ db.exec(`
 // ── Logo column migration (added for logo overlay feature) ──────────────────
 try { db.exec('ALTER TABLE clients ADD COLUMN logo_url TEXT'); } catch (_) {}
 
+// ── content_rules column migration ──────────────────────────────────────────
+// Customer-defined "refine my posts" rules — short numbered constraints the
+// customer types in their portal that override the LinkedIn algorithm and the
+// RAG document. Examples: "Don't mention machinery breakdowns", "Don't write
+// about stress". Stored as JSON array of {id, text} items. NULL or empty
+// array = no rules, post generation proceeds normally. Read fresh at every
+// generate/regen call so cache invalidation is automatic when the customer
+// edits or deletes a rule — no Anthropic prompt-cache TTL to wait out.
+try { db.exec('ALTER TABLE clients ADD COLUMN content_rules TEXT'); } catch (_) {}
+
 // ── deployed_by column migration ──────────────────────────────────────────────
 // Records which side of the platform deployed a finished campaign:
 //   'admin'  — admin clicked the deploy-to-Supergrow button on the review screen

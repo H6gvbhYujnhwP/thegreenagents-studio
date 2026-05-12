@@ -19,6 +19,12 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requirePortalSession } from './portal-auth.js';
 import { regenerateSinglePost } from '../services/openai.js';
+import {
+  parseRules,
+  validatePostAgainstRules,
+  RULE_MAX_LENGTH,
+  RULES_MAX_COUNT,
+} from '../services/content-rules.js';
 import { generateImage } from '../services/gemini.js';
 import { uploadImageToR2 } from '../services/r2.js';
 import { queuePost } from '../services/supergrow.js';
@@ -83,6 +89,11 @@ function projectPost(post, index) {
   const day  = post.suggested_day  || '';
   const time = post.suggested_time || '';
   const schedule = (day || time) ? `${day} ${time}`.trim() : `Post ${index + 1}`;
+  // validation_warnings: array of { ruleId, ruleText, reason } objects attached
+  // by the generation/regen pipeline when the AI couldn't fully obey the
+  // customer's refine-my-posts rules. Null when the post passes cleanly or
+  // when no rules exist for this customer. Surfaced to the portal so the
+  // customer sees which rule was likely violated and can adjust their rules.
   return {
     id:                post.id || `post_${index + 1}`,
     order:             index + 1,
@@ -99,6 +110,9 @@ function projectPost(post, index) {
     approved:          !!post.client_approved_at,
     approved_at:       post.client_approved_at || null,
     approved_by:       post.client_approved_by_user_id || null,
+    validation_warnings: Array.isArray(post.validation_warnings) && post.validation_warnings.length > 0
+      ? post.validation_warnings
+      : null,
   };
 }
 
@@ -369,6 +383,20 @@ router.post('/posts/:id/regenerate', async (req, res) => {
     return res.status(502).json({ error: `Text regeneration failed: ${err.message}` });
   }
 
+  // 1b. Validate the rewrite against the customer's refine-my-posts rules.
+  //     Rules are read FRESH from the client row so edits/deletes apply
+  //     immediately. Failing open on validation errors (network etc.) — see
+  //     content-rules.js for the rationale.
+  const rules = parseRules(client);
+  let validationWarnings;
+  if (rules.length > 0) {
+    const check = await validatePostAgainstRules(
+      rewritten.linkedin_post_text || post.linkedin_post_text,
+      rules
+    );
+    validationWarnings = check.ok ? undefined : check.violations;
+  }
+
   // 2. Regenerate the image. We do this AFTER text so the new image_prompt
   //    (if the model returned one) is used. Image failure is non-fatal — the
   //    post still saves with the new text and the old image stays.
@@ -381,6 +409,9 @@ router.post('/posts/:id/regenerate', async (req, res) => {
     // Drop any prior approval — customer must re-review the new content.
     client_approved_at: null,
     client_approved_by_user_id: null,
+    // Cleared (undefined) when rules pass — wipes any stale warning from a
+    // previous generation. Set to the violation list when rules fail.
+    validation_warnings: validationWarnings,
   };
 
   try {
@@ -463,13 +494,30 @@ router.post('/posts/:id/regenerate-text', async (req, res) => {
     return res.status(502).json({ error: `Text regeneration failed: ${err.message}` });
   }
 
+  // Validate the rewrite against the customer's refine-my-posts rules.
+  // Rules are read FRESH from the client row (which was just fetched above),
+  // so any edit/delete the customer made to their rules takes effect on the
+  // very next regen with no caching window.
+  const rules = parseRules(client);
+  let validationWarnings;
+  if (rules.length > 0) {
+    const check = await validatePostAgainstRules(
+      rewritten.linkedin_post_text || post.linkedin_post_text,
+      rules
+    );
+    validationWarnings = check.ok ? undefined : check.violations;
+  }
+
   // Update text + image_prompt, drop approval. Image stays as-is.
+  // validation_warnings: set when rules were violated, cleared otherwise so a
+  // stale warning from a previous generation doesn't persist after a clean regen.
   const updatedPost = {
     ...post,
     linkedin_post_text: rewritten.linkedin_post_text || post.linkedin_post_text,
     image_prompt:       rewritten.image_prompt       || post.image_prompt,
     client_approved_at: null,
     client_approved_by_user_id: null,
+    validation_warnings: validationWarnings, // undefined wipes the field on serialization
   };
   posts[postIndex] = updatedPost;
   writeCampaignPosts(campaign.id, posts);
@@ -1054,6 +1102,68 @@ router.get('/campaigns', (req, res) => {
     }),
     not_subscribed: false,
   });
+});
+
+// ─── GET /api/portal/content-rules ────────────────────────────────────────────
+// Returns the customer's "refine my posts" rules — short numbered constraints
+// that override the LinkedIn algorithm and RAG document.
+// Returns { rules: [{ id, text }, ...] }. Empty array if the customer has none
+// or doesn't have LinkedIn enabled (we don't 404 in that case — the UI is
+// served the empty list and the modal opens normally so the customer can add
+// their first rule).
+router.get('/content-rules', (req, res) => {
+  const linkedinClientId = resolveLinkedinClientId(req.portalClient.id);
+  if (!linkedinClientId) return res.json({ rules: [] });
+
+  const client = db.prepare(`SELECT content_rules FROM clients WHERE id = ?`).get(linkedinClientId);
+  if (!client) return res.json({ rules: [] });
+
+  res.json({ rules: parseRules(client) });
+});
+
+// ─── PUT /api/portal/content-rules ────────────────────────────────────────────
+// Replaces the customer's rules with the supplied array. Body:
+//   { rules: [{ id?: string, text: string }, ...] }
+// - Each rule.text must be a non-empty string ≤ RULE_MAX_LENGTH chars
+// - Maximum RULES_MAX_COUNT rules
+// - Whitespace-only rules and duplicates (same text trimmed) are dropped
+// - Missing/non-string ids are regenerated server-side so the array is stable
+// Returns the canonical saved list so the UI can update from the server-truth
+// state instead of guessing.
+router.put('/content-rules', (req, res) => {
+  const linkedinClientId = resolveLinkedinClientId(req.portalClient.id);
+  if (!linkedinClientId) {
+    return res.status(403).json({ error: 'LinkedIn service not enabled for this customer' });
+  }
+
+  const incoming = Array.isArray(req.body?.rules) ? req.body.rules : null;
+  if (!incoming) return res.status(400).json({ error: 'Body must include { rules: [...] }' });
+
+  const seen = new Set();
+  const cleaned = [];
+  for (const r of incoming) {
+    if (typeof r?.text !== 'string') continue;
+    const text = r.text.trim();
+    if (!text) continue;
+    if (text.length > RULE_MAX_LENGTH) {
+      return res.status(400).json({ error: `Each rule must be at most ${RULE_MAX_LENGTH} characters` });
+    }
+    const dedupKey = text.toLowerCase();
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    cleaned.push({
+      id:   (typeof r.id === 'string' && r.id) ? r.id : uuid(),
+      text,
+    });
+    if (cleaned.length >= RULES_MAX_COUNT) break; // hard cap
+  }
+
+  db.prepare(`UPDATE clients SET content_rules = ? WHERE id = ?`).run(
+    JSON.stringify(cleaned),
+    linkedinClientId,
+  );
+
+  res.json({ rules: cleaned });
 });
 
 export default router;

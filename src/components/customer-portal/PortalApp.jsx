@@ -586,10 +586,27 @@ function PortalChrome({ user, client, services, onLogout }) {
             <div style={{ fontSize:17, fontWeight:500, color:TEXT }}>{client?.name}</div>
             <div style={{ fontSize:11, color:MUTED }}>{client?.audience}</div>
           </div>
-          <div style={{
-            marginLeft:'auto', padding:'5px 10px', fontSize:11, color:MUTED,
-            border:`0.5px solid ${BORDER}`, borderRadius:999,
-          }}>{user.email || user.username}</div>
+          {/* "Refine my posts" — customer-facing override-rules editor.
+              Only shown when LinkedIn is enabled for this customer, because
+              the rules are LinkedIn-post-specific. The button opens a modal
+              (RefinePostsModal) for adding/editing/deleting numbered
+              constraints. Future generations apply the latest rules; existing
+              posts in awaiting_approval don't change. */}
+          {svc.linkedin?.state === 'enabled' && (
+            <div style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:10 }}>
+              <RefinePostsButton />
+              <div style={{
+                padding:'5px 10px', fontSize:11, color:MUTED,
+                border:`0.5px solid ${BORDER}`, borderRadius:999,
+              }}>{user.email || user.username}</div>
+            </div>
+          )}
+          {svc.linkedin?.state !== 'enabled' && (
+            <div style={{
+              marginLeft:'auto', padding:'5px 10px', fontSize:11, color:MUTED,
+              border:`0.5px solid ${BORDER}`, borderRadius:999,
+            }}>{user.email || user.username}</div>
+          )}
         </header>
 
         <div style={{ flex:1, overflow:'auto', padding:'20px 22px' }}>
@@ -732,6 +749,248 @@ function NavItem({ label, active, onClick, dim, suffix }) {
       )}
     </button>
   );
+}
+
+// ── REFINE MY POSTS ──────────────────────────────────────────────────────────
+// The "Refine my posts" button + modal that live in the portal header.
+// Customers add numbered constraints ("Don't mention machinery breakdowns",
+// "Don't talk about stress") that override the LinkedIn algorithm and the
+// RAG document. Rules apply to FUTURE post generation only — existing posts
+// keep what they have. Edits/deletes invalidate any cached prompt context on
+// the backend (rules are read fresh on every generate/regen call).
+//
+// Limits: max 50 rules, each up to 500 characters. Server-enforced via the
+// PUT /api/portal/content-rules endpoint; UI enforces too so the user doesn't
+// hit a 400 by accident.
+const REFINE_RULE_MAX_LEN    = 500;
+const REFINE_RULES_MAX_COUNT = 50;
+
+function RefinePostsButton() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOpen(true)} style={{
+        padding:'6px 12px', fontSize:11, fontWeight:500,
+        background:GREEN_BG, color:GREEN,
+        border:`0.5px solid ${GREEN}33`, borderRadius:999, cursor:'pointer',
+        display:'flex', alignItems:'center', gap:6,
+      }}>
+        <span style={{ fontSize:12 }}>✦</span>
+        Refine my posts
+      </button>
+      {open && <RefinePostsModal onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+function RefinePostsModal({ onClose }) {
+  // Lifecycle: null = loading, [] = loaded empty, [...] = loaded with rules.
+  const [rules, setRules]   = useState(null);
+  const [busy, setBusy]     = useState(false);
+  const [error, setError]   = useState(null);
+  const [draft, setDraft]   = useState(''); // new-rule input
+
+  useEffect(() => {
+    fetch('/api/portal/content-rules', { credentials:'include' })
+      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+      .then(d => setRules(Array.isArray(d.rules) ? d.rules : []))
+      .catch(e => { setError(`Couldn't load rules: ${e}`); setRules([]); });
+  }, []);
+
+  function addRule() {
+    const text = draft.trim();
+    if (!text) return;
+    if (text.length > REFINE_RULE_MAX_LEN) {
+      setError(`Each rule can be at most ${REFINE_RULE_MAX_LEN} characters.`);
+      return;
+    }
+    if ((rules || []).length >= REFINE_RULES_MAX_COUNT) {
+      setError(`You can have at most ${REFINE_RULES_MAX_COUNT} rules.`);
+      return;
+    }
+    if ((rules || []).some(r => r.text.trim().toLowerCase() === text.toLowerCase())) {
+      setError('That rule already exists.');
+      return;
+    }
+    setError(null);
+    setRules(prev => [...(prev || []), { id: cryptoRandomId(), text }]);
+    setDraft('');
+  }
+
+  function updateRule(id, text) {
+    setRules(prev => (prev || []).map(r => r.id === id ? { ...r, text } : r));
+  }
+
+  function deleteRule(id) {
+    setRules(prev => (prev || []).filter(r => r.id !== id));
+  }
+
+  async function save() {
+    if (busy) return;
+    // Validate before sending.
+    const cleaned = (rules || [])
+      .map(r => ({ id: r.id, text: (r.text || '').trim() }))
+      .filter(r => r.text.length > 0);
+    for (const r of cleaned) {
+      if (r.text.length > REFINE_RULE_MAX_LEN) {
+        setError(`Each rule can be at most ${REFINE_RULE_MAX_LEN} characters.`);
+        return;
+      }
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await fetch('/api/portal/content-rules', {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rules: cleaned }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      onClose();
+    } catch (e) {
+      setError(`Couldn't save: ${e.message}`);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div onClick={busy ? null : onClose} style={{
+      position:'fixed', inset:0, background:'rgba(20,20,18,0.45)',
+      display:'flex', alignItems:'center', justifyContent:'center', zIndex:9999, padding:24,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background:CARD, borderRadius:12, padding:'24px 28px',
+        width:'min(640px, 100%)', maxHeight:'80vh', display:'flex', flexDirection:'column',
+        boxShadow:'0 8px 28px rgba(0,0,0,0.18)',
+      }}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6 }}>
+          <div style={{ fontSize:16, fontWeight:500, color:TEXT }}>Refine my posts</div>
+          <button onClick={busy ? null : onClose} disabled={busy} style={{
+            background:'transparent', border:'none', fontSize:18, color:MUTED, cursor:busy?'default':'pointer', padding:'2px 6px',
+          }} aria-label="Close">×</button>
+        </div>
+        <div style={{ fontSize:12, color:MUTED, lineHeight:1.5, marginBottom:14 }}>
+          Add rules that tell the AI what to avoid in your LinkedIn posts.
+          Each rule overrides the LinkedIn algorithm and your RAG document.
+          Changes apply to future posts — your existing posts won't change.
+        </div>
+
+        {error && (
+          <div style={{
+            padding:'8px 12px', background:'#fbe9e9', color:DANGER,
+            borderRadius:6, fontSize:12, marginBottom:12,
+          }}>{error}</div>
+        )}
+
+        <div style={{ overflow:'auto', flex:1, marginBottom:14, paddingRight:4 }}>
+          {rules === null ? (
+            <div style={{ fontSize:12, color:MUTED, padding:'12px 0' }}>Loading…</div>
+          ) : rules.length === 0 ? (
+            <div style={{
+              fontSize:12, color:MUTED, padding:'18px 0',
+              borderTop:`0.5px dashed ${BORDER}`, borderBottom:`0.5px dashed ${BORDER}`,
+              textAlign:'center',
+            }}>
+              No rules yet. Add your first below.
+            </div>
+          ) : (
+            rules.map((r, idx) => (
+              <RefineRuleRow
+                key={r.id}
+                number={idx + 1}
+                rule={r}
+                onChange={text => updateRule(r.id, text)}
+                onDelete={() => deleteRule(r.id)}
+                disabled={busy}
+              />
+            ))
+          )}
+        </div>
+
+        <div style={{ display:'flex', gap:8, marginBottom:16 }}>
+          <input
+            type="text"
+            value={draft}
+            onChange={e => { setDraft(e.target.value); if (error) setError(null); }}
+            onKeyDown={e => { if (e.key === 'Enter') addRule(); }}
+            placeholder={'e.g. "Don\'t mention our machines breaking down"'}
+            disabled={busy || (rules || []).length >= REFINE_RULES_MAX_COUNT}
+            style={{
+              flex:1, padding:'8px 10px', fontSize:13,
+              border:`0.5px solid ${BORDER}`, borderRadius:6,
+              background: busy ? '#fafaf8' : CARD, color:TEXT,
+            }}
+          />
+          <button onClick={addRule} disabled={busy || !draft.trim()} style={{
+            padding:'8px 14px', fontSize:12, fontWeight:500,
+            background: (busy || !draft.trim()) ? '#f4f1e8' : GREEN, color: (busy || !draft.trim()) ? MUTED : '#fff',
+            border:'none', borderRadius:6, cursor:(busy || !draft.trim())?'default':'pointer',
+          }}>Add rule</button>
+        </div>
+
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:8, borderTop:`0.5px solid ${BORDER}`, paddingTop:14 }}>
+          <div style={{ fontSize:11, color:MUTED }}>
+            {(rules || []).length} / {REFINE_RULES_MAX_COUNT} rules
+          </div>
+          <div style={{ display:'flex', gap:8 }}>
+            <button onClick={busy ? null : onClose} disabled={busy} style={{
+              padding:'8px 14px', fontSize:12, background:CARD, color:TEXT,
+              border:`0.5px solid ${BORDER}`, borderRadius:6, cursor:busy?'default':'pointer',
+            }}>Cancel</button>
+            <button onClick={save} disabled={busy || rules === null} style={{
+              padding:'8px 16px', fontSize:12, fontWeight:500,
+              background:(busy || rules === null) ? '#9FE1CB' : GREEN, color:'#fff',
+              border:'none', borderRadius:6, cursor:(busy || rules === null)?'default':'pointer',
+            }}>{busy ? 'Saving…' : 'Save'}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RefineRuleRow({ number, rule, onChange, onDelete, disabled }) {
+  return (
+    <div style={{
+      display:'flex', alignItems:'flex-start', gap:10,
+      padding:'10px 0', borderBottom:`0.5px solid ${BORDER}`,
+    }}>
+      <div style={{
+        flexShrink:0, width:24, textAlign:'right',
+        fontSize:12, color:MUTED, paddingTop:8, fontVariantNumeric:'tabular-nums',
+      }}>{number}.</div>
+      <textarea
+        value={rule.text}
+        onChange={e => onChange(e.target.value)}
+        disabled={disabled}
+        rows={1}
+        maxLength={REFINE_RULE_MAX_LEN}
+        style={{
+          flex:1, padding:'6px 10px', fontSize:13, lineHeight:1.5,
+          border:`0.5px solid ${BORDER}`, borderRadius:6,
+          background: disabled ? '#fafaf8' : CARD, color:TEXT,
+          resize:'vertical', minHeight:32, fontFamily:'inherit',
+        }}
+      />
+      <button onClick={onDelete} disabled={disabled} aria-label="Delete rule" style={{
+        flexShrink:0, padding:'6px 10px', fontSize:11, color:DANGER,
+        background:'transparent', border:`0.5px solid ${BORDER}`, borderRadius:6,
+        cursor: disabled ? 'default' : 'pointer',
+      }}>Delete</button>
+    </div>
+  );
+}
+
+// Stable client-side id generator for new rules. Server validates and may
+// regenerate, but we want a stable React `key` immediately so the row doesn't
+// re-mount on every keystroke. crypto.randomUUID is available in all
+// browsers we target (Safari 15.4+, Chrome 92+). Falls back to Math.random
+// for the rare older browser.
+function cryptoRandomId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return `r_${Math.random().toString(36).slice(2)}_${Date.now()}`;
 }
 
 // ── POSTS PAGE ───────────────────────────────────────────────────────────────
@@ -1175,6 +1434,30 @@ function PostCard({ post, totalPosts, busy, expanded, readOnly, onToggleExpand, 
 
         {post.topic && (
           <div style={{ fontSize:12, fontWeight:500, color:TEXT, marginBottom:6 }}>{post.topic}</div>
+        )}
+
+        {/* Validation warning badge — shown when the AI couldn't fully obey
+            a customer rule, even after a retry. Tells the customer which
+            rule was likely violated so they can refine their rules or
+            regenerate this post. Multiple violations shown stacked. */}
+        {Array.isArray(post.validation_warnings) && post.validation_warnings.length > 0 && (
+          <div style={{
+            background:AMBER_BG, color:AMBER, border:`0.5px solid ${AMBER}33`,
+            borderRadius:6, padding:'8px 10px', marginBottom:8, fontSize:11, lineHeight:1.5,
+          }}>
+            <div style={{ fontWeight:500, marginBottom:4 }}>
+              ⚠ This post may conflict with {post.validation_warnings.length === 1 ? 'one of your rules' : `${post.validation_warnings.length} of your rules`}.
+            </div>
+            {post.validation_warnings.map((w, i) => (
+              <div key={i} style={{ marginTop:4 }}>
+                <div style={{ fontWeight:500 }}>Rule: <span style={{ fontWeight:400 }}>{w.ruleText}</span></div>
+                {w.reason && <div style={{ opacity:0.85 }}>{w.reason}</div>}
+              </div>
+            ))}
+            <div style={{ marginTop:6, opacity:0.8 }}>
+              Edit your rules from <strong style={{ fontWeight:500 }}>Refine my posts</strong> at the top, or click <strong style={{ fontWeight:500 }}>Rewrite post</strong> below.
+            </div>
+          </div>
         )}
 
         {/* Full body, with mask-fade fallback when collapsed (admin pattern). */}

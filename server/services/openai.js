@@ -14,6 +14,12 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import {
+  parseRules,
+  renderRulesPromptBlock,
+  validatePostAgainstRules,
+  MAX_VALIDATION_ATTEMPTS,
+} from './content-rules.js';
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY
@@ -208,6 +214,9 @@ export async function generatePosts(client, onProgress, contentDna = null, algor
 
   // Build the user message — RAG is included here with cache_control
   // so it gets cached alongside the system prompt on repeated calls
+  const rules           = parseRules(client);
+  const rulesPromptBlock = renderRulesPromptBlock(rules); // null if no rules
+
   const userContent = [
     {
       type: 'text',
@@ -226,6 +235,12 @@ CLIENT RAG DOCUMENT — THE ONLY SOURCE OF TRUTH FOR THIS CAMPAIGN:`,
       // Cache the RAG content — it's large and reused across calls
       cache_control: { type: 'ephemeral' }
     },
+    // Customer "refine my posts" rules go HERE — after cached RAG, before
+    // the TASK block. Deliberately NOT cached so edits/deletes to rules
+    // take effect on the next call regardless of Anthropic's 5-min cache
+    // window. When `rules` is empty, the block is null and we skip it
+    // entirely (no "no rules" noise sent to the model).
+    ...(rulesPromptBlock ? [rulesPromptBlock] : []),
     {
       type: 'text',
       text: `
@@ -377,6 +392,63 @@ For text posts and video scripts, carousel_slides must be null.`
     console.log(`[claude] Cache hit — ${usage.cache_read_input_tokens} tokens from cache, ${usage.cache_creation_input_tokens || 0} new`);
   }
 
+  // ── Validation pass against customer override rules ────────────────────────
+  // For each post, ask Haiku 4.5 whether it violates any rule. Re-generate
+  // failed posts up to MAX_VALIDATION_ATTEMPTS - 1 times with the violated
+  // rules called out. If the second attempt still fails, attach a
+  // validation_warnings array to the post so the customer can see the
+  // flagged rule and adjust their rules document accordingly.
+  if (rules.length > 0 && Array.isArray(result.posts)) {
+    onProgress('Validating posts against your refine-my-posts rules…');
+
+    // First pass — validate all posts in parallel.
+    const checks = await Promise.all(result.posts.map(p =>
+      validatePostAgainstRules(p.linkedin_post_text || '', rules)
+    ));
+
+    // Re-generate any failures sequentially (parallel Sonnet calls would
+    // burn rate limits and provide no UX benefit at 12-post scale).
+    for (let i = 0; i < result.posts.length; i++) {
+      const check = checks[i];
+      if (check.ok) continue;
+
+      const original = result.posts[i];
+      const failedRules = rules.filter(r =>
+        check.violations.some(v => v.ruleId === r.id)
+      );
+
+      try {
+        const rewritten = await regenerateSinglePost(original, client, { failedRules });
+        const recheck   = await validatePostAgainstRules(
+          rewritten.linkedin_post_text || '',
+          rules
+        );
+        // Always accept the rewrite (it had more context — failed rules called
+        // out explicitly), but attach warnings if it STILL violates.
+        result.posts[i] = {
+          ...original,
+          linkedin_post_text: rewritten.linkedin_post_text || original.linkedin_post_text,
+          image_prompt:       rewritten.image_prompt       || original.image_prompt,
+          validation_warnings: recheck.ok ? undefined : recheck.violations,
+        };
+      } catch (err) {
+        // Rewrite failed — keep the original post and flag it.
+        console.warn(`[content-rules] Rewrite of post ${original.id} failed:`, err.message);
+        result.posts[i] = {
+          ...original,
+          validation_warnings: check.violations,
+        };
+      }
+    }
+
+    const flagged = result.posts.filter(p => Array.isArray(p.validation_warnings) && p.validation_warnings.length > 0).length;
+    if (flagged > 0) {
+      onProgress(`⚠ ${flagged} post(s) flagged after validation — review them in the portal.`);
+    } else {
+      onProgress(`✓ All posts pass the refine-my-posts rules.`);
+    }
+  }
+
   onProgress(`✓ Claude generated ${result.posts.length} posts.`);
   return result;
 }
@@ -390,10 +462,28 @@ export async function getLinkedInAlgorithmContext(onProgress) {
 }
 
 // ─── Regenerate a single post using Claude ────────────────────────────────────
-export async function regenerateSinglePost(post, client, contentDna = null) {
+// `opts` accepts:
+//   - contentDna:  string, Supergrow writing-style block (legacy, optional)
+//   - failedRules: array of {id, text}, rules that the previous draft violated
+//                  (used during bulk-generation retries — extra emphasis on
+//                  these specific rules in the rewrite prompt)
+//
+// Customer override rules (from clients.content_rules) are ALWAYS read fresh
+// from the client row passed in. Because portal.js fetches the client right
+// before calling this on every regen, the customer's latest rules apply on
+// every single-post regen — no caching, no staleness.
+export async function regenerateSinglePost(post, client, opts = {}) {
+  const { contentDna = null, failedRules = [] } = (opts && typeof opts === 'object') ? opts : {};
+
   const dnaNote = contentDna
     ? `\nContent DNA (match this writing style exactly):\n${contentDna}\n`
     : '';
+
+  // Read the customer's refine-my-posts rules fresh from the client row.
+  // renderRulesPromptBlock returns null when there are none — we skip the
+  // block entirely in that case rather than send empty noise.
+  const rules            = parseRules(client);
+  const rulesPromptBlock = renderRulesPromptBlock(rules, { failedRules });
 
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-5',
@@ -420,6 +510,10 @@ CLIENT RAG — ground the rewrite entirely in this material:`,
             text: (client.rag_content || '').slice(0, 4000),
             cache_control: { type: 'ephemeral' }
           },
+          // Customer refine-my-posts rules — non-cached so edits/deletes take
+          // effect on the very next regen (which is exactly what we promised
+          // the customer).
+          ...(rulesPromptBlock ? [rulesPromptBlock] : []),
           {
             type: 'text',
             text: `${dnaNote}
