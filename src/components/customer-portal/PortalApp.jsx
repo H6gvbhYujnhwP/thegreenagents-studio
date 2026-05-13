@@ -1527,11 +1527,13 @@ function PostCard({ post, totalPosts, busy, expanded, readOnly, onToggleExpand, 
             same size and weight. Disabled state dims to ~55% opacity. */}
         {!readOnly && (
           <>
-            {/* Per-post logo controls. Two dropdowns (Position, Size) that
-                let the customer fine-tune logo placement on each individual
-                post's image. Background panel (white / none) is NOT here —
-                it's a customer-level decision set by the operator on the
-                admin side and applies to every post.
+            {/* Per-post logo controls. Three dropdowns (Position, Size,
+                Background) that let the customer fine-tune logo placement
+                on each individual post's image. Each is a per-post override
+                that defaults to the customer-level setting set by the
+                operator on the admin side; changing any of them runs a
+                fast re-composite (no AI call) on the post's stored
+                pre-logo image.
                 
                 When logo_controls_enabled is false (post has no stored
                 pre-logo image — generated before this feature shipped),
@@ -1588,27 +1590,25 @@ function cardBtn(disabled) {
 }
 
 // ── PER-POST LOGO CONTROLS ───────────────────────────────────────────────────
-// Two dropdowns (Position, Size) sitting on every post card between the
-// post body and the four green action buttons. Changing either dropdown
-// immediately calls the recomposite endpoint, which re-runs only the
-// compositor on the post's stored pre-logo image — no AI call, ~½ sec.
+// Three dropdowns (Position, Size, Background) sitting on every post card
+// between the post body and the four green action buttons. Changing any
+// dropdown immediately calls the recomposite endpoint, which re-runs only
+// the compositor on the post's stored pre-logo image — no AI call, ~½ sec.
 //
-// Initial values come from post.logo_position / post.logo_size (per-post
-// overrides). If null, fall back to post.default_logo_position /
-// post.default_logo_size (the customer-level defaults set by the
-// operator on the admin side).
+// Initial values come from the per-post overrides (post.logo_position,
+// post.logo_size, post.logo_panel). If null, fall back to the customer-
+// level defaults (post.default_logo_*) set by the operator on the admin
+// side.
 //
 // Disabled state: shown when the post was generated before the pre-logo
 // storage feature shipped — post.logo_controls_enabled is false. We grey
 // out the controls and show a small hint pointing the customer at the
 // New image button.
-//
-// Background panel ('white' vs 'none') is NOT here — it's customer-
-// level only, intentionally not per-post overridable.
 function LogoControls({ post, disabled, onRecompositeLogo }) {
   const enabled  = !!post.logo_controls_enabled;
   const position = post.logo_position || post.default_logo_position || 'bottom-right';
   const size     = post.logo_size     || post.default_logo_size     || 'small';
+  const panel    = post.logo_panel    || post.default_logo_panel    || 'white';
 
   function handleChange(field, value) {
     if (!enabled || disabled) return;
@@ -1627,7 +1627,7 @@ function LogoControls({ post, disabled, onRecompositeLogo }) {
         fontSize: 10, color: '#9a6f00', textTransform: 'uppercase',
         letterSpacing: '0.05em', fontWeight: 500, marginBottom: 6,
       }}>Logo on this image</div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
         <div>
           <div style={{ fontSize: 10, color: MUTED, marginBottom: 3 }}>Position</div>
           <select
@@ -1653,6 +1653,18 @@ function LogoControls({ post, disabled, onRecompositeLogo }) {
             <option value="large">Large</option>
             <option value="medium">Medium</option>
             <option value="small">Small</option>
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize: 10, color: MUTED, marginBottom: 3 }}>Background</div>
+          <select
+            value={panel}
+            disabled={allDisabled}
+            onChange={e => handleChange('logo_panel', e.target.value)}
+            style={logoSelectStyle(allDisabled)}
+          >
+            <option value="white">White panel</option>
+            <option value="none">No panel</option>
           </select>
         </div>
       </div>

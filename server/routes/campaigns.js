@@ -176,6 +176,7 @@ router.post('/:id/regenerate-image/:postIndex', requireAuth, async (req, res) =>
       // dropdown state at the customer-level default.
       logo_position: null,
       logo_size: null,
+      logo_panel: null,
       image_error: undefined,
     };
     updateCampaign(campaign.id, { posts_json: JSON.stringify(posts) });

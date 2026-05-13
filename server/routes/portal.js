@@ -126,6 +126,7 @@ function projectPost(post, index, client = null) {
     // Per-post logo overrides (null = use customer-level default).
     logo_position:     post.logo_position || null,
     logo_size:         post.logo_size     || null,
+    logo_panel:        post.logo_panel    || null,
     // Whether per-post logo dropdowns are usable on this post. False when
     // the post has no stored pre-logo image (i.e. it was generated before
     // this feature shipped) — frontend greys out the dropdowns and shows
@@ -135,6 +136,7 @@ function projectPost(post, index, client = null) {
     // initial value when the post has no override.
     default_logo_position: (client && client.logo_position) || 'bottom-right',
     default_logo_size:     (client && client.logo_size)     || 'small',
+    default_logo_panel:    (client && client.logo_panel)    || 'white',
   };
 }
 
@@ -189,9 +191,10 @@ router.get('/posts', (req, res) => {
 
   // Fetch the LinkedIn client so we can pass its logo defaults into the
   // projection. The frontend's per-post logo dropdowns initialise from
-  // post.default_logo_position / default_logo_size — sourced from the
-  // clients row's logo_position/logo_size set by the admin.
-  const client = db.prepare(`SELECT logo_position, logo_size FROM clients WHERE id = ?`).get(linkedinClientId);
+  // post.default_logo_position / default_logo_size / default_logo_panel —
+  // sourced from the clients row's logo_position/logo_size/logo_panel set
+  // by the admin.
+  const client = db.prepare(`SELECT logo_position, logo_size, logo_panel FROM clients WHERE id = ?`).get(linkedinClientId);
 
   res.json({
     posts: posts.map((p, i) => projectPost(p, i, client)),
@@ -341,7 +344,7 @@ router.put('/posts/:id', (req, res) => {
 
   // Pass the client's logo defaults through so the frontend's per-post
   // dropdowns know what to fall back to when the post has no override.
-  const editClient = db.prepare(`SELECT logo_position, logo_size FROM clients WHERE id = ?`).get(campaign.client_id);
+  const editClient = db.prepare(`SELECT logo_position, logo_size, logo_panel FROM clients WHERE id = ?`).get(campaign.client_id);
   res.json({
     ok: true,
     post: projectPost(posts[postIndex], postIndex, editClient),
@@ -360,7 +363,7 @@ router.post('/posts/:id/approve', (req, res) => {
 
   audit('portal_post_approve', req, req.params.id, { campaign_id: campaign.id });
 
-  const approveClient = db.prepare(`SELECT logo_position, logo_size FROM clients WHERE id = ?`).get(campaign.client_id);
+  const approveClient = db.prepare(`SELECT logo_position, logo_size, logo_panel FROM clients WHERE id = ?`).get(campaign.client_id);
   res.json({
     ok: true,
     post: projectPost(posts[postIndex], postIndex, approveClient),
@@ -464,6 +467,7 @@ router.post('/posts/:id/regenerate', async (req, res) => {
     // dropdowns should fall back to customer-level defaults.
     updatedPost.logo_position = null;
     updatedPost.logo_size     = null;
+    updatedPost.logo_panel    = null;
     // Save pre-logo bytes for the per-post recomposite endpoint.
     if (imageData.preLogoData) {
       try {
@@ -658,6 +662,7 @@ router.post('/posts/:id/regenerate-image', async (req, res) => {
     // dropdown state. Customer can re-tweak per-post logo after this.
     logo_position: null,
     logo_size: null,
+    logo_panel: null,
     image_error: undefined,
     // Drop approval — content has changed, customer must re-review.
     client_approved_at: null,
@@ -709,20 +714,25 @@ router.post('/posts/:id/recomposite-logo', async (req, res) => {
 
   const { campaign, posts, postIndex, post } = found;
 
-  // Validate inputs. Both fields are optional — frontend may send only one
-  // (e.g. the customer just changed Position). Null/missing = leave the
-  // existing per-post override alone.
+  // Validate inputs. All three fields are optional — frontend may send
+  // only one (e.g. the customer just changed Position). Null/missing =
+  // leave the existing per-post override alone.
   const ALLOWED_POSITIONS = ['bottom-right', 'top-right', 'bottom-left', 'top-left'];
   const ALLOWED_SIZES     = ['small', 'medium', 'large'];
+  const ALLOWED_PANELS    = ['white', 'none'];
 
   const reqPosition = req.body?.logo_position;
   const reqSize     = req.body?.logo_size;
+  const reqPanel    = req.body?.logo_panel;
 
   if (reqPosition !== undefined && reqPosition !== null && !ALLOWED_POSITIONS.includes(reqPosition)) {
     return res.status(400).json({ error: `Invalid logo_position: ${reqPosition}` });
   }
   if (reqSize !== undefined && reqSize !== null && !ALLOWED_SIZES.includes(reqSize)) {
     return res.status(400).json({ error: `Invalid logo_size: ${reqSize}` });
+  }
+  if (reqPanel !== undefined && reqPanel !== null && !ALLOWED_PANELS.includes(reqPanel)) {
+    return res.status(400).json({ error: `Invalid logo_panel: ${reqPanel}` });
   }
 
   // Pre-logo image must exist for re-composite to work. Posts generated
@@ -745,19 +755,24 @@ router.post('/posts/:id/recomposite-logo', async (req, res) => {
   // (if any) wins; otherwise fall back to whatever's already stored on the
   // post; otherwise fall back to the customer-level default (handled
   // inside compositeLogo). That way a request that only changes Position
-  // preserves the existing Size override rather than resetting it.
+  // preserves the existing Size and Panel overrides rather than resetting
+  // them.
   const effectivePosition = (reqPosition !== undefined && reqPosition !== null)
     ? reqPosition
     : (post.logo_position || null);
   const effectiveSize = (reqSize !== undefined && reqSize !== null)
     ? reqSize
     : (post.logo_size || null);
+  const effectivePanel = (reqPanel !== undefined && reqPanel !== null)
+    ? reqPanel
+    : (post.logo_panel || null);
 
   let newImageUrl;
   try {
     const overrides = {};
     if (effectivePosition) overrides.logo_position = effectivePosition;
     if (effectiveSize)     overrides.logo_size     = effectiveSize;
+    if (effectivePanel)    overrides.logo_panel    = effectivePanel;
 
     const imageData = await recompositeLogoFromUrl(
       post.pre_logo_image_url,
@@ -782,6 +797,7 @@ router.post('/posts/:id/recomposite-logo', async (req, res) => {
     // correct dropdown values. Pre-logo URL and post text are unchanged.
     logo_position: effectivePosition,
     logo_size:     effectiveSize,
+    logo_panel:    effectivePanel,
   };
   posts[postIndex] = updatedPost;
   writeCampaignPosts(campaign.id, posts);
@@ -790,6 +806,7 @@ router.post('/posts/:id/recomposite-logo', async (req, res) => {
     campaign_id: campaign.id,
     logo_position: effectivePosition,
     logo_size:     effectiveSize,
+    logo_panel:    effectivePanel,
   });
 
   res.json({
@@ -797,6 +814,10 @@ router.post('/posts/:id/recomposite-logo', async (req, res) => {
     post: projectPost(updatedPost, postIndex, client),
   });
 });
+
+// ─── POST /api/portal/campaigns/:id/posts/approve-all ─────────────────────────
+// The big one. Marks every post in the campaign approved AND pushes them all
+// to Supergrow as live queue_post calls in posts_json order.
 //
 // Behaviour:
 //   - All posts succeed   → flip stage='done', status='completed',

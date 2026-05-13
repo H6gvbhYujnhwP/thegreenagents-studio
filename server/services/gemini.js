@@ -187,13 +187,12 @@ ${brandSignatureRule}`;
 //   client.logo_size     — max dimensions the resized logo is fit to
 //     'small' (default — max 280×100) | 'medium' (480×160) | 'large' (640×220)
 //
-// Optional `overrides` arg lets a single post override Position and/or
-// Size without changing the customer-level default. Used by the per-post
-// re-composite endpoint when the customer changes the dropdowns on a
-// specific post card. Background panel is NOT per-post overridable — it
-// stays a customer-level decision (set once on the admin side) because
-// flipping between "white panel" and "no panel" on a per-post basis would
-// be a confusing affordance and most customers wouldn't use it.
+// Optional `overrides` arg lets a single post override Position, Size, and
+// Background panel without changing the customer-level default. Used by
+// the per-post re-composite endpoint when the customer changes the
+// dropdowns on a specific post card. Customer-level defaults still apply
+// to fresh image generation and to posts where the customer hasn't
+// overridden the relevant field.
 //
 // All settings are independent — a customer can have any combination. The
 // Manson Group is the first to use a non-default combo: top-right + none +
@@ -211,8 +210,8 @@ ${brandSignatureRule}`;
 export async function compositeLogo(imageBase64, imageMime, client, overrides = {}) {
   const logoUrl  = client.logo_url;
   const position = overrides.logo_position || client.logo_position || 'bottom-right';
-  const panel    = client.logo_panel    || 'white';
-  const size     = overrides.logo_size || client.logo_size || 'small';
+  const panel    = overrides.logo_panel    || client.logo_panel    || 'white';
+  const size     = overrides.logo_size     || client.logo_size     || 'small';
 
   const logoResponse = await fetch(logoUrl);
   if (!logoResponse.ok) throw new Error(`Failed to fetch logo: ${logoResponse.status}`);
