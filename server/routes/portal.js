@@ -25,7 +25,7 @@ import {
   RULE_MAX_LENGTH,
   RULES_MAX_COUNT,
 } from '../services/content-rules.js';
-import { generateImage } from '../services/gemini.js';
+import { generateImage, recompositeLogoFromUrl } from '../services/gemini.js';
 import { uploadImageToR2 } from '../services/r2.js';
 import { queuePost } from '../services/supergrow.js';
 import { sendEmail } from '../services/ses.js';
@@ -85,7 +85,17 @@ function resolveEmailClientId(portalEmailClientId) {
  * "lives in the same JSON bundle" pre-decision); `approved` is the boolean
  * the portal uses for display state.
  */
-function projectPost(post, index) {
+/**
+ * projectPost — serialise a post for the portal frontend.
+ *
+ * The `client` arg is optional and only used to supply the customer-level
+ * default_logo_position / default_logo_size, which the portal post card
+ * uses as the initial value for the per-post logo dropdowns when the post
+ * itself has no override yet. If `client` is not passed (legacy callers,
+ * read-only history projections) the defaults fall back to 'bottom-right'
+ * and 'small' — matching the original pre-feature behaviour.
+ */
+function projectPost(post, index, client = null) {
   const day  = post.suggested_day  || '';
   const time = post.suggested_time || '';
   const schedule = (day || time) ? `${day} ${time}`.trim() : `Post ${index + 1}`;
@@ -113,6 +123,18 @@ function projectPost(post, index) {
     validation_warnings: Array.isArray(post.validation_warnings) && post.validation_warnings.length > 0
       ? post.validation_warnings
       : null,
+    // Per-post logo overrides (null = use customer-level default).
+    logo_position:     post.logo_position || null,
+    logo_size:         post.logo_size     || null,
+    // Whether per-post logo dropdowns are usable on this post. False when
+    // the post has no stored pre-logo image (i.e. it was generated before
+    // this feature shipped) — frontend greys out the dropdowns and shows
+    // a "Click New image to enable" hint.
+    logo_controls_enabled: !!post.pre_logo_image_url,
+    // Customer-level defaults — frontend uses these as the dropdown
+    // initial value when the post has no override.
+    default_logo_position: (client && client.logo_position) || 'bottom-right',
+    default_logo_size:     (client && client.logo_size)     || 'small',
   };
 }
 
@@ -165,8 +187,14 @@ router.get('/posts', (req, res) => {
     posts = [];
   }
 
+  // Fetch the LinkedIn client so we can pass its logo defaults into the
+  // projection. The frontend's per-post logo dropdowns initialise from
+  // post.default_logo_position / default_logo_size — sourced from the
+  // clients row's logo_position/logo_size set by the admin.
+  const client = db.prepare(`SELECT logo_position, logo_size FROM clients WHERE id = ?`).get(linkedinClientId);
+
   res.json({
-    posts: posts.map(projectPost),
+    posts: posts.map((p, i) => projectPost(p, i, client)),
     campaign: {
       id:    campaign.id,
       title: 'Posts ready for review',
@@ -311,9 +339,12 @@ router.put('/posts/:id', (req, res) => {
 
   audit('portal_post_save_approve', req, req.params.id, { campaign_id: campaign.id });
 
+  // Pass the client's logo defaults through so the frontend's per-post
+  // dropdowns know what to fall back to when the post has no override.
+  const editClient = db.prepare(`SELECT logo_position, logo_size FROM clients WHERE id = ?`).get(campaign.client_id);
   res.json({
     ok: true,
-    post: projectPost(posts[postIndex], postIndex),
+    post: projectPost(posts[postIndex], postIndex, editClient),
   });
 });
 
@@ -329,9 +360,10 @@ router.post('/posts/:id/approve', (req, res) => {
 
   audit('portal_post_approve', req, req.params.id, { campaign_id: campaign.id });
 
+  const approveClient = db.prepare(`SELECT logo_position, logo_size FROM clients WHERE id = ?`).get(campaign.client_id);
   res.json({
     ok: true,
-    post: projectPost(posts[postIndex], postIndex),
+    post: projectPost(posts[postIndex], postIndex, approveClient),
   });
 });
 
@@ -428,6 +460,24 @@ router.post('/posts/:id/regenerate', async (req, res) => {
     );
     updatedPost.image_url   = newImageUrl;
     updatedPost.image_error = undefined;
+    // Reset per-post logo overrides — full regen produces a fresh image,
+    // dropdowns should fall back to customer-level defaults.
+    updatedPost.logo_position = null;
+    updatedPost.logo_size     = null;
+    // Save pre-logo bytes for the per-post recomposite endpoint.
+    if (imageData.preLogoData) {
+      try {
+        const preLogoUrl = await uploadImageToR2(
+          imageData.preLogoData,
+          imageData.preLogoMime,
+          client.id,
+          `${updatedPost.id || `post-${postIndex}`}-prelogo`,
+        );
+        updatedPost.pre_logo_image_url = preLogoUrl;
+      } catch (e) {
+        console.warn(`[portal] pre-logo upload failed (non-fatal): ${e.message}`);
+      }
+    }
   } catch (err) {
     console.error(`[portal] regen image failed post ${req.params.id}:`, err.message);
     imageError = err.message;
@@ -451,7 +501,7 @@ router.post('/posts/:id/regenerate', async (req, res) => {
 
   res.json({
     ok: true,
-    post: projectPost(updatedPost, postIndex),
+    post: projectPost(updatedPost, postIndex, client),
     regens_used_today: usedToday + 1,
     regens_remaining: REGEN_CAP_PER_DAY - (usedToday + 1),
     image_error: imageError, // surface non-fatal image failure to the UI
@@ -534,7 +584,7 @@ router.post('/posts/:id/regenerate-text', async (req, res) => {
 
   res.json({
     ok: true,
-    post: projectPost(updatedPost, postIndex),
+    post: projectPost(updatedPost, postIndex, client),
     regens_used_today: usedToday + 1,
     regens_remaining: REGEN_CAP_PER_DAY - (usedToday + 1),
   });
@@ -566,6 +616,7 @@ router.post('/posts/:id/regenerate-image', async (req, res) => {
   if (!client) return res.status(404).json({ error: 'Linked LinkedIn client not found' });
 
   let newImageUrl;
+  let newPreLogoUrl = null;
   try {
     const imageData = await generateImage(
       post.image_prompt || `Professional LinkedIn image for: ${post.topic}`,
@@ -578,6 +629,22 @@ router.post('/posts/:id/regenerate-image', async (req, res) => {
       client.id,
       post.id || `post-${postIndex}`,
     );
+    // Also store the pre-logo bytes for the per-post recomposite endpoint.
+    // Non-fatal if it fails — main image upload already succeeded; customer
+    // just won't be able to use the per-post logo dropdowns on this post
+    // until they click New image again.
+    if (imageData.preLogoData) {
+      try {
+        newPreLogoUrl = await uploadImageToR2(
+          imageData.preLogoData,
+          imageData.preLogoMime,
+          client.id,
+          `${post.id || `post-${postIndex}`}-prelogo`,
+        );
+      } catch (e) {
+        console.warn(`[portal] pre-logo upload failed (non-fatal): ${e.message}`);
+      }
+    }
   } catch (err) {
     console.error(`[portal] regen-image failed post ${req.params.id}:`, err.message);
     return res.status(502).json({ error: `Image regeneration failed: ${err.message}` });
@@ -586,6 +653,11 @@ router.post('/posts/:id/regenerate-image', async (req, res) => {
   const updatedPost = {
     ...post,
     image_url: newImageUrl,
+    pre_logo_image_url: newPreLogoUrl || post.pre_logo_image_url || null,
+    // Reset per-post logo overrides on a full regen — new image, new
+    // dropdown state. Customer can re-tweak per-post logo after this.
+    logo_position: null,
+    logo_size: null,
     image_error: undefined,
     // Drop approval — content has changed, customer must re-review.
     client_approved_at: null,
@@ -606,15 +678,125 @@ router.post('/posts/:id/regenerate-image', async (req, res) => {
 
   res.json({
     ok: true,
-    post: projectPost(updatedPost, postIndex),
+    post: projectPost(updatedPost, postIndex, client),
     regens_used_today: usedToday + 1,
     regens_remaining: REGEN_CAP_PER_DAY - (usedToday + 1),
   });
 });
 
-// ─── POST /api/portal/campaigns/:id/posts/approve-all ─────────────────────────
-// The big one. Marks every post in the campaign approved AND pushes them all
-// to Supergrow as live queue_post calls in posts_json order.
+// ─── POST /api/portal/posts/:id/recomposite-logo ──────────────────────────────
+// Per-post logo position/size override. Re-runs only the compositor on the
+// previously-stored pre-logo image — no Gemini call, no AI cost, ~½ second
+// response. Lets the customer try Position/Size combos on a per-post basis
+// from the dropdowns on each post card.
+//
+// Background panel ('white' vs 'none') is NOT per-post overridable — that
+// stays a customer-level decision on the admin side. The two knobs customers
+// get are Position and Size, both stored on the post as logo_position and
+// logo_size; null means "use customer-level default."
+//
+// Does NOT count against the 30/day regen cap — this isn't a regen, it's a
+// pixel-pushing re-composite of an image that's already been generated.
+// Cost is effectively zero.
+//
+// Returns 400 with { error: 'pre_logo_unavailable' } when the post has no
+// stored pre-logo image (i.e. the post was generated before this feature
+// shipped). The frontend uses this signal to show "Click New image first to
+// enable these controls" rather than a generic error.
+router.post('/posts/:id/recomposite-logo', async (req, res) => {
+  const found = findPostForPortalUser(req, req.params.id);
+  if (!found) return res.status(404).json({ error: 'Post not found' });
+
+  const { campaign, posts, postIndex, post } = found;
+
+  // Validate inputs. Both fields are optional — frontend may send only one
+  // (e.g. the customer just changed Position). Null/missing = leave the
+  // existing per-post override alone.
+  const ALLOWED_POSITIONS = ['bottom-right', 'top-right', 'bottom-left', 'top-left'];
+  const ALLOWED_SIZES     = ['small', 'medium', 'large'];
+
+  const reqPosition = req.body?.logo_position;
+  const reqSize     = req.body?.logo_size;
+
+  if (reqPosition !== undefined && reqPosition !== null && !ALLOWED_POSITIONS.includes(reqPosition)) {
+    return res.status(400).json({ error: `Invalid logo_position: ${reqPosition}` });
+  }
+  if (reqSize !== undefined && reqSize !== null && !ALLOWED_SIZES.includes(reqSize)) {
+    return res.status(400).json({ error: `Invalid logo_size: ${reqSize}` });
+  }
+
+  // Pre-logo image must exist for re-composite to work. Posts generated
+  // before this feature shipped (pre-deploy posts) won't have one — return
+  // a specific error code so the frontend can show the right hint.
+  if (!post.pre_logo_image_url) {
+    return res.status(400).json({
+      error: 'pre_logo_unavailable',
+      message: 'This post was generated before per-post logo controls were available. Click "New image" to enable them on this post.',
+    });
+  }
+
+  const client = db.prepare(`SELECT * FROM clients WHERE id = ?`).get(campaign.client_id);
+  if (!client) return res.status(404).json({ error: 'Linked LinkedIn client not found' });
+  if (!client.logo_url) {
+    return res.status(400).json({ error: 'No customer logo configured — re-composite has nothing to place.' });
+  }
+
+  // Resolve the effective overrides: the value supplied in this request
+  // (if any) wins; otherwise fall back to whatever's already stored on the
+  // post; otherwise fall back to the customer-level default (handled
+  // inside compositeLogo). That way a request that only changes Position
+  // preserves the existing Size override rather than resetting it.
+  const effectivePosition = (reqPosition !== undefined && reqPosition !== null)
+    ? reqPosition
+    : (post.logo_position || null);
+  const effectiveSize = (reqSize !== undefined && reqSize !== null)
+    ? reqSize
+    : (post.logo_size || null);
+
+  let newImageUrl;
+  try {
+    const overrides = {};
+    if (effectivePosition) overrides.logo_position = effectivePosition;
+    if (effectiveSize)     overrides.logo_size     = effectiveSize;
+
+    const imageData = await recompositeLogoFromUrl(
+      post.pre_logo_image_url,
+      client,
+      overrides
+    );
+    newImageUrl = await uploadImageToR2(
+      imageData.data,
+      imageData.mimeType,
+      client.id,
+      `${post.id || `post-${postIndex}`}-recomp`
+    );
+  } catch (err) {
+    console.error(`[portal] recomposite-logo failed post ${req.params.id}:`, err.message);
+    return res.status(502).json({ error: `Logo re-composite failed: ${err.message}` });
+  }
+
+  const updatedPost = {
+    ...post,
+    image_url: newImageUrl,
+    // Store the resolved overrides so subsequent GET /posts loads show the
+    // correct dropdown values. Pre-logo URL and post text are unchanged.
+    logo_position: effectivePosition,
+    logo_size:     effectiveSize,
+  };
+  posts[postIndex] = updatedPost;
+  writeCampaignPosts(campaign.id, posts);
+
+  audit('portal_post_recomposite_logo', req, req.params.id, {
+    campaign_id: campaign.id,
+    logo_position: effectivePosition,
+    logo_size:     effectiveSize,
+  });
+
+  res.json({
+    ok: true,
+    post: projectPost(updatedPost, postIndex, client),
+  });
+});
 //
 // Behaviour:
 //   - All posts succeed   → flip stage='done', status='completed',

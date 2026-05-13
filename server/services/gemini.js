@@ -1,9 +1,25 @@
 /**
  * gemini.js - Image generation using Nano Banana (gemini-2.5-flash-image)
  *
- * After Gemini generates the image, Sharp composites the client logo
- * into the bottom-right corner with an auto-contrasting background patch.
- * Falls back to text brand signature if no logo is uploaded.
+ * Two-stage pipeline:
+ *
+ *   Stage 1 (generation): Gemini produces a 1024x1024 image based on the
+ *   prompt. We hold onto the raw bytes (the "pre-logo image") so they can
+ *   be re-composited later with different per-post logo settings without
+ *   another AI call.
+ *
+ *   Stage 2 (composite): Sharp pastes the customer's logo into one of four
+ *   corners, at one of three sizes, with or without a white panel behind
+ *   it. Three concerns are per-customer (Position default, Background panel,
+ *   Size default) and live on the clients row. Position and Size can be
+ *   OVERRIDDEN per-post — passed as the `overrides` arg, falling back to
+ *   the client-level value when null/missing.
+ *
+ * Callers get back BOTH the pre-logo image and the final composited image
+ * so they can store the pre-logo bytes in R2. That lets the customer
+ * portal's per-post logo dropdowns re-composite without re-calling Gemini
+ * (cheap, fast, no AI cost). Falls back to text brand signature if no
+ * logo is uploaded.
  */
 
 import { GoogleGenAI } from '@google/genai';
@@ -123,20 +139,37 @@ ${brandSignatureRule}`;
   const imagePart = parts.find(p => p.inlineData?.mimeType?.startsWith('image/'));
   if (!imagePart) throw new Error('Gemini responded but returned no image');
 
-  let imageData = imagePart.inlineData.data;
-  let imageMime = imagePart.inlineData.mimeType;
+  // The raw Gemini bytes are the "pre-logo image" — we hold onto these so
+  // they can be re-composited later when the customer adjusts per-post logo
+  // settings, without re-calling Gemini. Callers MUST persist these bytes
+  // to R2 alongside the final composited image; the per-post recomposite
+  // endpoint reads them back from R2 storage.
+  const preLogoData = imagePart.inlineData.data;
+  const preLogoMime = imagePart.inlineData.mimeType;
+
+  let finalData = preLogoData;
+  let finalMime = preLogoMime;
 
   if (hasLogo) {
     try {
-      imageData = await compositeLogo(imageData, imageMime, client);
-      imageMime  = 'image/png';
+      finalData = await compositeLogo(preLogoData, preLogoMime, client);
+      finalMime  = 'image/png';
       console.log(`[gemini] Logo composited for: ${client.name}`);
     } catch (err) {
       console.warn(`[gemini] Logo composite failed (non-fatal): ${err.message}`);
     }
   }
 
-  return { data: imageData, mimeType: imageMime };
+  return {
+    // Final composited image — what gets shown to the customer in the portal.
+    data:     finalData,
+    mimeType: finalMime,
+    // Pre-logo image — Gemini's raw output before any logo paste-in.
+    // Persist this to R2 too. The per-post recomposite endpoint fetches it
+    // from R2 to redo Stage 2 with different position/size overrides.
+    preLogoData,
+    preLogoMime,
+  };
 }
 
 // ── Compositor ──────────────────────────────────────────────────────────────
@@ -154,7 +187,15 @@ ${brandSignatureRule}`;
 //   client.logo_size     — max dimensions the resized logo is fit to
 //     'small' (default — max 280×100) | 'medium' (480×160) | 'large' (640×220)
 //
-// All three are independent — a customer can have any combination. The
+// Optional `overrides` arg lets a single post override Position and/or
+// Size without changing the customer-level default. Used by the per-post
+// re-composite endpoint when the customer changes the dropdowns on a
+// specific post card. Background panel is NOT per-post overridable — it
+// stays a customer-level decision (set once on the admin side) because
+// flipping between "white panel" and "no panel" on a per-post basis would
+// be a confusing affordance and most customers wouldn't use it.
+//
+// All settings are independent — a customer can have any combination. The
 // Manson Group is the first to use a non-default combo: top-right + none +
 // large, because their logo has its own dark-blue background built into
 // the file and reads better directly on the image than fenced inside a
@@ -167,11 +208,11 @@ ${brandSignatureRule}`;
 // output to read clearly. We don't try to detect-and-warn; the operator
 // chose the setting deliberately and the fix when it fails is regenerate
 // the image (already a button in both admin and customer portal).
-async function compositeLogo(imageBase64, imageMime, client) {
+export async function compositeLogo(imageBase64, imageMime, client, overrides = {}) {
   const logoUrl  = client.logo_url;
-  const position = client.logo_position || 'bottom-right';
+  const position = overrides.logo_position || client.logo_position || 'bottom-right';
   const panel    = client.logo_panel    || 'white';
-  const size     = client.logo_size     || 'small';
+  const size     = overrides.logo_size || client.logo_size || 'small';
 
   const logoResponse = await fetch(logoUrl);
   if (!logoResponse.ok) throw new Error(`Failed to fetch logo: ${logoResponse.status}`);
@@ -285,6 +326,35 @@ async function compositeLogo(imageBase64, imageMime, client) {
     .toBuffer();
 
   return composited.toString('base64');
+}
+
+// ── Per-post re-compositor ─────────────────────────────────────────────────
+//
+// Called by the customer portal when the customer changes the per-post
+// logo position or size dropdowns. Fetches the previously-stored pre-logo
+// image from R2, runs compositeLogo with the override values, returns
+// the new base64 ready for re-upload.
+//
+// No AI call — purely Sharp pixel-pushing. ~200-500ms typical, near-zero
+// cost. Critical to the "immediate visual feedback when the dropdown
+// changes" experience.
+//
+// Throws if the pre-logo image can't be fetched (e.g. R2 outage, or the
+// post was generated before the pre-logo storage feature shipped — in
+// which case there's no pre-logo URL to fetch from). Callers should
+// surface the second case as "click New image first" so the customer
+// understands the path forward.
+export async function recompositeLogoFromUrl(preLogoUrl, client, overrides = {}) {
+  const r = await fetch(preLogoUrl);
+  if (!r.ok) throw new Error(`Failed to fetch pre-logo image: ${r.status}`);
+  const buffer = Buffer.from(await r.arrayBuffer());
+  const base64 = buffer.toString('base64');
+
+  // Sharp will detect the actual mime from the buffer; pass image/png as
+  // a reasonable default since R2 doesn't return the original content-type
+  // in a way we need here.
+  const composited = await compositeLogo(base64, 'image/png', client, overrides);
+  return { data: composited, mimeType: 'image/png' };
 }
 
 export function sleep(ms) {

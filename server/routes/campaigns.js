@@ -147,7 +147,37 @@ router.post('/:id/regenerate-image/:postIndex', requireAuth, async (req, res) =>
     );
     const imageUrl = await uploadImageToR2(imageData.data, imageData.mimeType, client.id, post.id || `post-${postIndex}`);
 
-    posts[postIndex] = { ...post, image_url: imageUrl, image_error: undefined };
+    // Also store the pre-logo bytes (Gemini's raw output before the logo
+    // paste) so the per-post recomposite endpoint can re-run only the
+    // composite step when the customer changes per-post logo dropdowns.
+    // Stored under a sibling key in the same R2 prefix shape; failing to
+    // upload it is non-fatal (the main image is still good, the customer
+    // just won't be able to use the per-post logo dropdowns on this post
+    // until they click New image again).
+    let preLogoUrl = null;
+    if (imageData.preLogoData) {
+      try {
+        preLogoUrl = await uploadImageToR2(
+          imageData.preLogoData,
+          imageData.preLogoMime,
+          client.id,
+          `${post.id || `post-${postIndex}`}-prelogo`
+        );
+      } catch (e) {
+        console.warn(`[campaigns] pre-logo upload failed (non-fatal): ${e.message}`);
+      }
+    }
+
+    posts[postIndex] = {
+      ...post,
+      image_url: imageUrl,
+      pre_logo_image_url: preLogoUrl || post.pre_logo_image_url || null,
+      // Reset any per-post overrides on a full regen — fresh image, fresh
+      // dropdown state at the customer-level default.
+      logo_position: null,
+      logo_size: null,
+      image_error: undefined,
+    };
     updateCampaign(campaign.id, { posts_json: JSON.stringify(posts) });
     sendSSE(campaign.id, {
       type: 'post_updated',
@@ -357,7 +387,29 @@ async function runCampaign(campaignId, client, includeImages = true) {
           post
         );
         const imageUrl = await uploadImageToR2(imageData.data, imageData.mimeType, client.id, post.id);
-        enrichedPosts.push({ ...post, image_url: imageUrl });
+
+        // Also store the pre-logo bytes for the per-post recomposite path.
+        // Non-fatal if it fails — see equivalent comment in the single-post
+        // regen route above.
+        let preLogoUrl = null;
+        if (imageData.preLogoData) {
+          try {
+            preLogoUrl = await uploadImageToR2(
+              imageData.preLogoData,
+              imageData.preLogoMime,
+              client.id,
+              `${post.id}-prelogo`
+            );
+          } catch (e) {
+            console.warn(`[campaigns] pre-logo upload failed (non-fatal): ${e.message}`);
+          }
+        }
+
+        enrichedPosts.push({
+          ...post,
+          image_url: imageUrl,
+          pre_logo_image_url: preLogoUrl,
+        });
         sendSSE(campaignId, { type: 'log', message: `✓ Image ${i + 1} generated and uploaded.` });
       } catch (err) {
         console.error(`Image gen failed for post ${i + 1}:`, err.message);

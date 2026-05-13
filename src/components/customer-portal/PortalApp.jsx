@@ -1235,6 +1235,45 @@ function PortalPosts() {
     }
   }
 
+  // Per-post logo re-composite. Triggered by the Position/Size dropdowns
+  // on each post card — passes one or both override fields. The server
+  // re-runs ONLY the compositor on the post's stored pre-logo image (no
+  // Gemini call), uploads the new composited image to R2, returns the
+  // updated post.
+  //
+  // Distinct busy kind ('recomp-logo') so the image-only spinner overlay
+  // appears rather than the card-wide 'rewriting' overlay.
+  //
+  // 400 with error='pre_logo_unavailable' means the post was generated
+  // before pre-logo storage shipped — we show a more specific message
+  // pointing the customer at the New image button.
+  async function recompositeLogo(id, fields) {
+    setActionError(null);
+    setPostBusy(id, 'recomp-logo');
+    try {
+      const r = await fetch(`/api/portal/posts/${encodeURIComponent(id)}/recomposite-logo`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fields || {}),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) {
+        if (d.error === 'pre_logo_unavailable') {
+          setActionError(d.message || 'Click "New image" first to enable logo controls on this post.');
+        } else {
+          setActionError(d.error || `Couldn't re-composite logo (HTTP ${r.status})`);
+        }
+        return;
+      }
+      setPosts(prev => (prev || []).map(p => p.id === id ? d.post : p));
+    } catch (e) {
+      setActionError(`Network error: ${e.message}`);
+    } finally {
+      setPostBusy(id, null);
+    }
+  }
+
   return (
     <div>
       <h2 style={pageTitle()}>LinkedIn Posts — review &amp; approve</h2>
@@ -1305,6 +1344,7 @@ function PortalPosts() {
             onEdit={() => setEditing(p)}
             onRegenText={() => regenText(p.id)}
             onRegenImage={() => regenImage(p.id)}
+            onRecompositeLogo={(fields) => recompositeLogo(p.id, fields)}
             onApprove={() => approveOne(p.id)}
           />
         ))}
@@ -1330,9 +1370,10 @@ function PortalPosts() {
   );
 }
 
-function PostCard({ post, totalPosts, busy, expanded, readOnly, onToggleExpand, onEdit, onRegenText, onRegenImage, onApprove }) {
+function PostCard({ post, totalPosts, busy, expanded, readOnly, onToggleExpand, onEdit, onRegenText, onRegenImage, onRecompositeLogo, onApprove }) {
   const isRegenText  = busy === 'regen-text';
   const isRegenImage = busy === 'regen-image';
+  const isRecompLogo = busy === 'recomp-logo';
   const isApproving  = busy === 'approving';
   const isAnyBusy    = !!busy;
 
@@ -1388,8 +1429,11 @@ function PostCard({ post, totalPosts, busy, expanded, readOnly, onToggleExpand, 
           </div>
         )}
         {/* Image-only spinner overlay. Sits ON the image so the customer
-            knows specifically that the IMAGE is being regenerated (vs text). */}
-        {isRegenImage && (
+            knows specifically that the IMAGE is being updated (vs the
+            post text). Appears for both 'regen-image' (full Gemini regen,
+            5-30s) and 'recomp-logo' (re-composite only, ~½ sec) — same
+            visual treatment with different wording. */}
+        {(isRegenImage || isRecompLogo) && (
           <div style={{
             position:'absolute', inset:0, background:'rgba(255,255,255,0.85)',
             display:'flex', alignItems:'center', justifyContent:'center',
@@ -1400,9 +1444,13 @@ function PostCard({ post, totalPosts, busy, expanded, readOnly, onToggleExpand, 
               borderTopColor:'transparent', borderRadius:'50%',
               animation:'spin 0.8s linear infinite',
             }} />
-            <div style={{ fontSize:11, fontWeight:500, color:TEXT }}>Generating image…</div>
+            <div style={{ fontSize:11, fontWeight:500, color:TEXT }}>
+              {isRecompLogo ? 'Updating logo…' : 'Generating image…'}
+            </div>
             <div style={{ fontSize:10, color:MUTED, lineHeight:1.4, maxWidth:200 }}>
-              Please wait while your image is being regenerated.
+              {isRecompLogo
+                ? 'Repositioning logo — no charge.'
+                : 'Please wait while your image is being regenerated.'}
             </div>
           </div>
         )}
@@ -1478,26 +1526,43 @@ function PostCard({ post, totalPosts, busy, expanded, readOnly, onToggleExpand, 
             Style choice: all four buttons solid TGA brand green with white text,
             same size and weight. Disabled state dims to ~55% opacity. */}
         {!readOnly && (
-          <div style={{ display:'flex', gap:5, marginTop:10, paddingTop:10, borderTop:`0.5px solid ${BORDER}` }}>
-            <button onClick={onEdit} disabled={isAnyBusy} style={cardBtn(isAnyBusy)}>
-              Edit text
-            </button>
-            <button onClick={onRegenText} disabled={isAnyBusy} style={cardBtn(isAnyBusy)}>
-              Rewrite post
-            </button>
-            <button onClick={onRegenImage} disabled={isAnyBusy} style={cardBtn(isAnyBusy)}>
-              New image
-            </button>
-            {post.approved
-              ? <button disabled style={{
-                  ...cardBtn(false),
-                  background: TGA_GREEN_LO, cursor:'default', opacity: 1,
-                }}>✓ Approved</button>
-              : <button onClick={onApprove} disabled={isAnyBusy} style={cardBtn(isAnyBusy)}>
-                  {isApproving ? 'Approving…' : 'Approve'}
-                </button>
-            }
-          </div>
+          <>
+            {/* Per-post logo controls. Two dropdowns (Position, Size) that
+                let the customer fine-tune logo placement on each individual
+                post's image. Background panel (white / none) is NOT here —
+                it's a customer-level decision set by the operator on the
+                admin side and applies to every post.
+                
+                When logo_controls_enabled is false (post has no stored
+                pre-logo image — generated before this feature shipped),
+                the controls render disabled with a hint pointing the
+                customer at the New image button. */}
+            <LogoControls
+              post={post}
+              disabled={isAnyBusy}
+              onRecompositeLogo={onRecompositeLogo}
+            />
+            <div style={{ display:'flex', gap:5, marginTop:10, paddingTop:10, borderTop:`0.5px solid ${BORDER}` }}>
+              <button onClick={onEdit} disabled={isAnyBusy} style={cardBtn(isAnyBusy)}>
+                Edit text
+              </button>
+              <button onClick={onRegenText} disabled={isAnyBusy} style={cardBtn(isAnyBusy)}>
+                Rewrite post
+              </button>
+              <button onClick={onRegenImage} disabled={isAnyBusy} style={cardBtn(isAnyBusy)}>
+                New image
+              </button>
+              {post.approved
+                ? <button disabled style={{
+                    ...cardBtn(false),
+                    background: TGA_GREEN_LO, cursor:'default', opacity: 1,
+                  }}>✓ Approved</button>
+                : <button onClick={onApprove} disabled={isAnyBusy} style={cardBtn(isAnyBusy)}>
+                    {isApproving ? 'Approving…' : 'Approve'}
+                  </button>
+              }
+            </div>
+          </>
         )}
       </div>
     </div>
@@ -1519,6 +1584,99 @@ function cardBtn(disabled) {
     borderRadius: 5,
     cursor: disabled ? 'not-allowed' : 'pointer',
     opacity: disabled ? 0.55 : 1,
+  };
+}
+
+// ── PER-POST LOGO CONTROLS ───────────────────────────────────────────────────
+// Two dropdowns (Position, Size) sitting on every post card between the
+// post body and the four green action buttons. Changing either dropdown
+// immediately calls the recomposite endpoint, which re-runs only the
+// compositor on the post's stored pre-logo image — no AI call, ~½ sec.
+//
+// Initial values come from post.logo_position / post.logo_size (per-post
+// overrides). If null, fall back to post.default_logo_position /
+// post.default_logo_size (the customer-level defaults set by the
+// operator on the admin side).
+//
+// Disabled state: shown when the post was generated before the pre-logo
+// storage feature shipped — post.logo_controls_enabled is false. We grey
+// out the controls and show a small hint pointing the customer at the
+// New image button.
+//
+// Background panel ('white' vs 'none') is NOT here — it's customer-
+// level only, intentionally not per-post overridable.
+function LogoControls({ post, disabled, onRecompositeLogo }) {
+  const enabled  = !!post.logo_controls_enabled;
+  const position = post.logo_position || post.default_logo_position || 'bottom-right';
+  const size     = post.logo_size     || post.default_logo_size     || 'small';
+
+  function handleChange(field, value) {
+    if (!enabled || disabled) return;
+    onRecompositeLogo({ [field]: value });
+  }
+
+  const allDisabled = disabled || !enabled;
+
+  return (
+    <div style={{
+      marginTop: 10, paddingTop: 10,
+      borderTop: '0.5px dashed #e8b04a',
+      opacity: allDisabled ? 0.6 : 1,
+    }}>
+      <div style={{
+        fontSize: 10, color: '#9a6f00', textTransform: 'uppercase',
+        letterSpacing: '0.05em', fontWeight: 500, marginBottom: 6,
+      }}>Logo on this image</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+        <div>
+          <div style={{ fontSize: 10, color: MUTED, marginBottom: 3 }}>Position</div>
+          <select
+            value={position}
+            disabled={allDisabled}
+            onChange={e => handleChange('logo_position', e.target.value)}
+            style={logoSelectStyle(allDisabled)}
+          >
+            <option value="top-right">Top right</option>
+            <option value="top-left">Top left</option>
+            <option value="bottom-right">Bottom right</option>
+            <option value="bottom-left">Bottom left</option>
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize: 10, color: MUTED, marginBottom: 3 }}>Size</div>
+          <select
+            value={size}
+            disabled={allDisabled}
+            onChange={e => handleChange('logo_size', e.target.value)}
+            style={logoSelectStyle(allDisabled)}
+          >
+            <option value="large">Large</option>
+            <option value="medium">Medium</option>
+            <option value="small">Small</option>
+          </select>
+        </div>
+      </div>
+      {!enabled && (
+        <div style={{
+          fontSize: 10, color: MUTED, marginTop: 6, lineHeight: 1.4, fontStyle: 'italic',
+        }}>
+          Click <span style={{ fontWeight: 500, fontStyle: 'normal' }}>New image</span> to enable these controls on this post.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function logoSelectStyle(disabled) {
+  return {
+    width: '100%',
+    fontSize: 11,
+    padding: '4px 6px',
+    border: '0.5px solid #d0d0cc',
+    borderRadius: 5,
+    background: disabled ? '#f5f5f3' : '#fff',
+    color: TEXT,
+    cursor: disabled ? 'not-allowed' : 'pointer',
   };
 }
 
