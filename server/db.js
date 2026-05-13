@@ -1282,6 +1282,44 @@ db.prepare("UPDATE linkedin_settings SET brief_running = 0 WHERE id = 1").run();
   }
 }
 
+// ── Per-customer brand panel settings on clients ─────────────────────────────
+// Per-customer overrides for how the logo is composited onto generated post
+// images. Three settings, all defaulting to the existing behaviour so every
+// pre-existing customer is unchanged on first deploy:
+//
+//   logo_position — which corner the logo lands in:
+//     'bottom-right' (default) | 'top-right' | 'bottom-left' | 'top-left'
+//   logo_panel    — whether a white panel sits behind the logo:
+//     'white' (default — decision #42's always-white panel) | 'none'
+//   logo_size     — how big the logo appears on the 1024px image:
+//     'small' (default — max 280×100, current behaviour)
+//     'medium' (max 480×160)
+//     'large'  (max 640×220 — roughly 2× the small width)
+//
+// These are read by services/gemini.js at composite time. The Gemini prompt
+// is also keyed on logo_position so the model is told which corner to leave
+// clear of text/subject. See decision-log entry added for this feature.
+//
+// First real use: The Manson Group ('top-right' / 'none' / 'large'). Their
+// dark-blue logo with built-in background reads better placed directly on
+// the image without a white panel; top-right also moves it out of the zone
+// Gemini tends to fill with headline text.
+{
+  const cCols = db.prepare('PRAGMA table_info(clients)').all().map(r => r.name);
+  if (!cCols.includes('logo_position')) {
+    db.exec(`ALTER TABLE clients ADD COLUMN logo_position TEXT DEFAULT 'bottom-right'`);
+    console.log('[db] migration: added logo_position to clients');
+  }
+  if (!cCols.includes('logo_panel')) {
+    db.exec(`ALTER TABLE clients ADD COLUMN logo_panel TEXT DEFAULT 'white'`);
+    console.log('[db] migration: added logo_panel to clients');
+  }
+  if (!cCols.includes('logo_size')) {
+    db.exec(`ALTER TABLE clients ADD COLUMN logo_size TEXT DEFAULT 'small'`);
+    console.log('[db] migration: added logo_size to clients');
+  }
+}
+
 // ── logo_processed_at columns ─────────────────────────────────────────────────
 // Marker timestamps recording that a logo file has been trimmed via
 // services/logo-prep.js and stored in its canonical pre-trimmed form in R2.

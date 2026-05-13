@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import CampaignProgress from './CampaignProgress.jsx';
 import NewClientModal from './NewClientModal.jsx';
 
@@ -17,6 +17,23 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
   const [logoFile, setLogoFile]                 = useState(null);
   const [activeTab, setActiveTab]               = useState('campaigns');
   const [showCampaignModal, setShowCampaignModal] = useState(false);
+
+  // Brand panel — three per-customer overrides for how the logo is
+  // composited onto generated images. See decision-log entry for this
+  // feature in BLUEPRINT.md. The save is debounced (1s) so each dropdown
+  // change doesn't fire an immediate PUT; this matches the email-side
+  // inline-edit pattern from decision #50/#51.
+  const [panelSaving, setPanelSaving]   = useState(false);
+  const [panelSaved,  setPanelSaved]    = useState(false);
+  const panelSaveTimer                  = useRef(null);
+  // Mirror the latest client state into a ref so the debounced save
+  // reads the most recent values rather than the stale closure snapshot
+  // from whenever the timer was first scheduled. Without this, rapidly
+  // clicking two dropdowns (e.g. Position then Background) would lose
+  // the first change — the second click's setState hasn't yet flushed
+  // when the timer's closure builds its payload.
+  const clientRef = useRef(null);
+  useEffect(() => { clientRef.current = client; }, [client]);
 
   async function load() {
     setLoading(true);
@@ -66,6 +83,54 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
     setLogoUploading(false);
     if (res.ok) load();
     else { const err = await res.json(); alert(err.error || 'Logo upload failed'); }
+  }
+
+  // Brand panel — update one of the three logo settings (logo_position,
+  // logo_panel, logo_size), debounced 1s. Mirrors the email-side default-
+  // sender inline-edit pattern (decision #50/#51) — every change splices
+  // immediately into local state so the UI stays responsive, then a single
+  // PUT fires once the operator stops clicking dropdowns.
+  //
+  // The PUT route is a full-replace (legacy shape) not a partial-update,
+  // so we send the entire current client object as FormData — same pattern
+  // as uploadNewRag above. The route's whitelist falls back to the existing
+  // stored value for any of the three brand-panel fields if the value is
+  // missing or invalid, so unsetting one accidentally is safe.
+  function updateBrandPanel(field, value) {
+    if (!client) return;
+    // Update local state immediately so the dropdown reflects the click
+    setClient(c => ({ ...c, [field]: value }));
+    setPanelSaved(false);
+
+    if (panelSaveTimer.current) clearTimeout(panelSaveTimer.current);
+    panelSaveTimer.current = setTimeout(async () => {
+      setPanelSaving(true);
+      try {
+        const fd = new FormData();
+        // Read the latest client snapshot via ref so rapid back-to-back
+        // dropdown changes don't drop earlier values from a stale closure.
+        // The most-recent click's setClient updater (functional form, line
+        // above) plus the useEffect that syncs into clientRef means
+        // clientRef.current already reflects every change up to now.
+        const latest = clientRef.current || client;
+        const merged = { ...latest, [field]: value };
+        Object.entries(merged).forEach(([k, v]) => {
+          if (typeof v === 'string') fd.append(k, v);
+        });
+        const res = await fetch(`/api/clients/${clientId}`, { method: 'PUT', body: fd });
+        if (res.ok) {
+          setPanelSaved(true);
+          setTimeout(() => setPanelSaved(false), 1800);
+        } else {
+          const err = await res.json().catch(() => ({}));
+          alert(err.error || 'Failed to save brand panel setting');
+        }
+      } catch (err) {
+        alert('Failed to save brand panel setting');
+      } finally {
+        setPanelSaving(false);
+      }
+    }, 1000);
   }
 
   async function uploadNewRag() {
@@ -209,6 +274,65 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
                       {logoUploading ? 'Uploading...' : 'Upload'}
                     </button>
                     <button onClick={() => setLogoFile(null)} style={{ fontSize: 11, padding: '3px 8px', background: 'none', border: '0.5px solid #d0d0cc', borderRadius: 6, cursor: 'pointer', color: '#888' }}>x</button>
+                  </div>
+                )}
+              </div>
+
+              {/* Brand panel — per-customer logo placement, background, and size */}
+              <div style={{ marginTop: 20, borderTop: '0.5px solid #f0f0ec', paddingTop: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <div style={{ fontSize: 12, color: '#555', fontWeight: 500 }}>Brand panel</div>
+                  <div style={{ fontSize: 11, color: panelSaving ? '#888' : (panelSaved ? GREEN : 'transparent'), transition: 'color 0.3s' }}>
+                    {panelSaving ? 'Saving…' : (panelSaved ? '✓ Saved' : '·')}
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: '#888', marginBottom: 12, lineHeight: 1.5 }}>
+                  Controls how this customer's logo is placed on every generated post image. Changes apply to all future image regenerations.
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Position</div>
+                    <select
+                      value={client.logo_position || 'bottom-right'}
+                      onChange={e => updateBrandPanel('logo_position', e.target.value)}
+                      style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '0.5px solid #d0d0cc', borderRadius: 6, background: '#fff', color: '#1a1a1a' }}
+                    >
+                      <option value="bottom-right">Bottom right</option>
+                      <option value="top-right">Top right</option>
+                      <option value="bottom-left">Bottom left</option>
+                      <option value="top-left">Top left</option>
+                    </select>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Background</div>
+                    <select
+                      value={client.logo_panel || 'white'}
+                      onChange={e => updateBrandPanel('logo_panel', e.target.value)}
+                      style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '0.5px solid #d0d0cc', borderRadius: 6, background: '#fff', color: '#1a1a1a' }}
+                    >
+                      <option value="white">White panel</option>
+                      <option value="none">No panel (logo directly on image)</option>
+                    </select>
+                  </div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Size</div>
+                    <select
+                      value={client.logo_size || 'small'}
+                      onChange={e => updateBrandPanel('logo_size', e.target.value)}
+                      style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '0.5px solid #d0d0cc', borderRadius: 6, background: '#fff', color: '#1a1a1a' }}
+                    >
+                      <option value="small">Small (default)</option>
+                      <option value="medium">Medium</option>
+                      <option value="large">Large (≈ 2× small)</option>
+                    </select>
+                  </div>
+                </div>
+                {(client.logo_panel === 'none') && (
+                  <div style={{ marginTop: 10, fontSize: 11, color: '#9a6f00', background: '#fff8e6', border: '0.5px solid #f0d68a', borderRadius: 6, padding: '7px 9px', lineHeight: 1.45 }}>
+                    With no panel, the logo sits directly on each image. Works best if the logo file already has its own opaque background or strong contrast. If a generated image hides the logo, regenerate it.
                   </div>
                 )}
               </div>

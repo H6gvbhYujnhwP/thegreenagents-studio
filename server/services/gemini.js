@@ -25,7 +25,7 @@ export async function generateImage(imagePrompt, client = {}, post = {}) {
     ? 'This is a CAROUSEL COVER SLIDE — title must be provocative and short (max 8 words) to force the viewer to swipe next.'
     : 'Standard LinkedIn post image.';
 
-  // BOTTOM RIGHT CORNER instruction (logo customers only).
+  // Corner-clearance instruction (logo customers only).
   //
   // Earlier wording asked Gemini to "leave the bottom-right 320x140px area
   // relatively clear (no text, no important design elements)." That worked
@@ -37,13 +37,28 @@ export async function generateImage(imagePrompt, client = {}, post = {}) {
   // halo extending above and left of our actual white logo panel.
   //
   // Softer wording below: still tells Gemini not to put text or the focal
-  // subject in the bottom-right (so our panel doesn't cover important
+  // subject in the chosen corner (so our panel doesn't cover important
   // content), but without the dimensions and "clear area" framing that was
-  // producing the halo. The panel itself is opaque white so anything
-  // underneath the panel is hidden anyway — the only thing we actually
-  // need from Gemini is "don't put your main subject there."
+  // producing the halo. The panel itself is opaque white (when used) so
+  // anything underneath is hidden anyway — the only thing we actually need
+  // from Gemini is "don't put your main subject there."
+  //
+  // The corner is per-customer: defaults to 'bottom-right' (current
+  // behaviour for every customer pre-this-feature), but configurable via
+  // clients.logo_position. The Manson Group is the first customer to use
+  // 'top-right' — their dark-blue logo reads better above the content,
+  // and top-right is also less likely to clash with Gemini's tendency to
+  // stamp headline text near the bottom of the image.
+  const logoPosition = client.logo_position || 'bottom-right';
+  const cornerLabel = {
+    'bottom-right': 'bottom-right',
+    'top-right':    'top-right',
+    'bottom-left':  'bottom-left',
+    'top-left':     'top-left'
+  }[logoPosition] || 'bottom-right';
+
   const brandSignatureRule = hasLogo
-    ? `7. BOTTOM RIGHT CORNER: Don't place text or the main subject in the bottom-right corner — a small logo will be added there in post-processing.`
+    ? `7. ${cornerLabel.toUpperCase()} CORNER: Don't place text or the main subject in the ${cornerLabel} corner — a small logo will be added there in post-processing.`
     : `7. BRAND SIGNATURE: The text "${brandName}" MUST appear clearly at the bottom right in a clean professional font. If background is dark use white text; if light use dark text.`;
 
   const nanoBananaPrompt = `Generate a LinkedIn post visual in the NANO BANNA style for ${brandName}.
@@ -113,7 +128,7 @@ ${brandSignatureRule}`;
 
   if (hasLogo) {
     try {
-      imageData = await compositeLogoBottomRight(imageData, imageMime, client.logo_url);
+      imageData = await compositeLogo(imageData, imageMime, client);
       imageMime  = 'image/png';
       console.log(`[gemini] Logo composited for: ${client.name}`);
     } catch (err) {
@@ -124,7 +139,40 @@ ${brandSignatureRule}`;
   return { data: imageData, mimeType: imageMime };
 }
 
-async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
+// ── Compositor ──────────────────────────────────────────────────────────────
+//
+// Reads three per-customer brand settings off the client row (with
+// defaults that match the original always-bottom-right / always-white /
+// small behaviour, so every pre-existing customer is unchanged):
+//
+//   client.logo_position — corner the logo lands in
+//     'bottom-right' (default) | 'top-right' | 'bottom-left' | 'top-left'
+//
+//   client.logo_panel    — whether a white panel sits behind the logo
+//     'white' (default) | 'none'
+//
+//   client.logo_size     — max dimensions the resized logo is fit to
+//     'small' (default — max 280×100) | 'medium' (480×160) | 'large' (640×220)
+//
+// All three are independent — a customer can have any combination. The
+// Manson Group is the first to use a non-default combo: top-right + none +
+// large, because their logo has its own dark-blue background built into
+// the file and reads better directly on the image than fenced inside a
+// white box.
+//
+// Trade-off on 'none' panel: the logo will sit directly on the generated
+// image's pixels, so a customer choosing this option is relying on their
+// logo having either (a) a built-in opaque background of its own (Manson's
+// dark-blue rectangle) or (b) enough contrast against typical Gemini
+// output to read clearly. We don't try to detect-and-warn; the operator
+// chose the setting deliberately and the fix when it fails is regenerate
+// the image (already a button in both admin and customer portal).
+async function compositeLogo(imageBase64, imageMime, client) {
+  const logoUrl  = client.logo_url;
+  const position = client.logo_position || 'bottom-right';
+  const panel    = client.logo_panel    || 'white';
+  const size     = client.logo_size     || 'small';
+
   const logoResponse = await fetch(logoUrl);
   if (!logoResponse.ok) throw new Error(`Failed to fetch logo: ${logoResponse.status}`);
   const logoBuffer = Buffer.from(await logoResponse.arrayBuffer());
@@ -133,8 +181,17 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
   const baseImage   = sharp(imageBuffer);
   const { width, height } = await baseImage.metadata();
 
-  const LOGO_MAX_W = 280;
-  const LOGO_MAX_H = 100;
+  // Size table. Small matches the original 280×100 — every existing
+  // customer keeps the same dimensions on first deploy. Large is roughly
+  // 2× the small width, matching the "twice as big" Manson ask. Medium
+  // sits in between for the rare future customer who wants prominence
+  // without going to a half-image-width logo.
+  const SIZE_TABLE = {
+    small:  { w: 280, h: 100 },
+    medium: { w: 480, h: 160 },
+    large:  { w: 640, h: 220 }
+  };
+  const { w: LOGO_MAX_W, h: LOGO_MAX_H } = SIZE_TABLE[size] || SIZE_TABLE.small;
 
   // No trim step here — by design. Trim is data-dependent (Sharp's threshold
   // detection looks at actual pixel values, which can shift between calls
@@ -157,71 +214,73 @@ async function compositeLogoBottomRight(imageBase64, imageMime, logoUrl) {
   const logoH    = logoMeta.height;
 
   // Padding around the wordmark on the white panel is 20% of the logo's
-  // smaller dimension AFTER resize. This scales naturally:
-  //
-  //   - Tower Leasing's wide wordmark (~280x76 after resize)
-  //       smaller dim = 76 → padding ≈ 15px → panel ≈ 310x106
-  //
-  //   - Cube6's compact logo + tagline (~100x100 after resize)
-  //       smaller dim = 100 → padding ≈ 20px → panel ≈ 140x140
-  //
-  // Trade-off vs a fixed pixel padding: the panel size now varies per
-  // customer, but in a way that matches their logo's intrinsic shape — so
-  // every customer's panel reads as proportionally comfortable rather than
-  // either cramped (small logo, fixed padding too tight) or boxy (compact
-  // logo, fixed padding too generous). The previous attempt at fixed 40px
-  // produced a visibly oversized panel around Cube6's small logo.
-  //
-  // Logo dimensions are fully deterministic per customer because trimming
-  // now happens once at upload time. Same logo bytes → same resized
-  // dimensions → same padding → same panel size, every post.
-  //
-  // Floor at 8px to guarantee a sliver of breathing room even on extreme
-  // edge cases (e.g. a tiny logo that resizes to 30x30 — 20% would be 6,
-  // and 6px padding visually fuses the wordmark into the panel edge).
-  const PADDING = Math.max(8, Math.round(Math.min(logoW, logoH) * 0.20));
+  // smaller dimension AFTER resize, floor 8px. Same rule as before — see
+  // decision #55 for the proportional-vs-fixed rationale. Only applies
+  // when panel === 'white'; with panel === 'none' there is no padding
+  // because there's no panel to pad against.
+  const PADDING = panel === 'white'
+    ? Math.max(8, Math.round(Math.min(logoW, logoH) * 0.20))
+    : 0;
 
-  const patchW = logoW + PADDING * 2;
-  const patchH = logoH + PADDING * 2;
-  const patchX = width  - patchW - 16;
-  const patchY = height - patchH - 16;
+  // Inset of the whole placement from the image edge. 16px matches the
+  // pre-feature constant and reads as comfortable on a 1024px image at
+  // every supported logo size.
+  const EDGE_INSET = 16;
 
-  // Panel is always solid white. We previously had a heuristic that picked
-  // dark-vs-white based on the image's bottom-right brightness, plus a
-  // separate dark-corners override for JPEG-as-PNG logos. Both are gone.
-  //
-  // Why: every real customer logo we've shipped (Cube6's dark-on-transparent,
-  // Tower Leasing's dark-green-on-white, Sweetbyte's dark-on-dark JPEG-fill)
-  // reads cleanly on white. The only case where white fails is a white-on-
-  // transparent logo (light wordmark for dark backgrounds) — none of our
-  // customers have one, and if a future customer did the right answer is to
-  // ask them for a darker version of the file rather than re-introduce
-  // detection branching.
-  //
-  // Predictability beats cleverness — same principle as decision #42 (one
-  // unified panel path for every logo, no skip-the-panel branch). The
-  // heuristic version produced a dark panel on Sweetbyte's regen because
-  // the image's bottom-right orange band was bright, even though Sweetbyte's
-  // logo is also dark — dark-on-dark, illegible.
-  const patchRgba = 'rgba(255,255,255,1.0)';
+  // Outer placement dimensions = logo + (panel padding × 2 if panelled).
+  const placementW = logoW + PADDING * 2;
+  const placementH = logoH + PADDING * 2;
 
-  const patchSvg = `<svg width="${patchW}" height="${patchH}">
-    <rect width="${patchW}" height="${patchH}" rx="6" ry="6" fill="${patchRgba}"/>
-  </svg>`;
+  // Pick the corner. Each branch sets the top-left of the placement
+  // rectangle; the logo then centres inside it (or sits at the placement
+  // origin when there's no panel and PADDING is 0, which is the same
+  // pixel either way).
+  let placementX, placementY;
+  switch (position) {
+    case 'top-right':
+      placementX = width  - placementW - EDGE_INSET;
+      placementY = EDGE_INSET;
+      break;
+    case 'bottom-left':
+      placementX = EDGE_INSET;
+      placementY = height - placementH - EDGE_INSET;
+      break;
+    case 'top-left':
+      placementX = EDGE_INSET;
+      placementY = EDGE_INSET;
+      break;
+    case 'bottom-right':
+    default:
+      placementX = width  - placementW - EDGE_INSET;
+      placementY = height - placementH - EDGE_INSET;
+  }
 
-  const patchBuffer = await sharp(Buffer.from(patchSvg))
-    .resize(patchW, patchH)
-    .png()
-    .toBuffer();
+  const compositeOps = [];
 
-  const logoLeft = patchX + PADDING;
-  const logoTop  = patchY + Math.floor((patchH - logoH) / 2);
+  // Add the white panel only when requested. With 'none' the logo
+  // sits directly on the generated image — relies on the logo file
+  // having its own readable background or sufficient inherent
+  // contrast.
+  if (panel === 'white') {
+    const patchSvg = `<svg width="${placementW}" height="${placementH}">
+      <rect width="${placementW}" height="${placementH}" rx="6" ry="6" fill="rgba(255,255,255,1.0)"/>
+    </svg>`;
+    const patchBuffer = await sharp(Buffer.from(patchSvg))
+      .resize(placementW, placementH)
+      .png()
+      .toBuffer();
+    compositeOps.push({ input: patchBuffer, left: placementX, top: placementY, blend: 'over' });
+  }
+
+  // Logo placement. When panelled, the logo centres inside the panel.
+  // When panel === 'none', PADDING is 0 so logo sits at the placement
+  // origin (which is already inset 16px from the image edge).
+  const logoLeft = placementX + PADDING;
+  const logoTop  = placementY + Math.floor((placementH - logoH) / 2);
+  compositeOps.push({ input: logoResized, left: logoLeft, top: logoTop, blend: 'over' });
 
   const composited = await sharp(imageBuffer)
-    .composite([
-      { input: patchBuffer, left: patchX,    top: patchY,   blend: 'over' },
-      { input: logoResized, left: logoLeft,  top: logoTop,  blend: 'over' }
-    ])
+    .composite(compositeOps)
     .png()
     .toBuffer();
 
