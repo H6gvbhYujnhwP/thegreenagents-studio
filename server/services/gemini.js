@@ -41,7 +41,7 @@ export async function generateImage(imagePrompt, client = {}, post = {}) {
     ? 'This is a CAROUSEL COVER SLIDE — title must be provocative and short (max 8 words) to force the viewer to swipe next.'
     : 'Standard LinkedIn post image.';
 
-  // Corner-clearance instruction (logo customers only).
+  // Brand-mark rule (logo customers only).
   //
   // Earlier wording asked Gemini to "leave the bottom-right 320x140px area
   // relatively clear (no text, no important design elements)." That worked
@@ -52,12 +52,21 @@ export async function generateImage(imagePrompt, client = {}, post = {}) {
   // factory-floor scenes) the lighter patch was clearly visible as a faint
   // halo extending above and left of our actual white logo panel.
   //
-  // Softer wording below: still tells Gemini not to put text or the focal
-  // subject in the chosen corner (so our panel doesn't cover important
-  // content), but without the dimensions and "clear area" framing that was
-  // producing the halo. The panel itself is opaque white (when used) so
-  // anything underneath is hidden anyway — the only thing we actually need
-  // from Gemini is "don't put your main subject there."
+  // Softer wording was tried — "don't place text or the main subject in
+  // the [corner]" — but that left the door wide open for Gemini to draw
+  // a brand signature, watermark, or invented logo SOMEWHERE ELSE in the
+  // image. With the prompt header saying "Generate a LinkedIn post visual
+  // for ${brandName}", Gemini routinely stamps "${brandName}" in a clean
+  // font with a small emblem in the opposite corner — producing a TWO-LOGO
+  // image once we paste the real customer logo via post-processing. First
+  // reported on The Manson Group ('top-right' position, AI stamping a fake
+  // 'MANSON' wordmark in the bottom-right).
+  //
+  // Current rule below: explicit blanket ban on any brand mark, watermark,
+  // logo, company name, or signature ANYWHERE in the image. Tells Gemini
+  // the real logo will be added in post-processing and which corner to
+  // keep clear of subjects/text so our paste lands cleanly. Applies to
+  // every customer with a logo file uploaded.
   //
   // The corner is per-customer: defaults to 'bottom-right' (current
   // behaviour for every customer pre-this-feature), but configurable via
@@ -74,7 +83,7 @@ export async function generateImage(imagePrompt, client = {}, post = {}) {
   }[logoPosition] || 'bottom-right';
 
   const brandSignatureRule = hasLogo
-    ? `7. ${cornerLabel.toUpperCase()} CORNER: Don't place text or the main subject in the ${cornerLabel} corner — a small logo will be added there in post-processing.`
+    ? `7. NO BRAND MARK ANYWHERE: Do NOT include any logo, watermark, company name, brand signature, or text reading "${brandName}" anywhere in the image — not in any corner, not as a decorative element, not as part of any sign, screen, label, or background. The real logo will be added separately in post-processing. Keep your main subject and headline text away from the ${cornerLabel} corner so the logo placement lands cleanly there.`
     : `7. BRAND SIGNATURE: The text "${brandName}" MUST appear clearly at the bottom right in a clean professional font. If background is dark use white text; if light use dark text.`;
 
   const nanoBananaPrompt = `Generate a LinkedIn post visual in the NANO BANNA style for ${brandName}.
