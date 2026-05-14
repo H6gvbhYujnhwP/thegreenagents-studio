@@ -965,13 +965,13 @@ function RefineRuleRow({ number, rule, onChange, onDelete, disabled }) {
         value={rule.text}
         onChange={e => onChange(e.target.value)}
         disabled={disabled}
-        rows={1}
+        rows={2}
         maxLength={REFINE_RULE_MAX_LEN}
         style={{
           flex:1, padding:'6px 10px', fontSize:13, lineHeight:1.5,
           border:`0.5px solid ${BORDER}`, borderRadius:6,
           background: disabled ? '#fafaf8' : CARD, color:TEXT,
-          resize:'vertical', minHeight:32, fontFamily:'inherit',
+          resize:'vertical', minHeight:54, fontFamily:'inherit',
         }}
       />
       <button onClick={onDelete} disabled={disabled} aria-label="Delete rule" style={{
