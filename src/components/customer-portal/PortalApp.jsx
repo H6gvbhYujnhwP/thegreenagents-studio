@@ -17,7 +17,7 @@
 //   - PortalCampaigns: read-only campaign list with stats
 //   - PortalSettings: change password, manage users, view branding
 // ─────────────────────────────────────────────────────────────────────────────
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 
 // Brand colours — match the admin Studio for visual consistency.
 const TGA_GREEN     = '#0F6E56';
@@ -952,6 +952,30 @@ function RefinePostsModal({ onClose }) {
 }
 
 function RefineRuleRow({ number, rule, onChange, onDelete, disabled }) {
+  // Auto-grow the textarea to fit its content. Without this, long rules get
+  // clipped INSIDE the textarea (using its own internal scrollbar) and the
+  // outer rules-list container's scrollbar never engages — even when many
+  // rules are present. By letting the textarea grow to its full content
+  // height, overflow shifts to the outer list, which is what the operator
+  // and customer actually want (one scrollbar for the whole list, not one
+  // per row).
+  //
+  // Strategy: on each render and on every change, set the element's height
+  // to its scrollHeight. The temporary 'auto' assignment is important — it
+  // collapses the textarea so scrollHeight reflects the content's true
+  // height, not the previous render's stretched height (otherwise the
+  // textarea would only ever grow, never shrink when text is deleted).
+  const taRef = useRef(null);
+
+  function resize() {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }
+
+  useEffect(() => { resize(); }, [rule.text]);
+
   return (
     <div style={{
       display:'flex', alignItems:'flex-start', gap:10,
@@ -962,16 +986,18 @@ function RefineRuleRow({ number, rule, onChange, onDelete, disabled }) {
         fontSize:12, color:MUTED, paddingTop:8, fontVariantNumeric:'tabular-nums',
       }}>{number}.</div>
       <textarea
+        ref={taRef}
         value={rule.text}
-        onChange={e => onChange(e.target.value)}
+        onChange={e => { onChange(e.target.value); resize(); }}
         disabled={disabled}
-        rows={2}
+        rows={1}
         maxLength={REFINE_RULE_MAX_LEN}
         style={{
           flex:1, padding:'6px 10px', fontSize:13, lineHeight:1.5,
           border:`0.5px solid ${BORDER}`, borderRadius:6,
           background: disabled ? '#fafaf8' : CARD, color:TEXT,
-          resize:'vertical', minHeight:54, fontFamily:'inherit',
+          resize:'none', minHeight:32, overflow:'hidden',
+          fontFamily:'inherit',
         }}
       />
       <button onClick={onDelete} disabled={disabled} aria-label="Delete rule" style={{
