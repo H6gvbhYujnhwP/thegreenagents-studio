@@ -1487,8 +1487,16 @@ function PostCard({ post, totalPosts, busy, expanded, readOnly, onToggleExpand, 
         {/* Validation warning badge — shown when the AI couldn't fully obey
             a customer rule, even after a retry. Tells the customer which
             rule was likely violated so they can refine their rules or
-            regenerate this post. Multiple violations shown stacked. */}
-        {Array.isArray(post.validation_warnings) && post.validation_warnings.length > 0 && (
+            regenerate this post. Multiple violations shown stacked.
+
+            HIDDEN at operator request (2026-05-14) — warnings were firing too
+            often due to Haiku interpreting rules thematically rather than
+            literally. Validation pass still runs server-side and attaches
+            validation_warnings to posts; this block just doesn't render
+            them. To re-enable, change `false &&` below back to a plain
+            check. The data is still being captured so re-enabling is a
+            one-line change. */}
+        {false && Array.isArray(post.validation_warnings) && post.validation_warnings.length > 0 && (
           <div style={{
             background:AMBER_BG, color:AMBER, border:`0.5px solid ${AMBER}33`,
             borderRadius:6, padding:'8px 10px', marginBottom:8, fontSize:11, lineHeight:1.5,
