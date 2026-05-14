@@ -312,7 +312,7 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
                       style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '0.5px solid #d0d0cc', borderRadius: 6, background: '#fff', color: '#1a1a1a' }}
                     >
                       <option value="white">White panel</option>
-                      <option value="none">No panel (logo directly on image)</option>
+                      <option value="none">No panel</option>
                     </select>
                   </div>
                 </div>
@@ -324,7 +324,7 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
                       onChange={e => updateBrandPanel('logo_size', e.target.value)}
                       style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '0.5px solid #d0d0cc', borderRadius: 6, background: '#fff', color: '#1a1a1a' }}
                     >
-                      <option value="small">Small (default)</option>
+                      <option value="small">Small</option>
                       <option value="medium">Medium</option>
                       <option value="large">Large (≈ 2× small)</option>
                     </select>

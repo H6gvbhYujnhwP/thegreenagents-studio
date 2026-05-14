@@ -52,6 +52,63 @@ function tryParseClaudeJSON(raw) {
   return null;
 }
 
+// ─── AI output sanitiser ──────────────────────────────────────────────────────
+// Strips stray non-Latin characters that Claude very occasionally emits in the
+// middle of otherwise-fine English prose. Most often invisible Unicode (zero-
+// width chars, byte-order marks) but visible CJK / Cyrillic / Arabic chars
+// have also been observed in the wild — first reported on a Manson Group post
+// where the phrase "your packaging hits a Materials Recovery Facility" had
+// stray CJK glyphs spliced into it mid-sentence.
+//
+// Whitelist is deliberately generous so we don't mangle legitimate text:
+//   - Tab, LF, CR (so paragraph breaks survive)
+//   - Printable ASCII (U+0020–U+007E)
+//   - Latin-1 Supplement + Latin Extended-A/B (U+00A0–U+024F) — covers all
+//     European accented chars (é à ü ñ ç ø etc.) for customer/place names
+//   - General Punctuation block subset (U+2010–U+2027, U+2030–U+205E) —
+//     em-dash, en-dash, ellipsis, curly quotes, bullet, etc. Claude uses
+//     these heavily as part of its writing style
+//   - Currency Symbols (U+20A0–U+20CF) — €, £ etc.
+//
+// Strips everything else: CJK (U+3000+), Cyrillic (U+0400+), Arabic (U+0600+),
+// Hebrew, Thai, Devanagari, zero-width chars, etc.
+//
+// Recurses through arrays + plain objects so a whole post object can be passed
+// in. Non-string leaves (numbers, booleans, null) are untouched. Logs a count +
+// sample when stripping happens, so we have visibility into how often it fires.
+const ALLOWED_CHARS_RE = /[^\t\n\r\u0020-\u007E\u00A0-\u024F\u2010-\u2027\u2030-\u205E\u20A0-\u20CF]/g;
+
+function sanitizeAiText(value, _ctx = 'root') {
+  if (typeof value === 'string') {
+    const stripped = [];
+    const cleaned  = value.replace(ALLOWED_CHARS_RE, (ch) => {
+      stripped.push(ch);
+      return '';
+    });
+    if (stripped.length > 0) {
+      // Log a sample of what was stripped so we can spot patterns. Cap at 10
+      // chars + show their hex codes so CJK glyphs are visible in logs even
+      // if the log viewer can't render them.
+      const sample = stripped.slice(0, 10)
+        .map(c => `U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`)
+        .join(' ');
+      console.log(`[sanitize] stripped ${stripped.length} non-Latin char(s) from AI output (${_ctx}): ${sample}${stripped.length > 10 ? ' …' : ''}`);
+    }
+    return cleaned;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item, i) => sanitizeAiText(item, `${_ctx}[${i}]`));
+  }
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = sanitizeAiText(v, `${_ctx}.${k}`);
+    }
+    return out;
+  }
+  return value;
+}
+
 // ─── Stage 3 LinkedIn Content Agent System Prompt ────────────────────────────
 // This is cached by Anthropic's prompt caching — sent once, reused across
 // all posts in a campaign at ~90% token cost reduction.
@@ -515,7 +572,10 @@ For text posts and video scripts, carousel_slides must be null.`
   }
 
   onProgress(`✓ Claude generated ${result.posts.length} posts.`);
-  return result;
+  // Strip stray non-Latin chars across all generated post text (occasional
+  // Claude artefact — see sanitizeAiText header). Recurses into the posts
+  // array so every text field on every post is cleaned.
+  return sanitizeAiText(result, `generatePosts:${client.name || client.id || '?'}`);
 }
 
 // ─── Get LinkedIn algorithm context (kept for compatibility, now handled by Claude inline) ──
@@ -624,7 +684,8 @@ Respond ONLY with valid JSON, no preamble, no markdown fences:
   }
 
   if (!result.linkedin_post_text) throw new Error('Claude returned no post text');
-  return result;
+  // Strip stray non-Latin chars (occasional Claude artefact — see header).
+  return sanitizeAiText(result, `regenerateSinglePost:${client.name || client.id || '?'}`);
 }
 
 // ─── Fix a post that scored below quality threshold ───────────────────────────
@@ -661,5 +722,6 @@ Return ONLY the improved post text — no preamble, no explanation, no JSON.`
 
   const textBlock = response.content.find(b => b.type === 'text');
   if (!textBlock) throw new Error('Claude returned no text for post fix');
-  return textBlock.text.trim();
+  // Strip stray non-Latin chars (occasional Claude artefact — see header).
+  return sanitizeAiText(textBlock.text.trim(), `fixPost:${post.id || '?'}`);
 }
