@@ -485,7 +485,7 @@ async function deployToDrafts(campaignId, client, posts) {
         workspaceId: client.supergrow_workspace_id,
         apiKey: client.supergrow_api_key,
         postText: post.linkedin_post_text,
-        imageUrls: post.image_url ? [post.image_url] : []
+        imageUrl: post.image_url || null
       });
 
       // Extract app_url and post id from Supergrow response
@@ -517,7 +517,7 @@ async function deployToDrafts(campaignId, client, posts) {
           workspaceId: client.supergrow_workspace_id,
           apiKey: client.supergrow_api_key,
           postText: post.linkedin_post_text,
-          imageUrls: post.image_url ? [post.image_url] : []
+          imageUrl: post.image_url || null
         });
 
         // Extract app_url from retry response

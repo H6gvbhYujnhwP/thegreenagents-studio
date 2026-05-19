@@ -866,7 +866,7 @@ router.post('/campaigns/:id/posts/approve-all', async (req, res) => {
         workspaceId: client.supergrow_workspace_id,
         apiKey:      client.supergrow_api_key,
         postText:    post.linkedin_post_text || '',
-        imageUrls:   post.image_url ? [post.image_url] : [],
+        imageUrl:    post.image_url || null,
       });
 
       // Supergrow returns its post id + app_url inside the MCP response payload.

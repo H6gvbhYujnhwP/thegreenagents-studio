@@ -247,30 +247,135 @@ export async function scorePost(workspaceId, postText, apiKey) {
   return { score, feedback, suggestions, raw };
 }
 
+// ─── Media upload (the REAL Supergrow image flow) ─────────────────────────────
+//
+// IMPORTANT — history / why this exists:
+// The previous code passed `image_urls: [...]` to create_post / queue_post.
+// Supergrow's confirmed tool schema has NO `image_urls` property and sets
+// `additionalProperties: false`, so that argument was SILENTLY DROPPED on every
+// call. Result: every post ever sent to Supergrow arrived as TEXT ONLY — the
+// generated image never attached. This was a latent bug on both the admin
+// draft path and the customer-portal approve path, not introduced by the
+// two-button work — it was discovered during it.
+//
+// The real flow, per Supergrow's create_media tool description, is three steps:
+//   1. create_media  → returns { media_item:{id}, upload:{ url, fields } }
+//                       (a presigned S3/MinIO multipart-POST target)
+//   2. POST the image bytes to upload.url as multipart/form-data, including
+//      EVERY key/value in upload.fields PLUS the file as the `file` field.
+//      This is the standard presigned-POST flow — NOT a plain HTTP PUT.
+//   3. confirm_media → marks the upload complete; the media_item.id can then
+//      be passed in `media_ids` on create_post / queue_post.
+//
+// Node 22 has global fetch / FormData / Blob, so no new dependency is needed
+// (the operator pushes via GitHub Desktop and cannot run npm install).
+//
+// uploadImageToSupergrow returns the confirmed media_id, or null on any
+// failure (logged). A null media_id means "post without image" — we never
+// block a post just because the image step failed, but we log loudly so the
+// failure is visible in Render logs rather than silent like the old bug.
+
+async function uploadImageToSupergrow({ workspaceId, apiKey, imageUrl }) {
+  if (!imageUrl) return null;
+  try {
+    // Fetch the image bytes from R2 (post.image_url is a public R2 URL).
+    const imgResp = await withTimeout(fetch(imageUrl), 20000, 'fetch image bytes');
+    if (!imgResp.ok) {
+      console.warn(`[supergrow] media: could not fetch image (${imgResp.status}) ${imageUrl}`);
+      return null;
+    }
+    const contentType = imgResp.headers.get('content-type') || 'image/png';
+    const arrayBuf = await imgResp.arrayBuffer();
+    const bytes = Buffer.from(arrayBuf);
+
+    // Derive a sane file name + extension from the content type.
+    const ext = contentType.includes('jpeg') ? 'jpg'
+      : contentType.includes('webp') ? 'webp'
+      : contentType.includes('gif') ? 'gif'
+      : 'png';
+    const fileName = `post-image.${ext}`;
+
+    // Step 1: create_media — get the presigned upload target.
+    const createRes = await callSupergrowTool(apiKey, 'create_media', {
+      workspace_id: workspaceId,
+      content_type: contentType,
+      file_name: fileName
+    });
+    const created = parseMcpJson(extractText(createRes));
+    const mediaItemId = created?.media_item?.id ?? created?.media_item?.media_id ?? null;
+    const upload = created?.upload || null;
+    if (!mediaItemId || !upload?.url) {
+      console.warn('[supergrow] media: create_media did not return a usable target:', JSON.stringify(created).slice(0, 400));
+      return null;
+    }
+
+    // Step 2: presigned multipart/form-data POST. ORDER MATTERS for S3/MinIO:
+    // every provided field first, then the file LAST.
+    const form = new FormData();
+    const fields = upload.fields || {};
+    for (const [k, v] of Object.entries(fields)) form.append(k, v);
+    form.append('file', new Blob([bytes], { type: contentType }), fileName);
+
+    const upResp = await withTimeout(
+      fetch(upload.url, { method: 'POST', body: form }),
+      30000,
+      'presigned upload POST'
+    );
+    // S3/MinIO presigned POST returns 204 (or 200/201) on success.
+    if (!(upResp.status === 204 || upResp.status === 201 || upResp.status === 200)) {
+      const body = await upResp.text().catch(() => '');
+      console.warn(`[supergrow] media: presigned upload failed (HTTP ${upResp.status}) ${body.slice(0, 300)}`);
+      return null;
+    }
+
+    // Step 3: confirm_media — idempotent; makes the media_id usable.
+    await callSupergrowTool(apiKey, 'confirm_media', {
+      workspace_id: workspaceId,
+      media_id: mediaItemId
+    });
+
+    console.log(`[supergrow] media: uploaded + confirmed media_id=${mediaItemId}`);
+    return mediaItemId;
+
+  } catch (err) {
+    console.warn(`[supergrow] media: upload pipeline error (non-fatal, post will go text-only): ${err.message}`);
+    return null;
+  }
+}
+
 /**
- * Queue a post for LinkedIn publishing (approval_mode = "auto").
+ * Queue a post — Supergrow auto-schedules it into the next available calendar
+ * slot (lands in the "scheduled" kanban column, posts automatically).
+ *
+ * NOTE: There is NO `approval_mode` argument in Supergrow's schema — the old
+ * comment claiming `approval_mode="auto"` was wrong. queue_post auto-schedules
+ * by definition (per its tool description). There is also no way to set an
+ * explicit post date/time via this API; Supergrow picks the slot.
+ *
  * Required: workspaceId, apiKey, postText
- * Optional: imageUrls[], companyPageId
+ * Optional: imageUrl (single public URL — uploaded via the media flow), companyPageId
  */
-export async function queuePost({ workspaceId, apiKey, postText, imageUrls = [], companyPageId = null }) {
+export async function queuePost({ workspaceId, apiKey, postText, imageUrl = null, companyPageId = null }) {
+  const mediaId = await uploadImageToSupergrow({ workspaceId, apiKey, imageUrl });
   const args = {
     workspace_id: workspaceId,
     text: postText,                    // Supergrow schema: 'text' not 'content'
-    ...(imageUrls.length > 0 && { image_urls: imageUrls }),
+    ...(mediaId && { media_ids: [mediaId] }),
     ...(companyPageId && { linked_in_company_page_id: companyPageId })
   };
   return callSupergrowTool(apiKey, 'queue_post', args);
 }
 
 /**
- * Create a draft post without publishing (approval_mode = "draft").
+ * Create a draft post (lands in the "draft" kanban column — does NOT publish).
  * Same arguments as queuePost.
  */
-export async function createDraft({ workspaceId, apiKey, postText, imageUrls = [], companyPageId = null }) {
+export async function createDraft({ workspaceId, apiKey, postText, imageUrl = null, companyPageId = null }) {
+  const mediaId = await uploadImageToSupergrow({ workspaceId, apiKey, imageUrl });
   const args = {
     workspace_id: workspaceId,
     text: postText,                    // Supergrow schema: 'text' not 'content'
-    ...(imageUrls.length > 0 && { image_urls: imageUrls }),
+    ...(mediaId && { media_ids: [mediaId] }),
     ...(companyPageId && { linked_in_company_page_id: companyPageId })
   };
   return callSupergrowTool(apiKey, 'create_post', args);
