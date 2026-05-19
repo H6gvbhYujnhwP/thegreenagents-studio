@@ -36,6 +36,26 @@ export default function CampaignProgress({ campaignId, onComplete }) {
   useEffect(() => {
     // EventSource cannot send custom headers — pass token as query param
     const token = localStorage.getItem('studioToken') || '';
+
+    // Always pull the saved campaign state once on mount, BEFORE/independent
+    // of the live feed. The live feed only reliably streams while a campaign
+    // is active; for a campaign that already finished or FAILED while the
+    // operator was away, the feed may open-then-close with no 'status' frame.
+    // This unconditional fetch guarantees a revisited failed campaign loads
+    // its stored error_log so the red "Campaign failed" banner shows the
+    // actual reason, not a blank/stale screen.
+    fetch(`/api/campaigns/${campaignId}`)
+      .then(r => r.json())
+      .then(d => {
+        setCampaign(d);
+        parsePosts(d);
+        if (d?.files_json) { try { setFiles(JSON.parse(d.files_json)); } catch (_) {} }
+        if (d?.status === 'failed' && d?.error_log) {
+          setLogs(l => l.some(m => m.includes(d.error_log)) ? l : [...l, `ERROR: ${d.error_log}`]);
+        }
+      })
+      .catch(() => {});
+
     const es = new EventSource(`/api/campaigns/progress/${campaignId}?token=${encodeURIComponent(token)}`);
     es.onerror = () => {
       setLogs(l => l.some(m => m.includes('Live updates')) ? l : [...l, 'ERROR: Live updates disconnected — page will keep polling for changes…']);
