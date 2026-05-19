@@ -70,6 +70,15 @@ try { db.exec('ALTER TABLE clients ADD COLUMN content_rules TEXT'); } catch (_) 
 // whether the operator finished the campaign or the customer self-served.
 try { db.exec("ALTER TABLE campaigns ADD COLUMN deployed_by TEXT"); } catch (_) {}
 
+// ── sent_to_customer_at column migration (decision #72) ──────────────────────
+// Set when the operator clicks "Send to customer for approval" (Button 1). No
+// Supergrow call happens — the portal already shows awaiting_approval
+// campaigns; this timestamp just lets the admin UI render the "waiting on
+// customer" state instead of the two action buttons. NULL = not yet sent to
+// the customer (operator hasn't clicked Button 1). Cleared/irrelevant once the
+// campaign reaches stage='done' via either route.
+try { db.exec("ALTER TABLE campaigns ADD COLUMN sent_to_customer_at TEXT"); } catch (_) {}
+
 // ── services.customer_pitch column migration ─────────────────────────────────
 // The original `description` column is admin-facing operator text — what the
 // service does and how to wire it up. The customer_pitch column is the

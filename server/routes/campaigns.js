@@ -6,7 +6,7 @@ import { generatePosts, getLinkedInAlgorithmContext, regenerateSinglePost } from
 import { getCurrentBrief } from './algorithm.js';
 import { generateImage, sleep } from '../services/gemini.js';
 import { uploadImageToR2 } from '../services/r2.js';
-import { createDraft, getContentDna } from '../services/supergrow.js';
+import { createDraft, queuePost, getContentDna } from '../services/supergrow.js';
 
 const router = Router();
 const sseClients = new Map();
@@ -85,8 +85,47 @@ router.post('/start/:clientId', requireAuth, async (req, res) => {
   });
 });
 
-// ─── Deploy to Supergrow (called after operator reviews the preview) ───────────
-// Always sends as DRAFTS via create_post — client approves in Supergrow before publishing.
+// ─── Two-button deploy (decision #72) ─────────────────────────────────────────
+// Replaces the old single "Send drafts to Supergrow" button. Supergrow Drafts
+// is no longer a destination — every route ends in Supergrow "scheduled".
+//
+//   Button 1  POST /:id/send-to-customer
+//     Does NOT push to Supergrow. The campaign is ALREADY visible in the
+//     customer portal the moment it reaches stage 'awaiting_approval' (the
+//     portal reads awaiting_approval campaigns directly). This endpoint just
+//     records that the operator has handed it to the customer. When the
+//     customer clicks "Approve all" in their portal, the existing portal
+//     approve-all path queues every post to Supergrow scheduled (and now
+//     carries images, via decision #71). Stage stays 'awaiting_approval' so
+//     the customer can still act on it; we stamp sent_to_customer_at for the
+//     admin UI to show the "waiting on customer" state.
+//
+//   Button 2  POST /:id/deploy   (kept the same path so nothing else breaks)
+//     Admin pushes directly, skipping the customer. queue_post every post →
+//     Supergrow "scheduled" column, auto-publishes on Supergrow's calendar
+//     slots. Campaign ends stage='done', deployed_by='admin'. The customer
+//     still sees it in their portal as completed history (same as the
+//     customer-portal approve-all end state).
+
+router.post('/:id/send-to-customer', requireAuth, (req, res) => {
+  const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+  if (campaign.stage !== 'awaiting_approval') {
+    return res.status(400).json({ error: `Cannot send from stage: ${campaign.stage}` });
+  }
+
+  const posts = JSON.parse(campaign.posts_json || '[]');
+  if (!posts.length) return res.status(400).json({ error: 'No posts to send' });
+
+  // No Supergrow call — the portal already shows awaiting_approval campaigns.
+  // Stamp the handoff time so the admin UI can render the "waiting on
+  // customer" banner instead of the action buttons. Stage is intentionally
+  // left at awaiting_approval so the customer can approve and Button 2
+  // remains available to the operator.
+  updateCampaign(campaign.id, { sent_to_customer_at: new Date().toISOString() });
+
+  res.json({ ok: true, total: posts.length, sent_to_customer: true });
+});
 
 router.post('/:id/deploy', requireAuth, async (req, res) => {
   const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
@@ -97,6 +136,9 @@ router.post('/:id/deploy', requireAuth, async (req, res) => {
 
   const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(campaign.client_id);
   if (!client) return res.status(404).json({ error: 'Client not found' });
+  if (!client.supergrow_workspace_id || !client.supergrow_api_key) {
+    return res.status(400).json({ error: 'This client is not fully configured for Supergrow.' });
+  }
 
   const posts = JSON.parse(campaign.posts_json || '[]');
   if (!posts.length) return res.status(400).json({ error: 'No posts to deploy' });
@@ -104,7 +146,7 @@ router.post('/:id/deploy', requireAuth, async (req, res) => {
   res.json({ ok: true, total: posts.length });
 
   // Run deployment in background, send progress via SSE
-  deployToDrafts(campaign.id, client, posts).catch(err => {
+  deployToQueue(campaign.id, client, posts).catch(err => {
     console.error('Deploy error:', err);
     updateCampaign(campaign.id, { status: 'failed', stage: 'error', error_log: err.message });
     sendSSE(campaign.id, { type: 'error', message: err.message });
@@ -466,6 +508,104 @@ async function runCampaign(campaignId, client, includeImages = true) {
 // ─── Deployment pipeline (runs after operator approves) ───────────────────────
 // All posts are ALWAYS sent as drafts via create_post.
 // Clients approve inside Supergrow before anything goes to LinkedIn.
+
+// deployToQueue (decision #72, Button 2) — queue_post every post so Supergrow
+// auto-schedules it into the "scheduled" kanban column. Mirrors deployToDrafts'
+// structure exactly (sequential to preserve post order, one retry per post,
+// app_url written back, same terminal stage/state) — only the Supergrow call
+// (queuePost vs createDraft) and the log wording differ. queuePost carries the
+// image via the media flow (decision #71). Supergrow owns the actual posting
+// time (its calendar slots) — there is no API to set an explicit datetime.
+//
+// deployToDrafts is kept below, unused, until this path is confirmed in
+// production (same caution as decision #71 — don't delete the fallback yet).
+async function deployToQueue(campaignId, client, posts) {
+  updateCampaign(campaignId, { stage: 'deploying', status: 'running', progress: 95 });
+  sendSSE(campaignId, { type: 'progress', stage: 'deploying' });
+
+  const results = [];
+  let deployed = 0;
+
+  for (let i = 0; i < posts.length; i++) {
+    const post = posts[i];
+    try {
+      sendSSE(campaignId, { type: 'log', message: `Scheduling post ${i + 1}/${posts.length} in Supergrow...` });
+
+      const result = await queuePost({
+        workspaceId: client.supergrow_workspace_id,
+        apiKey: client.supergrow_api_key,
+        postText: post.linkedin_post_text,
+        imageUrl: post.image_url || null
+      });
+
+      let supergrowPostId = null;
+      let supergrowAppUrl = null;
+      try {
+        const raw = result?.content;
+        const text = typeof raw === 'string' ? raw
+          : Array.isArray(raw) ? (raw.find(b => b.type === 'text')?.text ?? '') : '';
+        const clean = text.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
+        const parsed = JSON.parse(clean);
+        supergrowPostId = parsed?.post?.id ?? null;
+        supergrowAppUrl = parsed?.post?.app_url ?? null;
+      } catch (_) {}
+
+      posts[i] = { ...post, supergrow_post_id: supergrowPostId, supergrow_app_url: supergrowAppUrl };
+
+      results.push({ postId: post.id, status: 'success', result });
+      deployed++;
+      sendSSE(campaignId, { type: 'log', message: `✓ Post ${i + 1} scheduled in Supergrow.` });
+
+    } catch (err) {
+      console.error(`Schedule failed for post ${i + 1}:`, err.message);
+      try {
+        await sleep(2000);
+        const retry = await queuePost({
+          workspaceId: client.supergrow_workspace_id,
+          apiKey: client.supergrow_api_key,
+          postText: post.linkedin_post_text,
+          imageUrl: post.image_url || null
+        });
+
+        try {
+          const raw = retry?.content;
+          const text = typeof raw === 'string' ? raw
+            : Array.isArray(raw) ? (raw.find(b => b.type === 'text')?.text ?? '') : '';
+          const clean = text.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
+          const parsed = JSON.parse(clean);
+          posts[i] = { ...post, supergrow_post_id: parsed?.post?.id ?? null, supergrow_app_url: parsed?.post?.app_url ?? null };
+        } catch (_) {}
+
+        results.push({ postId: post.id, status: 'success_retry', result: retry });
+        deployed++;
+        sendSSE(campaignId, { type: 'log', message: `✓ Post ${i + 1} scheduled (retry succeeded).` });
+      } catch (retryErr) {
+        results.push({ postId: post.id, status: 'failed', error: retryErr.message });
+        sendSSE(campaignId, { type: 'log', message: `✗ Post ${i + 1} failed: ${retryErr.message}` });
+      }
+    }
+
+    const progress = 95 + Math.round((i + 1) / posts.length * 4);
+    updateCampaign(campaignId, { progress, posts_deployed: deployed });
+    sendSSE(campaignId, { type: 'progress', stage: 'deploying', posts_deployed: i + 1, total: posts.length });
+    await sleep(500);
+  }
+
+  const files = buildOutputFiles(client, posts, results);
+
+  updateCampaign(campaignId, {
+    status: 'completed',
+    stage: 'done',
+    deployed_by: 'admin',
+    progress: 100,
+    posts_deployed: deployed,
+    posts_json: JSON.stringify(posts),
+    files_json: JSON.stringify(files),
+    completed_at: new Date().toISOString()
+  });
+
+  sendSSE(campaignId, { type: 'complete', deployed, total: posts.length, files });
+}
 
 async function deployToDrafts(campaignId, client, posts) {
   updateCampaign(campaignId, { stage: 'deploying', status: 'running', progress: 95 });

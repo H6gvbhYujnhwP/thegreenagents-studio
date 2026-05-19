@@ -126,6 +126,7 @@ export default function CampaignProgress({ campaignId, onComplete }) {
   // scrollable; new lines still appear, the page just doesn't move.
 
   async function handleDeploy() {
+    if (!window.confirm('Push all posts straight to Supergrow scheduled? They will auto-publish on Supergrow\u2019s calendar slots, skipping customer approval.')) return;
     setDeploying(true);
     try {
       const res = await fetch(`/api/campaigns/${campaignId}/deploy`, { method: 'POST' });
@@ -136,6 +137,26 @@ export default function CampaignProgress({ campaignId, onComplete }) {
       }
     } catch (err) {
       setLogs(l => [...l, `Deploy failed: ${err.message}`]);
+      setDeploying(false);
+    }
+  }
+
+  async function handleSendToCustomer() {
+    setDeploying(true);
+    try {
+      const res = await fetch(`/api/campaigns/${campaignId}/send-to-customer`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        setLogs(l => [...l, `Send error: ${data.error}`]);
+        setDeploying(false);
+        return;
+      }
+      // Reflect the new state locally so the banner switches to "waiting on
+      // customer" without needing a full refresh.
+      setCampaign(c => c ? { ...c, sent_to_customer_at: new Date().toISOString() } : c);
+      setDeploying(false);
+    } catch (err) {
+      setLogs(l => [...l, `Send failed: ${err.message}`]);
       setDeploying(false);
     }
   }
@@ -232,6 +253,9 @@ export default function CampaignProgress({ campaignId, onComplete }) {
   // banner copy and locks the per-card Edit/Rewrite/New image buttons so a
   // stale tab can't blow away posts that are already live.
   const isPortalDeployed = isDone && campaign?.deployed_by === 'portal';
+  // Button 1 ("Send to customer for approval") was clicked: switch the banner
+  // to the "waiting on customer" state. Only meaningful while awaiting_approval.
+  const sentToCustomer = isAwaiting && !!campaign?.sent_to_customer_at;
 
   return (
     <div style={{ padding: '24px 32px', width: '100%', boxSizing: 'border-box' }}>
@@ -310,30 +334,78 @@ export default function CampaignProgress({ campaignId, onComplete }) {
       {(isAwaiting || isDone) && posts.length > 0 && (
         <div style={{ marginBottom: 24 }}>
 
-          {/* Deploy banner */}
-          {isAwaiting && (
+          {/* Deploy banner — two-button flow (decision #72).
+              State A: not yet sent → two buttons.
+              State B: sent to customer → "waiting on customer" + Button 2 still available. */}
+          {isAwaiting && !sentToCustomer && (
             <div style={{
               background: '#FFFBF0', border: '1px solid #FAC775', borderRadius: 10,
-              padding: '16px 20px', marginBottom: 20,
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap'
+              padding: '16px 20px', marginBottom: 20
             }}>
-              <div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: '#1a1a1a' }}>{posts.length} posts ready for review</div>
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: '#1a1a1a' }}>{posts.length} posts ready</div>
                 <div style={{ fontSize: 12, color: '#888', marginTop: 3 }}>
-                  Edit, regenerate, or approve each post below. All posts will be saved as <strong>drafts</strong> in Supergrow.
+                  Review, edit or regenerate any post below. Then choose how this campaign goes out.
                 </div>
+              </div>
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                <button
+                  onClick={handleSendToCustomer}
+                  disabled={deploying}
+                  style={{
+                    flex: 1, minWidth: 220,
+                    background: '#fff', color: '#185FA5', border: '1px solid #85B7EB',
+                    padding: '11px 20px', borderRadius: 8, fontWeight: 600, fontSize: 13,
+                    cursor: deploying ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  {deploying ? 'Working…' : 'Send to customer for approval'}
+                </button>
+                <button
+                  onClick={handleDeploy}
+                  disabled={deploying}
+                  style={{
+                    flex: 1, minWidth: 220,
+                    background: deploying ? '#9FE1CB' : GREEN, color: '#fff', border: 'none',
+                    padding: '11px 20px', borderRadius: 8, fontWeight: 600, fontSize: 13,
+                    cursor: deploying ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  {deploying ? 'Working…' : 'Push to Supergrow scheduled'}
+                </button>
+              </div>
+              <div style={{ fontSize: 11, color: '#aaa', marginTop: 11, lineHeight: 1.5 }}>
+                Left: the customer reviews in their portal, approves there, then it schedules.
+                &nbsp;·&nbsp; Right: skips the customer, schedules now. Supergrow picks the exact posting times from its calendar slots.
+              </div>
+            </div>
+          )}
+
+          {isAwaiting && sentToCustomer && (
+            <div style={{
+              background: '#F4F9FE', border: '1px solid #85B7EB', borderRadius: 10,
+              padding: '16px 20px', marginBottom: 20
+            }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#1a1a1a' }}>Waiting on customer</div>
+              <div style={{ fontSize: 12, color: '#888', marginTop: 3, lineHeight: 1.5 }}>
+                The customer can see all {posts.length} posts in their portal. When they approve,
+                the campaign schedules into Supergrow automatically.
               </div>
               <button
                 onClick={handleDeploy}
                 disabled={deploying}
                 style={{
+                  marginTop: 13,
                   background: deploying ? '#9FE1CB' : GREEN, color: '#fff', border: 'none',
-                  padding: '11px 24px', borderRadius: 8, fontWeight: 600, fontSize: 13,
-                  cursor: deploying ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap', flexShrink: 0
+                  padding: '10px 18px', borderRadius: 8, fontWeight: 600, fontSize: 13,
+                  cursor: deploying ? 'not-allowed' : 'pointer'
                 }}
               >
-                {deploying ? 'Sending…' : `Send ${posts.length} drafts to Supergrow for client approval`}
+                {deploying ? 'Working…' : 'Push to Supergrow scheduled instead'}
               </button>
+              <span style={{ fontSize: 11, color: '#aaa', marginLeft: 10 }}>
+                Still available if you decide not to wait for the customer.
+              </span>
             </div>
           )}
 
