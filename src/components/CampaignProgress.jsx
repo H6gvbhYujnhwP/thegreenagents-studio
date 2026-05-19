@@ -204,6 +204,40 @@ export default function CampaignProgress({ campaignId, onComplete }) {
     }
   }
 
+  // Per-post logo Position/Size/Background change. Synchronous endpoint (no
+  // SSE) — the updated post comes straight back in the JSON response, so we
+  // splice it into `posts` directly. No AI cost; ~½ sec. Mirrors the
+  // customer-portal recomposite behaviour (decision #65 / parity #73).
+  async function handleRecompositeLogo(postIndex, patch) {
+    setCard(postIndex, { recompLogo: true });
+    try {
+      const res = await fetch(`/api/campaigns/${campaignId}/recomposite-logo/${postIndex}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (data.error === 'pre_logo_unavailable') {
+          setLogs(l => [...l, `Logo controls need a fresh image — click New image on post ${postIndex + 1} first.`]);
+        } else {
+          setLogs(l => [...l, `Logo update error: ${data.error}`]);
+        }
+        setCard(postIndex, { recompLogo: false });
+        return;
+      }
+      setPosts(prev => {
+        const next = [...prev];
+        next[postIndex] = data.post;
+        return next;
+      });
+      setCard(postIndex, { recompLogo: false });
+    } catch (err) {
+      setLogs(l => [...l, `Logo update failed: ${err.message}`]);
+      setCard(postIndex, { recompLogo: false });
+    }
+  }
+
   function startEdit(postIndex, currentText) {
     setCard(postIndex, { editing: true, editText: currentText });
   }
@@ -464,7 +498,12 @@ export default function CampaignProgress({ campaignId, onComplete }) {
               const isEditing   = !!cs.editing;
               const isRegenImg  = !!cs.regenImage;
               const isRegenPost = !!cs.regenPost;
-              const isBusy      = isRegenImg || isRegenPost;
+              const isRecompLogo = !!cs.recompLogo;
+              const isBusy      = isRegenImg || isRegenPost || isRecompLogo;
+              const logoEnabled = !!post.pre_logo_image_url;
+              const logoPos     = post.logo_position || post.default_logo_position || 'bottom-right';
+              const logoSize    = post.logo_size     || post.default_logo_size     || 'small';
+              const logoPanel   = post.logo_panel    || post.default_logo_panel    || 'white';
 
               return (
                 <div key={post.id || i} style={{
@@ -480,17 +519,12 @@ export default function CampaignProgress({ campaignId, onComplete }) {
                       ? <img src={post.image_url} alt={`Post ${i + 1}`} style={{ width: '100%', height: 'auto', maxHeight: 300, objectFit: 'contain', background: '#f5f5f3', display: 'block' }} onError={e => { e.target.style.display = 'none'; }} />
                       : <div style={{ height: 80, background: '#f5f5f3', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><span style={{ fontSize: 11, color: '#bbb' }}>No image generated</span></div>
                     }
-                    {isRegenImg && (
-                      <div style={{ position: 'absolute', inset: 0, background: 'rgba(255,255,255,0.80)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 6 }}>
+                    {(isRegenImg || isRecompLogo) && (
+                      <div style={{ position: 'absolute', inset: 0, background: 'rgba(255,255,255,0.80)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 6, textAlign: 'center', padding: 12 }}>
                         <div style={{ width: 24, height: 24, border: `2px solid ${GREEN}`, borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
-                        <span style={{ fontSize: 11, color: DARK, fontWeight: 500 }}>Generating…</span>
+                        <span style={{ fontSize: 11, color: DARK, fontWeight: 500 }}>{isRecompLogo ? 'Updating logo…' : 'Generating…'}</span>
+                        {isRecompLogo && <span style={{ fontSize: 10, color: '#888' }}>Repositioning logo — no charge.</span>}
                       </div>
-                    )}
-                    {isAwaiting && !isBusy && (
-                      <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleRegenImage(i); }} title="Regenerate image"
-                        style={{ position: 'absolute', bottom: 8, left: 8, background: 'rgba(255,255,255,0.92)', border: '1px solid #ddd', borderRadius: 6, padding: '4px 8px', fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, color: '#333' }}>
-                        New image
-                      </button>
                     )}
                   </div>
 
@@ -552,18 +586,77 @@ export default function CampaignProgress({ campaignId, onComplete }) {
                         able to overwrite them from this screen. The view here
                         becomes read-only. */}
                     {isAwaiting && !isEditing && (
-                      <div style={{ display: 'flex', gap: 6, marginTop: 10, borderTop: '1px solid #f0f0ec', paddingTop: 10 }}>
-                        <button onClick={() => startEdit(i, post.linkedin_post_text)} disabled={isBusy}
-                          style={{ flex: 1, fontSize: 11, padding: '5px 0', background: '#f5f5f3', border: '1px solid #ddd', borderRadius: 6, cursor: isBusy ? 'not-allowed' : 'pointer', color: '#333' }}>
-                          ✏️ Edit text
-                        </button>
-                        <button onClick={() => handleRegenPost(i)} disabled={isBusy}
-                          style={{ flex: 1, fontSize: 11, padding: '5px 0', background: '#f5f5f3', border: '1px solid #ddd', borderRadius: 6, cursor: isBusy ? 'not-allowed' : 'pointer', color: '#333', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
-                          {isRegenPost
-                            ? <><span style={{ width: 12, height: 12, border: `1.5px solid ${GREEN}`, borderTopColor: 'transparent', borderRadius: '50%', display: 'inline-block', animation: 'spin 0.8s linear infinite' }} /> Writing…</>
-                            : '🔄 Rewrite post'}
-                        </button>
-                      </div>
+                      <>
+                        {/* Per-post logo controls — admin parity with the
+                            customer card (decision #73). Greys out with a
+                            hint when the post has no stored pre-logo image,
+                            exactly like the customer side. */}
+                        <div style={{
+                          marginTop: 10, paddingTop: 10,
+                          borderTop: '0.5px dashed #e8b04a',
+                          opacity: (isBusy || !logoEnabled) ? 0.6 : 1,
+                        }}>
+                          <div style={{ fontSize: 10, color: '#9a6f00', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 500, marginBottom: 6 }}>
+                            Logo on this image
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
+                            <div>
+                              <div style={{ fontSize: 10, color: '#999', marginBottom: 3 }}>Position</div>
+                              <select value={logoPos} disabled={isBusy || !logoEnabled}
+                                onChange={e => handleRecompositeLogo(i, { logo_position: e.target.value })}
+                                style={{ width: '100%', fontSize: 11, padding: '5px 4px', border: '1px solid #ddd', borderRadius: 5, background: '#fff', color: '#333', cursor: (isBusy || !logoEnabled) ? 'not-allowed' : 'pointer' }}>
+                                <option value="top-right">Top right</option>
+                                <option value="top-left">Top left</option>
+                                <option value="bottom-right">Bottom right</option>
+                                <option value="bottom-left">Bottom left</option>
+                              </select>
+                            </div>
+                            <div>
+                              <div style={{ fontSize: 10, color: '#999', marginBottom: 3 }}>Size</div>
+                              <select value={logoSize} disabled={isBusy || !logoEnabled}
+                                onChange={e => handleRecompositeLogo(i, { logo_size: e.target.value })}
+                                style={{ width: '100%', fontSize: 11, padding: '5px 4px', border: '1px solid #ddd', borderRadius: 5, background: '#fff', color: '#333', cursor: (isBusy || !logoEnabled) ? 'not-allowed' : 'pointer' }}>
+                                <option value="large">Large</option>
+                                <option value="medium">Medium</option>
+                                <option value="small">Small</option>
+                              </select>
+                            </div>
+                            <div>
+                              <div style={{ fontSize: 10, color: '#999', marginBottom: 3 }}>Background</div>
+                              <select value={logoPanel} disabled={isBusy || !logoEnabled}
+                                onChange={e => handleRecompositeLogo(i, { logo_panel: e.target.value })}
+                                style={{ width: '100%', fontSize: 11, padding: '5px 4px', border: '1px solid #ddd', borderRadius: 5, background: '#fff', color: '#333', cursor: (isBusy || !logoEnabled) ? 'not-allowed' : 'pointer' }}>
+                                <option value="white">White panel</option>
+                                <option value="none">No panel</option>
+                              </select>
+                            </div>
+                          </div>
+                          {!logoEnabled && (
+                            <div style={{ fontSize: 10, color: '#999', marginTop: 6, lineHeight: 1.4, fontStyle: 'italic' }}>
+                              Click <span style={{ fontWeight: 500, fontStyle: 'normal' }}>New image</span> to enable these controls on this post.
+                            </div>
+                          )}
+                        </div>
+
+                        <div style={{ display: 'flex', gap: 6, marginTop: 10, borderTop: '1px solid #f0f0ec', paddingTop: 10 }}>
+                          <button onClick={() => startEdit(i, post.linkedin_post_text)} disabled={isBusy}
+                            style={{ flex: 1, fontSize: 11, padding: '5px 0', background: '#f5f5f3', border: '1px solid #ddd', borderRadius: 6, cursor: isBusy ? 'not-allowed' : 'pointer', color: '#333' }}>
+                            ✏️ Edit text
+                          </button>
+                          <button onClick={() => handleRegenPost(i)} disabled={isBusy}
+                            style={{ flex: 1, fontSize: 11, padding: '5px 0', background: '#f5f5f3', border: '1px solid #ddd', borderRadius: 6, cursor: isBusy ? 'not-allowed' : 'pointer', color: '#333', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                            {isRegenPost
+                              ? <><span style={{ width: 12, height: 12, border: `1.5px solid ${GREEN}`, borderTopColor: 'transparent', borderRadius: '50%', display: 'inline-block', animation: 'spin 0.8s linear infinite' }} /> Writing…</>
+                              : '🔄 Rewrite post'}
+                          </button>
+                          <button onClick={() => handleRegenImage(i)} disabled={isBusy}
+                            style={{ flex: 1, fontSize: 11, padding: '5px 0', background: '#f5f5f3', border: '1px solid #ddd', borderRadius: 6, cursor: isBusy ? 'not-allowed' : 'pointer', color: '#333', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                            {isRegenImg
+                              ? <><span style={{ width: 12, height: 12, border: `1.5px solid ${GREEN}`, borderTopColor: 'transparent', borderRadius: '50%', display: 'inline-block', animation: 'spin 0.8s linear infinite' }} /> Imaging…</>
+                              : '🖼️ New image'}
+                          </button>
+                        </div>
+                      </>
                     )}
                   </div>
                 </div>

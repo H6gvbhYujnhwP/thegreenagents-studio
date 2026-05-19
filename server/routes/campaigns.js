@@ -4,7 +4,7 @@ import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { generatePosts, getLinkedInAlgorithmContext, regenerateSinglePost } from '../services/openai.js';
 import { getCurrentBrief } from './algorithm.js';
-import { generateImage, sleep } from '../services/gemini.js';
+import { generateImage, recompositeLogoFromUrl, sleep } from '../services/gemini.js';
 import { uploadImageToR2 } from '../services/r2.js';
 import { createDraft, queuePost, getContentDna } from '../services/supergrow.js';
 
@@ -236,6 +236,105 @@ router.post('/:id/regenerate-image/:postIndex', requireAuth, async (req, res) =>
       message: `Image regen failed: ${err.message}`
     });
   }
+});
+
+// ─── Recomposite logo for a single post (admin mirror of the portal one) ───────
+// Per-post logo Position/Size/Background override. Re-runs ONLY the compositor
+// on the post's stored pre-logo image — no Gemini call, no AI cost, ~½ sec.
+// Mirrors the customer-portal POST /api/portal/posts/:id/recomposite-logo
+// behaviour exactly (decision #65) but on the admin side with admin auth and
+// posts addressed by index in posts_json. Uses the SAME shared
+// recompositeLogoFromUrl service the portal uses — no duplicate compositor.
+// Returns 400 { error:'pre_logo_unavailable' } for posts generated before the
+// pre-logo storage feature shipped, so the admin card shows the same "click
+// New image to enable" hint the customer card does.
+router.post('/:id/recomposite-logo/:postIndex', requireAuth, async (req, res) => {
+  const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+
+  // Same deployed-lock as regenerate-image: once a campaign is done its posts
+  // are live/queued in Supergrow — don't let a stale tab mutate them.
+  if (campaign.stage === 'done') {
+    return res.status(400).json({ error: 'Campaign is already deployed — logo changes are locked.' });
+  }
+
+  const postIndex = parseInt(req.params.postIndex, 10);
+  const posts = JSON.parse(campaign.posts_json || '[]');
+  if (postIndex < 0 || postIndex >= posts.length) {
+    return res.status(400).json({ error: `Post index ${postIndex} out of range` });
+  }
+
+  const ALLOWED_POSITIONS = ['bottom-right', 'top-right', 'bottom-left', 'top-left'];
+  const ALLOWED_SIZES     = ['small', 'medium', 'large'];
+  const ALLOWED_PANELS    = ['white', 'none'];
+
+  const reqPosition = req.body?.logo_position;
+  const reqSize     = req.body?.logo_size;
+  const reqPanel    = req.body?.logo_panel;
+
+  if (reqPosition !== undefined && reqPosition !== null && !ALLOWED_POSITIONS.includes(reqPosition)) {
+    return res.status(400).json({ error: `Invalid logo_position: ${reqPosition}` });
+  }
+  if (reqSize !== undefined && reqSize !== null && !ALLOWED_SIZES.includes(reqSize)) {
+    return res.status(400).json({ error: `Invalid logo_size: ${reqSize}` });
+  }
+  if (reqPanel !== undefined && reqPanel !== null && !ALLOWED_PANELS.includes(reqPanel)) {
+    return res.status(400).json({ error: `Invalid logo_panel: ${reqPanel}` });
+  }
+
+  const post = posts[postIndex];
+  if (!post.pre_logo_image_url) {
+    return res.status(400).json({
+      error: 'pre_logo_unavailable',
+      message: 'This post was generated before per-post logo controls were available. Click "New image" to enable them on this post.',
+    });
+  }
+
+  const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(campaign.client_id);
+  if (!client) return res.status(404).json({ error: 'Client not found' });
+  if (!client.logo_url) {
+    return res.status(400).json({ error: 'No customer logo configured — re-composite has nothing to place.' });
+  }
+
+  // Supplied value wins; else keep the post's existing override; else fall
+  // back to the customer-level default (handled inside compositeLogo). So
+  // changing only Position preserves the existing Size/Panel overrides.
+  const effectivePosition = (reqPosition !== undefined && reqPosition !== null)
+    ? reqPosition : (post.logo_position || null);
+  const effectiveSize = (reqSize !== undefined && reqSize !== null)
+    ? reqSize : (post.logo_size || null);
+  const effectivePanel = (reqPanel !== undefined && reqPanel !== null)
+    ? reqPanel : (post.logo_panel || null);
+
+  let newImageUrl;
+  try {
+    const overrides = {};
+    if (effectivePosition) overrides.logo_position = effectivePosition;
+    if (effectiveSize)     overrides.logo_size     = effectiveSize;
+    if (effectivePanel)    overrides.logo_panel    = effectivePanel;
+
+    const imageData = await recompositeLogoFromUrl(post.pre_logo_image_url, client, overrides);
+    newImageUrl = await uploadImageToR2(
+      imageData.data,
+      imageData.mimeType,
+      client.id,
+      `${post.id || `post-${postIndex}`}-recomp`
+    );
+  } catch (err) {
+    console.error(`[campaigns] recomposite-logo failed post ${postIndex}:`, err.message);
+    return res.status(502).json({ error: `Logo re-composite failed: ${err.message}` });
+  }
+
+  posts[postIndex] = {
+    ...post,
+    image_url: newImageUrl,
+    logo_position: effectivePosition,
+    logo_size:     effectiveSize,
+    logo_panel:    effectivePanel,
+  };
+  updateCampaign(campaign.id, { posts_json: JSON.stringify(posts) });
+
+  res.json({ ok: true, postIndex, post: posts[postIndex] });
 });
 
 // ─── Regenerate post text for a single post ───────────────────────────────────
