@@ -3179,23 +3179,84 @@ function PortalThreadMessage({ msg }) {
 }
 
 // ── CAMPAIGNS PAGE (read-only) ───────────────────────────────────────────────
+// ── PORTAL CAMPAIGNS (redesigned 2026-05-20, decision #87) ───────────────────
+// Read-only view of email campaigns the customer has had run on their behalf.
+// Four UX choices locked across the mockup rounds (see decision #87):
+//
+//   1. Inline accordion — clicking a campaign row expands a detail panel
+//      below the row in the same table. NOT a side drawer or full-page view.
+//   2. Dual tracking surface — every campaign row carries a "Tracking" pill
+//      AND every open/click stat carries a "X / Y tracked" denominator label
+//      when tracking_split_available is true. Honest 0/0 omitted on historic
+//      campaigns (tracking_split_available=false) — we just show the pill.
+//   3. Drip tabs matching admin — multi-step drips render their per-step
+//      breakdown as a "1st contact / 2nd contact / 3rd contact" tab strip
+//      inside the accordion panel, matching the admin CampaignModal pattern.
+//   4. Combined headline + per-step breakdown — table row shows combined
+//      totals across all steps; expanded panel tabs show per-step rollup.
+//
+// Plus a dismissable amber explainer banner above the KPI tiles about what
+// tracking means and why some emails aren't tracked. Dismissed state lives in
+// localStorage (try/catch-wrapped per the project pattern — same as the CRM
+// localStorage usage in #79 / #81).
+//
+// Three honesty caveats baked into the design (data model doesn't carry these
+// distinctions, so the frontend doesn't pretend to either):
+//   - No hard vs soft bounce split. One "Bounces" number per campaign.
+//   - No unsubscribe source breakdown. One "Unsubscribes" number.
+//   - No per-step reply attribution. Reply count shown at campaign level
+//     only; per-step tabs do NOT show a reply stat.
+//
+// The detail endpoint (GET /api/portal/campaigns/:id) is only hit when a row
+// is expanded — keeps the initial list fast.
+
+const PORTAL_CAMPAIGNS_BANNER_KEY = 'studio.portal.campaigns.banner_dismissed';
+
 function PortalCampaigns() {
   const [campaigns, setCampaigns]     = useState(null);  // null=loading, []=none, [...]=list
-  const [notSubscribed, setNotSubscribed] = useState(false);
   const [loadError, setLoadError]     = useState(null);
+  const [expandedId, setExpandedId]   = useState(null);
+  // Detail payload cache keyed by campaign id. Once a row is expanded we keep
+  // the detail in memory so reopening the same row is instant.
+  const [details, setDetails]         = useState({});    // { [id]: { loading, error, data } }
+  // Banner dismiss state — read once on mount so a stale tab doesn't fight
+  // a tab that just dismissed it. We re-read localStorage on dismiss to write.
+  const [bannerDismissed, setBannerDismissed] = useState(() => {
+    try { return localStorage.getItem(PORTAL_CAMPAIGNS_BANNER_KEY) === '1'; }
+    catch { return false; }
+  });
 
   useEffect(() => {
     fetch('/api/portal/campaigns', { credentials:'include' })
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
-      .then(d => {
-        setCampaigns(d.campaigns || []);
-        setNotSubscribed(!!d.not_subscribed);
-      })
+      .then(d => setCampaigns(d.campaigns || []))
       .catch(e => {
         setLoadError(String(e));
         setCampaigns([]);
       });
   }, []);
+
+  // Toggle expand. When opening a row we kick off a fetch for the detail
+  // payload (per-step html_body + replies list) if not already cached. The
+  // table row stays visible — the detail panel renders below it.
+  function toggleExpand(id) {
+    if (expandedId === id) {
+      setExpandedId(null);
+      return;
+    }
+    setExpandedId(id);
+    if (details[id]?.data) return;  // cached
+    setDetails(prev => ({ ...prev, [id]: { loading: true, error: null, data: null } }));
+    fetch(`/api/portal/campaigns/${encodeURIComponent(id)}`, { credentials:'include' })
+      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+      .then(d => setDetails(prev => ({ ...prev, [id]: { loading:false, error:null, data:d } })))
+      .catch(e => setDetails(prev => ({ ...prev, [id]: { loading:false, error:String(e), data:null } })));
+  }
+
+  function dismissBanner() {
+    setBannerDismissed(true);
+    try { localStorage.setItem(PORTAL_CAMPAIGNS_BANNER_KEY, '1'); } catch {}
+  }
 
   if (loadError) {
     return (
@@ -3236,105 +3297,617 @@ function PortalCampaigns() {
     );
   }
 
-  // Aggregate strip — totals across all campaigns. Trackable totals exclude
-  // campaigns where tracking was off, so the "X% open rate" headlines aren't
-  // skewed by sends that were never instrumented.
+  // Aggregate strip — totals across all campaigns.
   const totalSent      = campaigns.reduce((a, c) => a + (c.sent || 0), 0);
   const totalReplies   = campaigns.reduce((a, c) => a + (c.replies || 0), 0);
-  const sendingCount   = campaigns.filter(c => c.status === 'sending').length;
-
-  // Status display config — keys match the four normalised values from the
-  // backend: 'scheduled' | 'sending' | 'sent' | 'failed'.
-  const STATUS_DISPLAY = {
-    scheduled: { label: 'Scheduled', bg: '#f4f1e8',  color: MUTED },
-    sending:   { label: 'Sending',   bg: BLUE_BG,    color: BLUE },
-    sent:      { label: 'Sent',      bg: '#f4f1e8',  color: MUTED },
-    failed:    { label: 'Failed',    bg: '#fbe9e9',  color: DANGER },
-  };
+  const inProgressCount = campaigns.filter(c =>
+    c.status === 'sending' || c.status === 'in_progress'
+  ).length;
 
   return (
     <div>
       <h2 style={pageTitle()}>Campaigns</h2>
       <p style={pageSub()}>Read-only view of every email campaign we've run for your account.</p>
 
+      {!bannerDismissed && <TrackingExplainerBanner onDismiss={dismissBanner} />}
+
       <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:10, marginBottom:16 }}>
         <StatCard label="Total campaigns"   value={campaigns.length} />
         <StatCard label="Total sent"        value={totalSent.toLocaleString()} />
         <StatCard label="Replies received"  value={totalReplies} />
-        <StatCard label="Currently sending" value={sendingCount} />
+        <StatCard label="In progress"       value={inProgressCount} />
       </div>
 
       <div style={{
         background:CARD, borderRadius:8, border:`0.5px solid ${BORDER}`, overflow:'hidden',
       }}>
-        <div style={{
-          display:'grid', gridTemplateColumns:'2fr 100px 80px 80px 80px 80px 100px',
-          gap:10, alignItems:'center', padding:'10px 14px',
-          borderBottom:`0.5px solid ${BORDER}`,
-          fontSize:11, color:MUTED, textTransform:'uppercase', letterSpacing:'0.04em',
-        }}>
-          <div>Campaign</div>
-          <div>Status</div>
-          <div style={{ textAlign:'right' }}>Sent</div>
-          <div style={{ textAlign:'right' }}>Opens</div>
-          <div style={{ textAlign:'right' }}>Clicks</div>
-          <div style={{ textAlign:'right' }}>Replies</div>
-          <div style={{ textAlign:'right' }}>Started</div>
+        <CampaignsTableHeader />
+        {campaigns.map(c => (
+          <CampaignRowAndPanel
+            key={c.id}
+            campaign={c}
+            isExpanded={expandedId === c.id}
+            detail={details[c.id]}
+            onToggle={() => toggleExpand(c.id)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Tracking explainer banner ────────────────────────────────────────────────
+// Dismissable amber strip explaining what "tracked" means in the per-stat
+// denominators. Once dismissed the customer doesn't see it again on this
+// device (localStorage). Other devices/browsers will still show it once.
+function TrackingExplainerBanner({ onDismiss }) {
+  return (
+    <div style={{
+      marginBottom:14, padding:'12px 14px',
+      background:AMBER_BG, color:AMBER,
+      borderRadius:8, fontSize:12, lineHeight:1.55,
+      display:'flex', gap:12, alignItems:'flex-start',
+    }}>
+      <div style={{ flex:1 }}>
+        <div style={{ fontWeight:600, marginBottom:4 }}>About these numbers</div>
+        <div>
+          Open and click tracking is only switched on for emails sent to people you've
+          already been in touch with — it's deliberately off for cold first-touch sends
+          to protect your domain reputation. Each stat shows how many emails were tracked
+          (e.g. <strong style={{ fontWeight:600 }}>"12 / 50 tracked"</strong> means 50 emails
+          were sent and 12 of those had tracking applied). Reply counts and bounces are
+          always accurate.
         </div>
-        {campaigns.map(c => {
-          const cfg = STATUS_DISPLAY[c.status] || STATUS_DISPLAY.sent;
-          // Format started_at — SQLite "YYYY-MM-DD HH:MM:SS" without Z is
-          // parsed as local time by browsers; force UTC interpretation so
-          // it matches what the admin sees.
-          let startedDisplay = '';
-          if (c.started_at) {
-            const ts = c.started_at.includes('Z') ? c.started_at : c.started_at.replace(' ', 'T') + 'Z';
-            startedDisplay = new Date(ts).toLocaleDateString('en-GB', { day:'numeric', month:'short' });
-          }
-          return (
-            <div key={c.id} style={{
-              display:'grid', gridTemplateColumns:'2fr 100px 80px 80px 80px 80px 100px',
-              gap:10, alignItems:'center', padding:'10px 14px',
-              borderBottom:`0.5px solid ${BORDER}`, fontSize:12, color:TEXT,
-            }}>
-              <div style={{ fontWeight:500, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                {c.title}
-              </div>
-              <div>
-                <span style={{ ...badgeStyle(), background: cfg.bg, color: cfg.color }}>
-                  {cfg.label}
-                </span>
-              </div>
-              <div style={{ textAlign:'right' }}>{(c.sent || 0).toLocaleString()}</div>
-              <div style={{ textAlign:'right', color: c.tracking_off ? TERTIARY_TEXT : TEXT }}>
-                {c.tracking_off ? '—' : (c.opens || 0)}
-              </div>
-              <div style={{ textAlign:'right', color: c.tracking_off ? TERTIARY_TEXT : TEXT }}>
-                {c.tracking_off ? '—' : (c.clicks || 0)}
-              </div>
-              <div style={{ textAlign:'right', color: c.replies > 0 ? GREEN : TEXT, fontWeight: c.replies > 0 ? 500 : 400 }}>
-                {c.replies || 0}
-              </div>
-              <div style={{ textAlign:'right', color:MUTED, fontSize:11 }}>
-                {startedDisplay}
-              </div>
+      </div>
+      <button
+        onClick={onDismiss}
+        style={{
+          flexShrink:0, background:'transparent', border:'none',
+          color:AMBER, cursor:'pointer', fontSize:14, fontWeight:500,
+          padding:'2px 4px', lineHeight:1, opacity:0.7,
+        }}
+        onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+        onMouseLeave={(e) => e.currentTarget.style.opacity = '0.7'}
+        aria-label="Dismiss"
+        title="Dismiss"
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
+// ── Table header ─────────────────────────────────────────────────────────────
+// Grid columns: Campaign title (flex) | Tracking pill | Status pill |
+//               Sent | Opens | Clicks | Replies | Started date | chevron
+function CAMPAIGNS_GRID() {
+  return '1.6fr 88px 110px 60px 60px 60px 60px 80px 24px';
+}
+function CampaignsTableHeader() {
+  return (
+    <div style={{
+      display:'grid', gridTemplateColumns:CAMPAIGNS_GRID(),
+      gap:10, alignItems:'center', padding:'10px 14px',
+      borderBottom:`0.5px solid ${BORDER}`,
+      fontSize:11, color:MUTED, textTransform:'uppercase', letterSpacing:'0.04em',
+    }}>
+      <div>Campaign</div>
+      <div>Tracking</div>
+      <div>Status</div>
+      <div style={{ textAlign:'right' }}>Sent</div>
+      <div style={{ textAlign:'right' }}>Opens</div>
+      <div style={{ textAlign:'right' }}>Clicks</div>
+      <div style={{ textAlign:'right' }}>Replies</div>
+      <div style={{ textAlign:'right' }}>Started</div>
+      <div></div>
+    </div>
+  );
+}
+
+// ── Row + expanded panel ─────────────────────────────────────────────────────
+// One unit so the row's bottom-border collapses into the panel when expanded,
+// giving the visual feel of one continuous card.
+function CampaignRowAndPanel({ campaign, isExpanded, detail, onToggle }) {
+  const c = campaign;
+
+  // Format started_at — SQLite "YYYY-MM-DD HH:MM:SS" without Z is parsed as
+  // local time by browsers; force UTC interpretation so it matches admin.
+  let startedDisplay = '';
+  if (c.started_at) {
+    const ts = c.started_at.includes('Z') ? c.started_at : c.started_at.replace(' ', 'T') + 'Z';
+    startedDisplay = new Date(ts).toLocaleDateString('en-GB', { day:'numeric', month:'short' });
+  }
+
+  return (
+    <>
+      <div
+        onClick={onToggle}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); } }}
+        style={{
+          display:'grid', gridTemplateColumns:CAMPAIGNS_GRID(),
+          gap:10, alignItems:'center', padding:'12px 14px',
+          borderBottom: isExpanded ? 'none' : `0.5px solid ${BORDER}`,
+          fontSize:12, color:TEXT, cursor:'pointer',
+          background: isExpanded ? '#f9f8f4' : CARD,
+          transition:'background 80ms ease-in',
+        }}
+        onMouseEnter={(e) => { if (!isExpanded) e.currentTarget.style.background = '#fafaf8'; }}
+        onMouseLeave={(e) => { if (!isExpanded) e.currentTarget.style.background = CARD; }}
+      >
+        <div style={{ minWidth:0 }}>
+          <div style={{ fontWeight:500, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+            {c.title}
+          </div>
+          {c.is_drip && (
+            <div style={{ fontSize:10.5, color:MUTED, marginTop:2 }}>
+              Drip · {c.steps_sent} of {c.steps_total} contacts sent
             </div>
-          );
-        })}
+          )}
+        </div>
+        <div><TrackingPill mode={c.tracking_mode} /></div>
+        <div><StatusPill status={c.status} stepsSent={c.steps_sent} stepsTotal={c.steps_total} /></div>
+        <StatCell value={c.sent} alwaysShow />
+        <StatCell value={c.opens}   tracked={c.tracked} splitAvailable={c.tracking_split_available} muted={c.tracking_mode === 'off'} />
+        <StatCell value={c.clicks}  tracked={c.tracked} splitAvailable={c.tracking_split_available} muted={c.tracking_mode === 'off'} />
+        <div style={{
+          textAlign:'right',
+          color: c.replies > 0 ? GREEN : TEXT,
+          fontWeight: c.replies > 0 ? 500 : 400,
+        }}>{c.replies || 0}</div>
+        <div style={{ textAlign:'right', color:MUTED, fontSize:11 }}>{startedDisplay}</div>
+        <div style={{
+          color:MUTED, fontSize:14, textAlign:'center',
+          transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
+          transition:'transform 120ms ease-in',
+        }}>›</div>
       </div>
 
-      {campaigns.some(c => c.tracking_off) && (
-        <div style={{
-          marginTop:12, padding:'10px 12px', background:BLUE_BG, color:BLUE,
-          borderRadius:8, fontSize:12, lineHeight:1.5,
-        }}>
-          <strong style={{ fontWeight:500 }}>—</strong>{' '}
-          means open/click tracking was disabled for that campaign to maximise inbox deliverability.
-          Reply numbers are still accurate for those campaigns.
+      {isExpanded && (
+        <CampaignDetailPanel campaign={c} detail={detail} />
+      )}
+    </>
+  );
+}
+
+// ── Stat cell with optional "X / Y tracked" denominator ─────────────────────
+// `value` is the open / click count. When splitAvailable is true AND tracking
+// is on, we show "value / tracked" stacked tightly. When tracking is off we
+// dim and show "—" (open/click numbers are meaningless when not instrumented).
+function StatCell({ value, tracked, splitAvailable, muted, alwaysShow }) {
+  if (muted && !alwaysShow) {
+    return (
+      <div style={{ textAlign:'right', color:TERTIARY_TEXT }}>—</div>
+    );
+  }
+  return (
+    <div style={{ textAlign:'right' }}>
+      <div>{(value || 0).toLocaleString()}</div>
+      {!alwaysShow && splitAvailable && typeof tracked === 'number' && (
+        <div style={{ fontSize:10, color:MUTED, marginTop:1, lineHeight:1 }}>
+          of {tracked.toLocaleString()} tracked
         </div>
       )}
     </div>
   );
+}
+
+// ── Tracking pill ────────────────────────────────────────────────────────────
+// Three modes from the data model: 'off' | 'smart' | 'all'. Shown as a small
+// pill so the customer can scan tracking state down the column.
+function TrackingPill({ mode }) {
+  const cfg = {
+    off:   { label: 'Off',   bg:'#f1efe8', color: MUTED },
+    smart: { label: 'Smart', bg: BLUE_BG,  color: BLUE  },
+    all:   { label: 'All',   bg: GREEN_BG, color: GREEN },
+  }[mode || 'off'] || { label: 'Off', bg:'#f1efe8', color: MUTED };
+  return (
+    <span style={{ ...badgeStyle(), background: cfg.bg, color: cfg.color }}>
+      {cfg.label}
+    </span>
+  );
+}
+
+// ── Status pill ──────────────────────────────────────────────────────────────
+// Six possible statuses normalised by the backend:
+//   'scheduled' | 'sending' | 'sent' | 'failed' | 'in_progress'
+// in_progress = a drip campaign part-way through its steps. Amber per #87.
+function StatusPill({ status, stepsSent, stepsTotal }) {
+  const cfg = {
+    scheduled:   { label: 'Scheduled',                                      bg: '#f4f1e8',  color: MUTED },
+    sending:     { label: 'Sending',                                        bg: BLUE_BG,    color: BLUE  },
+    sent:        { label: 'Sent',                                           bg: '#f4f1e8',  color: MUTED },
+    failed:      { label: 'Failed',                                         bg: '#fbe9e9',  color: DANGER },
+    in_progress: { label: `In progress · ${stepsSent || 0}/${stepsTotal || 0}`, bg: AMBER_BG, color: AMBER },
+  }[status] || { label: 'Sent', bg: '#f4f1e8', color: MUTED };
+  return (
+    <span style={{ ...badgeStyle(), background: cfg.bg, color: cfg.color, whiteSpace:'nowrap' }}>
+      {cfg.label}
+    </span>
+  );
+}
+
+// ── Detail panel (inline accordion contents) ─────────────────────────────────
+// Shown below the row when expanded. Contains:
+//   - Combined-stats strip (mirrors the row, denser)
+//   - Timeline strip showing each step's send date (or "Upcoming")
+//   - Drip tabs (one per step) if is_drip, otherwise a single panel
+//   - Per-tab: subject + sender + delay + stats + email body preview
+//   - Recent replies list at the bottom (last 30, matched to this campaign)
+function CampaignDetailPanel({ campaign, detail }) {
+  const c = campaign;
+  const [activeTab, setActiveTab] = useState(0);
+
+  if (!detail || detail.loading) {
+    return (
+      <div style={{
+        padding:'24px 14px', background:'#f9f8f4',
+        borderBottom:`0.5px solid ${BORDER}`,
+        fontSize:12, color:MUTED, textAlign:'center',
+      }}>Loading campaign details…</div>
+    );
+  }
+  if (detail.error) {
+    return (
+      <div style={{
+        padding:'12px 14px', background:'#f9f8f4',
+        borderBottom:`0.5px solid ${BORDER}`,
+        fontSize:12, color:DANGER,
+      }}>Couldn't load details: {detail.error}</div>
+    );
+  }
+
+  const d = detail.data;
+  const steps = d.steps || [];
+  const replies = d.replies_list || [];
+  const safeTab = Math.min(activeTab, Math.max(0, steps.length - 1));
+  const currentStep = steps[safeTab];
+
+  return (
+    <div style={{
+      background:'#f9f8f4',
+      borderBottom:`0.5px solid ${BORDER}`,
+      padding:'18px 18px 22px',
+    }}>
+      {/* Combined headline */}
+      <div style={{ marginBottom:14 }}>
+        <div style={{
+          fontSize:10, color:MUTED, textTransform:'uppercase', letterSpacing:'0.04em',
+          marginBottom:6,
+        }}>Overall — across all contacts</div>
+        <CombinedStatsStrip campaign={c} />
+      </div>
+
+      {/* Timeline strip — sent / scheduled / upcoming dots per step */}
+      {c.is_drip && steps.length > 1 && (
+        <div style={{ marginBottom:16 }}>
+          <TimelineStrip steps={steps} stepsSent={c.steps_sent} />
+        </div>
+      )}
+
+      {/* Step tabs — only for drips */}
+      {steps.length > 1 && (
+        <div style={{
+          display:'flex', gap:2, borderBottom:`0.5px solid ${BORDER}`,
+          marginBottom:14,
+        }}>
+          {steps.map((s, i) => (
+            <button
+              key={s.step_number}
+              onClick={() => setActiveTab(i)}
+              style={tabBtnStyle(i === safeTab)}
+            >
+              {ordinal(s.step_number)} contact
+              {s.status === 'pending' && (
+                <span style={{ marginLeft:6, color:MUTED, fontSize:10 }}>· not yet sent</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Per-step panel */}
+      {currentStep && (
+        <StepPanel
+          step={currentStep}
+          isFirst={currentStep.step_number === 1}
+          campaign={c}
+          trackingSplitAvailable={c.tracking_split_available}
+        />
+      )}
+
+      {/* Replies list */}
+      {replies.length > 0 && (
+        <div style={{ marginTop:20 }}>
+          <div style={{
+            fontSize:10, color:MUTED, textTransform:'uppercase', letterSpacing:'0.04em',
+            marginBottom:8,
+          }}>Recent replies ({replies.length})</div>
+          <RepliesList replies={replies} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Combined stats strip (inside the detail panel) ───────────────────────────
+// Mirrors the row's stats at higher density — adds Bounces and Unsubscribes
+// (the row was too narrow). All "—" treatment for off-tracking matches the
+// row's behaviour, so the customer never sees inconsistent figures.
+function CombinedStatsStrip({ campaign }) {
+  const c = campaign;
+  const trackingOff = c.tracking_mode === 'off';
+  const split = c.tracking_split_available;
+  const items = [
+    { label: 'Sent',         value: c.sent,    sub: null },
+    { label: 'Opens',        value: c.opens,   sub: !trackingOff && split ? `of ${(c.tracked||0).toLocaleString()} tracked` : null, muted: trackingOff },
+    { label: 'Clicks',       value: c.clicks,  sub: !trackingOff && split ? `of ${(c.tracked||0).toLocaleString()} tracked` : null, muted: trackingOff },
+    { label: 'Replies',      value: c.replies, sub: null, highlight: c.replies > 0 },
+    { label: 'Bounces',      value: c.bounces, sub: null },
+    { label: 'Unsubscribes', value: c.unsubs,  sub: null },
+  ];
+  return (
+    <div style={{
+      display:'grid', gridTemplateColumns:'repeat(6, 1fr)', gap:10,
+      background:CARD, borderRadius:8, border:`0.5px solid ${BORDER}`,
+      padding:'12px 14px',
+    }}>
+      {items.map((it, i) => (
+        <div key={i}>
+          <div style={{ fontSize:10, color:MUTED, textTransform:'uppercase', letterSpacing:'0.04em', marginBottom:4 }}>
+            {it.label}
+          </div>
+          <div style={{
+            fontSize:18, fontWeight:500,
+            color: it.muted ? TERTIARY_TEXT : (it.highlight ? GREEN : TEXT),
+            lineHeight:1.1,
+          }}>
+            {it.muted ? '—' : (it.value || 0).toLocaleString()}
+          </div>
+          {it.sub && (
+            <div style={{ fontSize:10, color:MUTED, marginTop:3 }}>{it.sub}</div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Timeline strip ───────────────────────────────────────────────────────────
+// Visual row of dots, one per step. Sent steps = filled green dot + actual
+// send date. Pending steps = outline dot + "Upcoming". Steps connect with a
+// thin line, the line up to the current step is green, after is dashed grey.
+function TimelineStrip({ steps, stepsSent }) {
+  return (
+    <div style={{
+      display:'flex', alignItems:'flex-start', gap:0,
+      background:CARD, borderRadius:8, border:`0.5px solid ${BORDER}`,
+      padding:'12px 14px',
+    }}>
+      {steps.map((s, i) => {
+        const isSent = s.status === 'sent';
+        const isLast = i === steps.length - 1;
+        let dateLabel = 'Upcoming';
+        if (s.sent_at) {
+          const ts = s.sent_at.includes('Z') ? s.sent_at : s.sent_at.replace(' ', 'T') + 'Z';
+          dateLabel = new Date(ts).toLocaleDateString('en-GB', { day:'numeric', month:'short' });
+        } else if (s.delay_days > 0) {
+          dateLabel = `+${s.delay_days}d after previous`;
+        }
+        return (
+          <div key={s.step_number} style={{ flex:1, display:'flex', alignItems:'flex-start' }}>
+            <div style={{ display:'flex', flexDirection:'column', alignItems:'center', minWidth:0, flex:'0 0 auto' }}>
+              <div style={{
+                width:14, height:14, borderRadius:'50%',
+                background: isSent ? GREEN : CARD,
+                border: isSent ? `0.5px solid ${GREEN}` : `1.5px solid ${BORDER}`,
+                marginBottom:6,
+              }} />
+              <div style={{ fontSize:10, color:MUTED, fontWeight:500, whiteSpace:'nowrap' }}>
+                {ordinal(s.step_number)} contact
+              </div>
+              <div style={{ fontSize:10, color: isSent ? TEXT : MUTED, marginTop:2, whiteSpace:'nowrap' }}>
+                {dateLabel}
+              </div>
+            </div>
+            {!isLast && (
+              <div style={{
+                flex:1, height:1, marginTop:7,
+                background: isSent ? GREEN : 'transparent',
+                borderTop: isSent ? 'none' : `1px dashed ${BORDER}`,
+              }} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Per-step panel ───────────────────────────────────────────────────────────
+// Shown below the tab strip. Header line with subject + from address + delay,
+// per-step stats grid, and the email body preview rendered as the recipient
+// would have seen it (the html_body is the same body that went to SES).
+function StepPanel({ step, isFirst, campaign, trackingSplitAvailable }) {
+  const trackingOff = campaign.tracking_mode === 'off';
+  let sentAtDisplay = null;
+  if (step.sent_at) {
+    const ts = step.sent_at.includes('Z') ? step.sent_at : step.sent_at.replace(' ', 'T') + 'Z';
+    sentAtDisplay = new Date(ts).toLocaleString('en-GB', {
+      day:'numeric', month:'short', year:'numeric',
+      hour:'2-digit', minute:'2-digit',
+    });
+  }
+
+  return (
+    <div style={{
+      background:CARD, borderRadius:8, border:`0.5px solid ${BORDER}`,
+      padding:'14px 16px',
+    }}>
+      {/* Header */}
+      <div style={{ marginBottom:12, paddingBottom:12, borderBottom:`0.5px solid ${BORDER}` }}>
+        <div style={{ fontSize:13, fontWeight:500, color:TEXT, marginBottom:4 }}>
+          {step.subject || '(no subject set)'}
+        </div>
+        <div style={{ fontSize:11, color:MUTED, lineHeight:1.5 }}>
+          {step.from_name && <span>From <strong style={{ fontWeight:500, color:TEXT }}>{step.from_name}</strong> </span>}
+          {step.from_email && <span>&lt;{step.from_email}&gt;</span>}
+          {!isFirst && step.delay_days > 0 && (
+            <span> · sent {step.delay_days} day{step.delay_days === 1 ? '' : 's'} after previous contact</span>
+          )}
+          {sentAtDisplay && <span> · {sentAtDisplay}</span>}
+          {step.status === 'pending' && <span style={{ color:AMBER }}> · not yet sent</span>}
+        </div>
+      </div>
+
+      {/* Per-step stats — only when this step has actually sent */}
+      {step.sent > 0 && (
+        <div style={{
+          display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:14,
+          marginBottom:14,
+        }}>
+          <StepStat label="Sent" value={step.sent} />
+          <StepStat
+            label="Opens"
+            value={step.opens}
+            sub={!trackingOff && trackingSplitAvailable ? `of ${(step.tracked||0).toLocaleString()} tracked` : null}
+            muted={trackingOff}
+          />
+          <StepStat
+            label="Clicks"
+            value={step.clicks}
+            sub={!trackingOff && trackingSplitAvailable ? `of ${(step.tracked||0).toLocaleString()} tracked` : null}
+            muted={trackingOff}
+          />
+          <StepStat label="Bounces" value={step.bounces} />
+        </div>
+      )}
+
+      {/* Email body preview */}
+      {step.html_body && (
+        <div>
+          <div style={{ fontSize:10, color:MUTED, textTransform:'uppercase', letterSpacing:'0.04em', marginBottom:6 }}>
+            Email body
+          </div>
+          <div style={{
+            border:`0.5px solid ${BORDER}`, borderRadius:6,
+            background:'#fafaf8', padding:'14px 16px',
+            maxHeight:360, overflow:'auto',
+            fontSize:13, lineHeight:1.55, color:TEXT,
+          }}>
+            <div
+              style={{ isolation:'isolate' }}
+              dangerouslySetInnerHTML={{ __html: step.html_body }}
+            />
+          </div>
+        </div>
+      )}
+      {!step.html_body && (
+        <div style={{ fontSize:12, color:MUTED, fontStyle:'italic' }}>
+          (No body stored for this contact.)
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StepStat({ label, value, sub, muted }) {
+  return (
+    <div>
+      <div style={{ fontSize:10, color:MUTED, textTransform:'uppercase', letterSpacing:'0.04em', marginBottom:3 }}>
+        {label}
+      </div>
+      <div style={{
+        fontSize:16, fontWeight:500, lineHeight:1.1,
+        color: muted ? TERTIARY_TEXT : TEXT,
+      }}>
+        {muted ? '—' : (value || 0).toLocaleString()}
+      </div>
+      {sub && <div style={{ fontSize:10, color:MUTED, marginTop:2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+// ── Replies list (inside detail panel) ───────────────────────────────────────
+// Compact list of inbound replies matched to this campaign. Click-through to
+// the inbox view isn't wired here — customers can find the same replies in
+// their inbox page. Showing the snippet inline keeps the detail self-contained.
+function RepliesList({ replies }) {
+  return (
+    <div style={{
+      background:CARD, borderRadius:8, border:`0.5px solid ${BORDER}`,
+      overflow:'hidden',
+    }}>
+      {replies.map((r, i) => {
+        let when = '';
+        if (r.received_at) {
+          const ts = r.received_at.includes('Z') ? r.received_at : r.received_at.replace(' ', 'T') + 'Z';
+          when = relTime(ts);
+        }
+        return (
+          <div key={r.id} style={{
+            padding:'10px 14px',
+            borderBottom: i === replies.length - 1 ? 'none' : `0.5px solid ${BORDER}`,
+            fontSize:12, color:TEXT,
+          }}>
+            <div style={{ display:'flex', alignItems:'baseline', gap:8, marginBottom:3 }}>
+              <span style={{ fontWeight:500 }}>
+                {r.from_name || r.from_address || '(no sender)'}
+              </span>
+              <ReplyClassifyChip cls={r.classification} />
+              <span style={{ marginLeft:'auto', color:MUTED, fontSize:11 }}>{when}</span>
+            </div>
+            <div style={{ color:MUTED, fontSize:11, marginBottom:3, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+              {r.subject || '(no subject)'}
+            </div>
+            <div style={{ color:TEXT, lineHeight:1.45, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+              {r.snippet || '(no preview)'}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Tiny classification chip. We deliberately avoid hard/soft splits in the UI
+// elsewhere, but on the replies list the existing classification labels are
+// already in the customer's mental model from the inbox page (decision #36),
+// so we surface them here too.
+function ReplyClassifyChip({ cls }) {
+  if (!cls) return null;
+  const cfg = {
+    positive:      { label: 'Positive',      bg: GREEN_BG, color: GREEN  },
+    soft_negative: { label: 'Soft negative', bg: AMBER_BG, color: AMBER  },
+    hard_negative: { label: 'Hard negative', bg: '#fbe9e9', color: DANGER },
+    auto_reply:    { label: 'Auto-reply',    bg: BLUE_BG, color: BLUE   },
+    neutral:       { label: 'Neutral',       bg: '#f1efe8', color: MUTED },
+  }[cls];
+  if (!cfg) return null;
+  return (
+    <span style={{
+      ...badgeStyle(), background: cfg.bg, color: cfg.color, fontSize:9.5,
+    }}>{cfg.label}</span>
+  );
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function ordinal(n) {
+  const s = ['th', 'st', 'nd', 'rd'];
+  const v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+
+function tabBtnStyle(active) {
+  return {
+    background:'transparent', border:'none',
+    padding:'8px 14px', cursor:'pointer',
+    fontSize:12, color: active ? TEXT : MUTED, fontWeight: active ? 500 : 400,
+    borderBottom: active ? `2px solid ${GREEN}` : '2px solid transparent',
+    marginBottom:-1,
+    transition:'color 80ms ease-in',
+  };
 }
 
 // ── SETTINGS PAGE ────────────────────────────────────────────────────────────
