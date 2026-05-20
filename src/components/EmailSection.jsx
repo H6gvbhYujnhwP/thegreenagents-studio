@@ -2626,8 +2626,11 @@ function MailboxesSection(){
     const d=await r.json();
     setInboxes(Array.isArray(d)?d:[]);
     setLoading(false);
-    // If nothing selected and we have inboxes, auto-select first one
-    if(!selectedId && Array.isArray(d) && d.length>0) setSelectedId(d[0].id);
+    // If nothing selected and we have inboxes, auto-select first one.
+    // Uses the functional updater form so the 30-second background poll
+    // (which captures the initial selectedId in its closure) doesn't
+    // snap the operator back to the first mailbox every refresh.
+    if(Array.isArray(d) && d.length>0) setSelectedId(prev => prev || d[0].id);
   }
 
   const selected=inboxes.find(i=>i.id===selectedId);
@@ -3092,118 +3095,145 @@ function ReplyDetailModal({replyId, onClose, onAction}){
     />;
   }
 
-  return(<Modal title="Email" onClose={onClose} wide>
-    {/* Header: sender */}
-    <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:12,gap:8,flexWrap:'wrap'}}>
-      <div style={{minWidth:0}}>
-        <div style={{fontSize:15,fontWeight:500,color:TEXT}}>{reply.from_name||reply.from_address}</div>
-        <div style={{fontSize:12,color:MUTED}}>{reply.from_address} · {relTime(reply.received_at)}</div>
-      </div>
-      {classifyBadge(reply)}
-    </div>
-
-    {/* Subject */}
-    <div style={{fontSize:14,color:TEXT,marginBottom:12,fontWeight:500}}>{reply.subject||'(no subject)'}</div>
-
-    {/* Classification reasoning */}
-    {reply.classification_reason && (
-      <div style={{background:'#E6F1FB',borderLeft:`3px solid ${BLUE}`,borderRadius:6,padding:'8px 12px',marginBottom:12,fontSize:12,color:'#0C447C',lineHeight:1.5}}>
-        <b style={{fontWeight:500}}>Why classified as {reply.classification?.replace('_',' ')||'unknown'}:</b> {reply.classification_reason}
-        {reply.classification_confidence && <> · confidence {Math.round(reply.classification_confidence*100)}%</>}
-      </div>
-    )}
-
-    {/* Original campaign context */}
-    {reply.campaign_title && (
-      <div style={{background:BG,padding:'8px 12px',borderRadius:6,marginBottom:12,fontSize:12,color:MUTED,border:`0.5px solid ${BORDER}`}}>
-        In response to <b style={{color:TEXT,fontWeight:500}}>"{reply.campaign_subject}"</b> — campaign <em>{reply.campaign_title}</em>
-        {reply.campaign_sent_at && <> · sent {new Date(reply.campaign_sent_at).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</>}
-      </div>
-    )}
-    {!reply.matched_campaign_id && (
-      <div style={{background:'#fff3cd',borderLeft:`3px solid ${AMBER}`,borderRadius:6,padding:'8px 12px',marginBottom:12,fontSize:12,color:AMBER,lineHeight:1.5}}>
-        Could not match this reply to a specific campaign. The recipient's email client may have stripped the threading headers.
-      </div>
-    )}
-
-    {/* Hot Prospects banner — shown after a click on "Send to Hot Prospects".
-        Two variants: 'added' (new row created) and 'already' (the prospect was
-        already on this customer's list). Both offer an "Open in CRM" link
-        that jumps to the CRM screen with this prospect's detail open. */}
-    {hotProspectBanner && (
+  return(
+    // Custom layout instead of the shared <Modal> primitive: we need a
+    // non-scrolling header containing the action buttons, with a scrolling
+    // body underneath. The shared Modal puts every child inside a single
+    // scrolling container which lets the buttons disappear off the bottom on
+    // long emails. Leaving Modal untouched (used by lots of other modals).
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.35)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000}}>
       <div style={{
-        background: hotProspectBanner.kind === 'added' ? '#E1F5EE' : '#E6F1FB',
-        borderLeft: `3px solid ${hotProspectBanner.kind === 'added' ? GREEN : BLUE}`,
-        borderRadius:6, padding:'8px 12px', marginBottom:12,
-        fontSize:12, color: hotProspectBanner.kind === 'added' ? '#085041' : '#0C447C',
-        lineHeight:1.5,
-        display:'flex', alignItems:'center', justifyContent:'space-between', gap:10,
+        background:CARD,borderRadius:12,
+        width:800,maxWidth:'95vw',
+        height:'90vh',maxHeight:'90vh',
+        display:'flex',flexDirection:'column',
+        boxShadow:'0 8px 40px rgba(0,0,0,0.15)',
+        overflow:'hidden',
       }}>
-        <span>
-          {hotProspectBanner.kind === 'added'
-            ? <><b style={{fontWeight:500}}>✓ Added to Hot Prospects.</b> The full email thread is attached automatically.</>
-            : <><b style={{fontWeight:500}}>Already on the list.</b> No duplicate created — existing follow-up date and notes were kept.</>
-          }
-        </span>
-        <button
-          onClick={() => openInCrm(hotProspectBanner.prospect_id)}
-          style={{
-            background:'transparent', border:'none', padding:0, cursor:'pointer',
-            fontSize:12, color:'inherit', textDecoration:'underline', fontFamily:'inherit',
-            whiteSpace:'nowrap',
-          }}
-        >Open in CRM →</button>
+
+        {/* ─── Pinned header section ─────────────────────────────────────────
+            Doesn't scroll. Holds the close button, sender meta, subject, and
+            the entire action row so the operator can always trigger Reply /
+            Send to Hot Prospects / Classify / Unsubscribe / etc. even on a
+            very long email. */}
+        <div style={{padding:'24px 28px 14px',borderBottom:`0.5px solid ${BORDER}`,flexShrink:0}}>
+
+          {/* Close button — top right */}
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:14,gap:12}}>
+            <div style={{minWidth:0,flex:1}}>
+              <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:8,flexWrap:'wrap',marginBottom:6}}>
+                <div style={{minWidth:0}}>
+                  <div style={{fontSize:15,fontWeight:500,color:TEXT}}>{reply.from_name||reply.from_address}</div>
+                  <div style={{fontSize:12,color:MUTED}}>{reply.from_address} · {relTime(reply.received_at)}</div>
+                </div>
+                {classifyBadge(reply)}
+              </div>
+              <div style={{fontSize:14,color:TEXT,fontWeight:500,marginTop:8}}>{reply.subject||'(no subject)'}</div>
+            </div>
+            <button onClick={onClose} style={{background:'none',border:'none',fontSize:22,color:MUTED,cursor:'pointer',lineHeight:1,padding:0,marginLeft:4}} aria-label="Close">×</button>
+          </div>
+
+          {/* Actions — pinned. Same conditional set as before, just relocated. */}
+          <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+            {/* Reply — primary green, matches the customer-portal action. */}
+            <Btn variant="primary" onClick={()=>setComposing(true)} disabled={busy}>Reply</Btn>
+            {/* Send to Hot Prospects — amber, second-most-prominent positive action. */}
+            <Btn
+              variant="amber"
+              onClick={addToHotProspects}
+              disabled={busy || addingProspect}
+            >{addingProspect ? 'Adding…' : '🔥 Send to Hot Prospects'}</Btn>
+            {!reply.classification && (
+              <Btn variant="blue" onClick={async()=>{
+                setBusy(true);
+                const r=await fetch(`/api/email/replies/${replyId}/classify`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:true})});
+                const d=await r.json();
+                setBusy(false);
+                if(d.ok){
+                  const rr=await fetch(`/api/email/replies/${replyId}`);
+                  setReply(await rr.json());
+                  onAction();
+                } else alert(d.error||'Classify failed');
+              }} disabled={busy}>{busy?'Classifying…':'Classify with AI'}</Btn>
+            )}
+            {reply.classification==='positive' && !reply.handled_at && (
+              <Btn variant="primary" onClick={()=>action('handle')} disabled={busy}>Mark as handled</Btn>
+            )}
+            {!reply.auto_unsubscribed && (
+              <Btn variant="danger" onClick={()=>{
+                if(confirm(`Unsubscribe ${reply.from_address} from all lists in this client?`)) action('manual-unsubscribe');
+              }} disabled={busy}>Unsubscribe</Btn>
+            )}
+            <ReclassifyDropdown disabled={busy} current={reply.classification} onChoose={c=>action('reclassify',{classification:c})}/>
+            <Btn onClick={onClose} disabled={busy}>Close</Btn>
+          </div>
+
+        </div>
+
+        {/* ─── Scrolling body section ────────────────────────────────────────
+            Holds classification reasoning, campaign context, Hot-Prospects
+            success banner, and the email body itself. Scrolls independently
+            of the header so the actions are always reachable. */}
+        <div style={{padding:'14px 28px 24px',overflowY:'auto',flex:1}}>
+
+          {/* Classification reasoning */}
+          {reply.classification_reason && (
+            <div style={{background:'#E6F1FB',borderLeft:`3px solid ${BLUE}`,borderRadius:6,padding:'8px 12px',marginBottom:12,fontSize:12,color:'#0C447C',lineHeight:1.5}}>
+              <b style={{fontWeight:500}}>Why classified as {reply.classification?.replace('_',' ')||'unknown'}:</b> {reply.classification_reason}
+              {reply.classification_confidence && <> · confidence {Math.round(reply.classification_confidence*100)}%</>}
+            </div>
+          )}
+
+          {/* Original campaign context */}
+          {reply.campaign_title && (
+            <div style={{background:BG,padding:'8px 12px',borderRadius:6,marginBottom:12,fontSize:12,color:MUTED,border:`0.5px solid ${BORDER}`}}>
+              In response to <b style={{color:TEXT,fontWeight:500}}>"{reply.campaign_subject}"</b> — campaign <em>{reply.campaign_title}</em>
+              {reply.campaign_sent_at && <> · sent {new Date(reply.campaign_sent_at).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</>}
+            </div>
+          )}
+          {!reply.matched_campaign_id && (
+            <div style={{background:'#fff3cd',borderLeft:`3px solid ${AMBER}`,borderRadius:6,padding:'8px 12px',marginBottom:12,fontSize:12,color:AMBER,lineHeight:1.5}}>
+              Could not match this reply to a specific campaign. The recipient's email client may have stripped the threading headers.
+            </div>
+          )}
+
+          {/* Hot Prospects banner — shown after a click on "Send to Hot Prospects". */}
+          {hotProspectBanner && (
+            <div style={{
+              background: hotProspectBanner.kind === 'added' ? '#E1F5EE' : '#E6F1FB',
+              borderLeft: `3px solid ${hotProspectBanner.kind === 'added' ? GREEN : BLUE}`,
+              borderRadius:6, padding:'8px 12px', marginBottom:12,
+              fontSize:12, color: hotProspectBanner.kind === 'added' ? '#085041' : '#0C447C',
+              lineHeight:1.5,
+              display:'flex', alignItems:'center', justifyContent:'space-between', gap:10,
+            }}>
+              <span>
+                {hotProspectBanner.kind === 'added'
+                  ? <><b style={{fontWeight:500}}>✓ Added to Hot Prospects.</b> The full email thread is attached automatically.</>
+                  : <><b style={{fontWeight:500}}>Already on the list.</b> No duplicate created — existing follow-up date and notes were kept.</>
+                }
+              </span>
+              <button
+                onClick={() => openInCrm(hotProspectBanner.prospect_id)}
+                style={{
+                  background:'transparent', border:'none', padding:0, cursor:'pointer',
+                  fontSize:12, color:'inherit', textDecoration:'underline', fontFamily:'inherit',
+                  whiteSpace:'nowrap',
+                }}
+              >Open in CRM →</button>
+            </div>
+          )}
+
+          {/* Body — plain text only on the admin side (HTML rendering lives
+              on the customer-portal version). Email-client-style quote bar. */}
+          <div style={{borderLeft:`2px solid ${BORDER}`,padding:'4px 0 4px 14px',fontSize:13,color:TEXT,lineHeight:1.6,whiteSpace:'pre-wrap'}}>
+            {reply.body_text || <em style={{color:MUTED}}>(no plain text body — message was HTML-only)</em>}
+          </div>
+
+        </div>
       </div>
-    )}
-
-    {/* Body */}
-    <div style={{borderLeft:`2px solid ${BORDER}`,padding:'4px 0 4px 14px',marginBottom:14,maxHeight:300,overflowY:'auto',fontSize:13,color:TEXT,lineHeight:1.6,whiteSpace:'pre-wrap'}}>
-      {reply.body_text || <em style={{color:MUTED}}>(no plain text body — message was HTML-only)</em>}
     </div>
-
-    {/* Actions */}
-    <div style={{display:'flex',gap:8,flexWrap:'wrap',justifyContent:'flex-end',paddingTop:12,borderTop:`0.5px solid ${BORDER}`}}>
-      {/* Reply — primary green, matches the customer-portal action.
-          Opens AdminComposeReplyModal which sends from the customer's mailbox
-          via POST /api/email/replies/:id/send (mirrors the portal endpoint). */}
-      <Btn variant="primary" onClick={()=>setComposing(true)} disabled={busy}>Reply</Btn>
-      {/* Send to Hot Prospects — second-most-prominent positive action. POSTs
-          to /api/email/hot-prospects with email_client_id + prospect_email
-          + source_reply_id (used by the endpoint to auto-fill the name from
-          email_replies.from_name when prospect_name isn't supplied). The
-          response includes was_new which drives the success-banner variant.
-          Disabled while the request is in flight. */}
-      <Btn
-        variant="amber"
-        onClick={addToHotProspects}
-        disabled={busy || addingProspect}
-      >{addingProspect ? 'Adding…' : '🔥 Send to Hot Prospects'}</Btn>
-      {!reply.classification && (
-        <Btn variant="blue" onClick={async()=>{
-          setBusy(true);
-          const r=await fetch(`/api/email/replies/${replyId}/classify`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({force:true})});
-          const d=await r.json();
-          setBusy(false);
-          if(d.ok){
-            // Reload to show new classification
-            const rr=await fetch(`/api/email/replies/${replyId}`);
-            setReply(await rr.json());
-            onAction();
-          } else alert(d.error||'Classify failed');
-        }} disabled={busy}>{busy?'Classifying…':'Classify with AI'}</Btn>
-      )}
-      {reply.classification==='positive' && !reply.handled_at && (
-        <Btn variant="primary" onClick={()=>action('handle')} disabled={busy}>Mark as handled</Btn>
-      )}
-      {!reply.auto_unsubscribed && (
-        <Btn variant="danger" onClick={()=>{
-          if(confirm(`Unsubscribe ${reply.from_address} from all lists in this client?`)) action('manual-unsubscribe');
-        }} disabled={busy}>Unsubscribe</Btn>
-      )}
-      <ReclassifyDropdown disabled={busy} current={reply.classification} onChoose={c=>action('reclassify',{classification:c})}/>
-      <Btn onClick={onClose} disabled={busy}>Close</Btn>
-    </div>
-  </Modal>);
+  );
 }
 
 // ── Admin compose-reply modal ────────────────────────────────────────────────

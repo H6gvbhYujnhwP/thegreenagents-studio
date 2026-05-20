@@ -2112,44 +2112,72 @@ function badgeStyle() {
 // wrap it in a div with isolation styles.
 function ReplyDetailModal({ reply, onClose, onCompose }) {
   return (
-    <Modal title="Reply" onClose={onClose} wide>
-      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:14 }}>
-        <div>
-          <div style={{ fontSize:14, fontWeight:500, color:TEXT }}>{reply.from_name}</div>
-          <div style={{ fontSize:12, color:MUTED }}>{reply.from_address}</div>
-        </div>
-        <ClassifyBadge reply={reply} />
-      </div>
-      <div style={{ fontSize:13, color:TEXT, marginBottom:6, fontWeight:500 }}>{reply.subject}</div>
-      <div style={{ fontSize:11, color:MUTED, marginBottom:14 }}>
-        Received {relTime(reply.received_at)}
-        {reply.campaign_title && <> · in reply to <em>{reply.campaign_title}</em></>}
-        {reply.mailbox_address && <> · to {reply.mailbox_address}</>}
-      </div>
-
-      {/* Full message body — preserves the sender's formatting like a normal
-          email client. Scrolls within a fixed max-height so very long emails
-          don't blow up the modal. */}
-      <div style={{
-        padding:'14px 16px', background:'#fafaf8', borderRadius:6, fontSize:13,
-        color:TEXT, lineHeight:1.6, marginBottom:18,
-        maxHeight:'50vh', overflowY:'auto',
-        border:`0.5px solid ${BORDER}`,
+    // Custom layout (not the shared <Modal>) so the action buttons stay
+    // pinned at the top while the email body scrolls. Mirrors the admin-side
+    // ReplyDetailModal in EmailSection.jsx.
+    <div onClick={onClose} style={{
+      position:'fixed', inset:0, background:'rgba(0,0,0,0.45)',
+      display:'flex', alignItems:'center', justifyContent:'center',
+      zIndex:50, padding:20,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background:CARD, borderRadius:12,
+        maxWidth:720, width:'100%',
+        height:'90vh', maxHeight:'90vh',
+        display:'flex', flexDirection:'column',
+        overflow:'hidden',
       }}>
-        {reply.body_html ? (
-          <div className="portal-email-body" dangerouslySetInnerHTML={{ __html: reply.body_html }} />
-        ) : (
-          <div style={{ whiteSpace:'pre-wrap', fontFamily:'inherit' }}>
-            {reply.body_text || '(empty message)'}
-          </div>
-        )}
-      </div>
 
-      <div style={{ display:'flex', justifyContent:'flex-end', gap:8 }}>
-        <BtnSecondary onClick={onClose}>Close</BtnSecondary>
-        <BtnPrimary onClick={onCompose}>Reply</BtnPrimary>
+        {/* Pinned header: title close-button + sender/subject/meta + actions */}
+        <div style={{ padding:'22px 26px 14px', borderBottom:`0.5px solid ${BORDER}`, flexShrink:0 }}>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:12, gap:12 }}>
+            <div style={{ minWidth:0, flex:1 }}>
+              <h3 style={{ fontSize:15, fontWeight:500, margin:'0 0 10px', color:TEXT }}>Reply</h3>
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', gap:8, flexWrap:'wrap', marginBottom:6 }}>
+                <div style={{ minWidth:0 }}>
+                  <div style={{ fontSize:14, fontWeight:500, color:TEXT }}>{reply.from_name}</div>
+                  <div style={{ fontSize:12, color:MUTED }}>{reply.from_address}</div>
+                </div>
+                <ClassifyBadge reply={reply} />
+              </div>
+              <div style={{ fontSize:13, color:TEXT, marginTop:8, fontWeight:500 }}>{reply.subject}</div>
+              <div style={{ fontSize:11, color:MUTED, marginTop:4 }}>
+                Received {relTime(reply.received_at)}
+                {reply.campaign_title && <> · in reply to <em>{reply.campaign_title}</em></>}
+                {reply.mailbox_address && <> · to {reply.mailbox_address}</>}
+              </div>
+            </div>
+            <button onClick={onClose} style={{
+              background:'transparent', border:'none', fontSize:20, color:MUTED,
+              cursor:'pointer', lineHeight:1, padding:0, marginLeft:4,
+            }} aria-label="Close">×</button>
+          </div>
+
+          {/* Action buttons — pinned. */}
+          <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+            <BtnPrimary onClick={onCompose}>Reply</BtnPrimary>
+            <BtnSecondary onClick={onClose}>Close</BtnSecondary>
+          </div>
+        </div>
+
+        {/* Scrolling body — preserves sender's formatting like a real email
+            client. The body div fills the remaining flex space and scrolls
+            internally, so the header above stays put. */}
+        <div style={{
+          padding:'14px 26px 24px', overflowY:'auto', flex:1,
+          fontSize:13, color:TEXT, lineHeight:1.6,
+        }}>
+          {reply.body_html ? (
+            <div className="portal-email-body" dangerouslySetInnerHTML={{ __html: reply.body_html }} />
+          ) : (
+            <div style={{ whiteSpace:'pre-wrap', fontFamily:'inherit' }}>
+              {reply.body_text || '(empty message)'}
+            </div>
+          )}
+        </div>
+
       </div>
-    </Modal>
+    </div>
   );
 }
 
