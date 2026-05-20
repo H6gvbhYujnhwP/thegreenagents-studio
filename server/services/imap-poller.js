@@ -23,6 +23,7 @@ import { simpleParser } from 'mailparser';
 import { v4 as uuid } from 'uuid';
 import db from '../db.js';
 import { decrypt } from './crypto-vault.js';
+import { processFormspreeLead } from './formspree-flagger.js';
 
 const POLL_INTERVAL_MS = 3 * 60 * 1000;   // 3 minutes
 const MAX_FETCH_PER_POLL = 200;           // cap per cycle; on backfill this can fill quickly
@@ -260,6 +261,13 @@ async function pollOneInbox(inbox) {
           matchedSubscriberId,
           matchedCampaignId,
         );
+
+        // Auto-flag Formspree leads as Hot Prospects. Runs AFTER the
+        // email_replies INSERT so the "Open in CRM" thread can pick the
+        // email up. Failures here are non-fatal — processFormspreeLead
+        // never throws, and even if it did the outer try-catch would log
+        // it without breaking the poller.
+        processFormspreeLead(parsed, inbox.email_client_id);
 
         stored++;
         highestUid = Math.max(highestUid, uid);
