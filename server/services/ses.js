@@ -282,8 +282,8 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm 
   };
 
   const insertSend = db.prepare(`INSERT INTO email_sends
-    (id, campaign_id, subscriber_id, message_id, status, sent_at, step_number)
-    VALUES (?, ?, ?, ?, 'sent', datetime('now'), ?)`);
+    (id, campaign_id, subscriber_id, message_id, status, sent_at, step_number, tracked)
+    VALUES (?, ?, ?, ?, 'sent', datetime('now'), ?, ?)`);
 
   const markFailed = db.prepare(`INSERT INTO email_sends
     (id, campaign_id, subscriber_id, status, sent_at, step_number)
@@ -360,7 +360,7 @@ export async function sendCampaign({ campaign, subscribers, baseUrl, alwaysWarm 
           track_unsub:  trackThis && flags.track_unsub,
         });
 
-        insertSend.run(uuid(), campaign.id, sub.id, messageId, stepNumber);
+        insertSend.run(uuid(), campaign.id, sub.id, messageId, stepNumber, trackThis ? 1 : 0);
         results.sent++;
         if (trackThis) results.tracked++; else results.untracked++;
       } catch (err) {

@@ -1239,21 +1239,53 @@ router.post('/replies/:id/send', async (req, res) => {
 // opens" is "we didn't track" not "no one opened".
 
 // ─── GET /api/portal/campaigns ────────────────────────────────────────────────
+//
+// Returns the full list of campaigns for this customer, with everything the
+// portal's new Campaigns view needs to render the list table and the per-row
+// expanded panel WITHOUT a second roundtrip (except the heavy per-campaign
+// detail payload, which lives at GET /campaigns/:id and only loads when a
+// row is expanded).
+//
+// Per campaign we return:
+//   - identity:   id, title, started_at
+//   - status:     'scheduled' | 'sending' | 'sent' | 'failed'
+//                 plus is_drip / steps_total / steps_sent / drip_status
+//                 so the frontend can show "In progress · 1/3" pills.
+//   - subject:    the visible subject line (step 1's subject; falls back to
+//                 campaigns.subject for pre-multi-step campaigns).
+//   - combined headline numbers, aggregated across ALL steps:
+//                 sent, tracked, untracked, opens, clicks, bounces, unsubs,
+//                 replies.
+//   - tracking_mode + tracking_split_available — see the note below.
+//   - steps[]:    per-step rollup (no html body — that's in the detail route):
+//                 { step_number, delay_days, subject, sent, tracked, opens,
+//                   clicks, bounces, unsubs, replies, sent_at, status }
+//
+// THE TRACKING-SPLIT HONESTY RULE
+// -------------------------------
+// email_sends.tracked is a new column (added this session). For rows inserted
+// BEFORE this feature shipped it's defaulted to 0 — which means the literal
+// "tracked" count for historic campaigns is unreliable. We surface this via
+// `tracking_split_available: false` when ALL of a campaign's sends are
+// untracked AND the campaign's tracking_mode is not 'off'. The frontend uses
+// this flag to show just the campaign-level tracking pill (e.g. "Tracking:
+// smart") with no specific tracked/untracked numbers attached, rather than
+// falsely claiming "0 of 369 tracked". New campaigns sent after this deploy
+// will always have at least some tracked rows when mode != 'off', so they
+// get the full split.
+//
+// Returns { campaigns: [...], not_subscribed: bool }.
 router.get('/campaigns', (req, res) => {
   const linkedEmailClientId = resolveEmailClientId(req.portalClient.id);
   if (!linkedEmailClientId) {
     return res.json({ campaigns: [], not_subscribed: true });
   }
 
-  // Pull all campaigns, then layer on reply counts in a second query. SQLite
-  // can do this in one query with a LEFT JOIN + GROUP BY, but the join blows
-  // up if a campaign has many replies (cartesian with email_sends rows).
-  // Two small queries keep it correct and clear.
   const campaigns = db.prepare(`
     SELECT
-      id, title, status,
-      sent_count, open_count, click_count, bounce_count, unsubscribe_count,
-      track_opens, track_clicks,
+      id, title, subject, status,
+      tracking_mode, track_opens, track_clicks,
+      unsubscribe_count,
       sent_at, scheduled_at, created_at
     FROM email_campaigns
     WHERE email_client_id = ?
@@ -1264,46 +1296,367 @@ router.get('/campaigns', (req, res) => {
     return res.json({ campaigns: [], not_subscribed: false });
   }
 
-  // Reply counts in one round-trip — fetch all reply rows that match these
-  // campaigns and aggregate in JS. Cheap because email_replies is small per
-  // customer (hundreds, not millions).
+  const campaignIds = campaigns.map(c => c.id);
+  const placeholders = campaignIds.map(() => '?').join(',');
+
+  // Per-step rollup from email_sends. We aggregate per (campaign, step_number)
+  // so the frontend can render the per-step tabs without a second query.
+  // status='sent' (or anything not 'failed'/'bounced') counts as a real send;
+  // 'bounced' counts toward the bounce column; 'failed' is excluded from
+  // everything (failed to even hand off to SES — never reached the recipient).
+  const sendRows = db.prepare(`
+    SELECT
+      campaign_id,
+      step_number,
+      COUNT(*) AS total,
+      SUM(CASE WHEN status NOT IN ('failed','bounced') THEN 1 ELSE 0 END) AS sent,
+      SUM(CASE WHEN status NOT IN ('failed','bounced') AND tracked = 1 THEN 1 ELSE 0 END) AS tracked,
+      SUM(CASE WHEN opened_at IS NOT NULL THEN 1 ELSE 0 END) AS opens,
+      SUM(CASE WHEN clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS clicks,
+      SUM(CASE WHEN status = 'bounced' OR bounced_at IS NOT NULL THEN 1 ELSE 0 END) AS bounces,
+      MIN(sent_at) AS first_sent_at,
+      MAX(sent_at) AS last_sent_at
+    FROM email_sends
+    WHERE campaign_id IN (${placeholders})
+    GROUP BY campaign_id, step_number
+  `).all(...campaignIds);
+
+  // Index by campaign for fast lookup
+  const sendsByCampaign = new Map();
+  for (const r of sendRows) {
+    if (!sendsByCampaign.has(r.campaign_id)) sendsByCampaign.set(r.campaign_id, []);
+    sendsByCampaign.get(r.campaign_id).push(r);
+  }
+
+  // Step definitions (subject + delay_days). Excludes html_body — heavy and
+  // not needed for the list response.
+  const stepDefs = db.prepare(`
+    SELECT campaign_id, step_number, subject, delay_days
+    FROM email_campaign_steps
+    WHERE campaign_id IN (${placeholders})
+    ORDER BY campaign_id, step_number
+  `).all(...campaignIds);
+  const stepsByCampaign = new Map();
+  for (const s of stepDefs) {
+    if (!stepsByCampaign.has(s.campaign_id)) stepsByCampaign.set(s.campaign_id, []);
+    stepsByCampaign.get(s.campaign_id).push(s);
+  }
+
+  // Reply counts per campaign + per step. Step attribution: replies are
+  // matched to a campaign (matched_campaign_id) but not to a specific step —
+  // a reply to step 2 still threads on the campaign. So per-step reply count
+  // is "not directly attributable"; we surface the total at campaign level
+  // and a per-step total of "—" on every step except by using the count of
+  // replies received AFTER that step's sends started (best approximation).
+  // Keep it simple for now: total at campaign level, per-step UNSPECIFIED.
   const replyCounts = db.prepare(`
     SELECT matched_campaign_id, COUNT(*) AS n
     FROM email_replies
-    WHERE email_client_id = ? AND matched_campaign_id IS NOT NULL
+    WHERE email_client_id = ? AND matched_campaign_id IN (${placeholders})
     GROUP BY matched_campaign_id
-  `).all(linkedEmailClientId);
+  `).all(linkedEmailClientId, ...campaignIds);
   const replyMap = new Map(replyCounts.map(r => [r.matched_campaign_id, r.n]));
+
+  // Per-campaign unsubscribe count. We count subscribers who unsubscribed
+  // AFTER receiving any send from this campaign — i.e. anyone in email_sends
+  // for this campaign whose subscriber row has unsubscribed_at set after
+  // their first send_at. This is approximate (could attribute an unsub that
+  // happened months later to the campaign that touched them last), but it's
+  // the same approximation the existing email_campaigns.unsubscribe_count
+  // would have made, and it's what we have without a per-unsub source table.
+  // We use email_campaigns.unsubscribe_count directly when populated, since
+  // that's already the value the operator sees in the admin UI — keeps the
+  // two views consistent.
+  // (Falling back to 0 when null — never NaN/undefined.)
 
   res.json({
     campaigns: campaigns.map(c => {
-      const tracking_off = !c.track_opens && !c.track_clicks;
+      const sendsForCampaign = sendsByCampaign.get(c.id) || [];
+      const stepsForCampaign = stepsByCampaign.get(c.id) || [];
+
+      // Combined headline across all steps
+      const combined = sendsForCampaign.reduce((acc, r) => {
+        acc.sent    += r.sent    || 0;
+        acc.tracked += r.tracked || 0;
+        acc.opens   += r.opens   || 0;
+        acc.clicks  += r.clicks  || 0;
+        acc.bounces += r.bounces || 0;
+        return acc;
+      }, { sent: 0, tracked: 0, opens: 0, clicks: 0, bounces: 0 });
+      const untracked = Math.max(0, combined.sent - combined.tracked);
+
+      // Drip awareness
+      const stepsTotal = stepsForCampaign.length || 1;
+      const stepsSent  = sendsForCampaign.filter(r => (r.sent || 0) > 0).length;
+      const isDrip     = stepsTotal > 1;
+      const dripStatus =
+        stepsSent === 0           ? 'not_started' :
+        stepsSent >= stepsTotal   ? 'completed'   :
+                                    'in_progress';
+
+      // Customer-friendly campaign status. For drips, "all sent" only fires
+      // when every step has fired; otherwise we surface 'in_progress' so the
+      // frontend can show the amber "In progress · X/N" pill.
+      let status;
+      if (c.status === 'failed') {
+        status = 'failed';
+      } else if (c.status === 'sending' || c.status === 'paused') {
+        status = 'sending';
+      } else if (isDrip && dripStatus === 'in_progress') {
+        status = 'in_progress';
+      } else if (c.sent_at || c.status === 'sent' || combined.sent > 0) {
+        status = 'sent';
+      } else {
+        status = 'scheduled';
+      }
+
+      // Tracking-split availability — see header comment.
+      const trackingOn = c.tracking_mode && c.tracking_mode !== 'off';
+      const trackingSplitAvailable =
+        !trackingOn ? true                                  /* nothing to split — honest */
+        : combined.tracked > 0 ? true                       /* real data */
+        : false;                                            /* pre-feature campaign */
+
+      // Per-step rollup. Sends for a step may not exist yet (future drip step).
+      // step subject falls back to the campaign subject for step 1, and to
+      // '(no subject set)' for unconfigured follow-up steps.
+      const steps = stepsForCampaign.map(def => {
+        const s = sendsForCampaign.find(r => r.step_number === def.step_number) || {};
+        const stepSent     = s.sent    || 0;
+        const stepTracked  = s.tracked || 0;
+        const stepStatus =
+          stepSent === 0 ? 'pending'
+          : stepSent > 0 && c.status !== 'failed' ? 'sent'
+          : 'failed';
+        return {
+          step_number: def.step_number,
+          delay_days:  def.delay_days || 0,
+          subject:     def.subject || (def.step_number === 1 ? c.subject : '(no subject set)'),
+          sent:        stepSent,
+          tracked:     stepTracked,
+          untracked:   Math.max(0, stepSent - stepTracked),
+          opens:       s.opens   || 0,
+          clicks:      s.clicks  || 0,
+          bounces:     s.bounces || 0,
+          sent_at:     s.first_sent_at || null,
+          status:      stepStatus,
+        };
+      });
+      // If there are no step rows but the campaign has sends (very old data
+      // before the steps table existed), synthesise a single step from the
+      // campaign itself so the frontend always has at least one tab.
+      if (steps.length === 0 && combined.sent > 0) {
+        steps.push({
+          step_number: 1,
+          delay_days:  0,
+          subject:     c.subject || '',
+          sent:        combined.sent,
+          tracked:     combined.tracked,
+          untracked:   untracked,
+          opens:       combined.opens,
+          clicks:      combined.clicks,
+          bounces:     combined.bounces,
+          sent_at:     c.sent_at,
+          status:      'sent',
+        });
+      }
+
       return {
         id:       c.id,
         title:    c.title,
-        // Surface a customer-friendly status. The DB stores 'draft', 'sending',
-        // 'sent', 'paused', 'failed' etc. We collapse 'sending'/'paused' to
-        // "Sending" since paused is an internal-state concept, and everything
-        // post-send to "Sent". Pre-send states surface as "Scheduled".
-        status:
-          c.status === 'sending' || c.status === 'paused' ? 'sending' :
-          c.status === 'sent' || c.sent_at                ? 'sent' :
-          c.status === 'failed'                            ? 'failed' :
-          'scheduled',
-        sent:     c.sent_count        || 0,
-        opens:    c.open_count        || 0,
-        clicks:   c.click_count       || 0,
-        bounces:  c.bounce_count      || 0,
-        unsubs:   c.unsubscribe_count || 0,
-        replies:  replyMap.get(c.id)   || 0,
-        tracking_off,
-        // Date used by the frontend's "Started" column. Prefer sent_at, fall
-        // back to scheduled_at, then created_at — whichever is the most
-        // meaningful "this got going on…" timestamp.
+        subject:  c.subject || '',
+        status,
+        is_drip:        isDrip,
+        steps_total:    stepsTotal,
+        steps_sent:     stepsSent,
+        drip_status:    dripStatus,
+        tracking_mode:  c.tracking_mode || 'off',
+        tracking_split_available: trackingSplitAvailable,
+        sent:      combined.sent,
+        tracked:   combined.tracked,
+        untracked: untracked,
+        opens:     combined.opens,
+        clicks:    combined.clicks,
+        bounces:   combined.bounces,
+        unsubs:    c.unsubscribe_count || 0,
+        replies:   replyMap.get(c.id) || 0,
+        steps,
         started_at: c.sent_at || c.scheduled_at || c.created_at,
       };
     }),
     not_subscribed: false,
+  });
+});
+
+// ─── GET /api/portal/campaigns/:id ────────────────────────────────────────────
+//
+// Returns the heavier per-campaign payload used when a row is expanded in the
+// portal Campaigns view. Kept separate from the list endpoint so the table
+// loads fast and we only pay the cost for campaigns the customer actually
+// drills into.
+//
+// Payload:
+//   - everything the list returns for this campaign
+//   - steps[].html_body — the actual email body that went out (for preview)
+//   - steps[].from_name / from_email — sender shown to the recipient
+//   - replies[]: last 30 inbound replies linked to this campaign, with
+//     classification + a short snippet. Newest first.
+//
+// Returns 404 (not 403) for cross-tenant lookups — see portal-auth.js.
+router.get('/campaigns/:id', (req, res) => {
+  const linkedEmailClientId = resolveEmailClientId(req.portalClient.id);
+  if (!linkedEmailClientId) return res.status(404).json({ error: 'not_found' });
+
+  const campaign = db.prepare(`
+    SELECT
+      id, title, subject, from_name, from_email, reply_to,
+      html_body, status,
+      tracking_mode, track_opens, track_clicks,
+      unsubscribe_count,
+      sent_at, scheduled_at, created_at
+    FROM email_campaigns
+    WHERE id = ? AND email_client_id = ?
+  `).get(req.params.id, linkedEmailClientId);
+
+  if (!campaign) return res.status(404).json({ error: 'not_found' });
+
+  // Per-step rollup — same shape as the list endpoint
+  const sendRows = db.prepare(`
+    SELECT
+      step_number,
+      SUM(CASE WHEN status NOT IN ('failed','bounced') THEN 1 ELSE 0 END) AS sent,
+      SUM(CASE WHEN status NOT IN ('failed','bounced') AND tracked = 1 THEN 1 ELSE 0 END) AS tracked,
+      SUM(CASE WHEN opened_at IS NOT NULL THEN 1 ELSE 0 END) AS opens,
+      SUM(CASE WHEN clicked_at IS NOT NULL THEN 1 ELSE 0 END) AS clicks,
+      SUM(CASE WHEN status = 'bounced' OR bounced_at IS NOT NULL THEN 1 ELSE 0 END) AS bounces,
+      MIN(sent_at) AS first_sent_at
+    FROM email_sends
+    WHERE campaign_id = ?
+    GROUP BY step_number
+  `).all(campaign.id);
+  const sendsByStep = new Map(sendRows.map(r => [r.step_number, r]));
+
+  // Step definitions WITH html_body for preview
+  const stepDefs = db.prepare(`
+    SELECT step_number, subject, delay_days, html_body
+    FROM email_campaign_steps
+    WHERE campaign_id = ?
+    ORDER BY step_number
+  `).all(campaign.id);
+
+  // Combined totals
+  const combined = sendRows.reduce((acc, r) => {
+    acc.sent    += r.sent    || 0;
+    acc.tracked += r.tracked || 0;
+    acc.opens   += r.opens   || 0;
+    acc.clicks  += r.clicks  || 0;
+    acc.bounces += r.bounces || 0;
+    return acc;
+  }, { sent: 0, tracked: 0, opens: 0, clicks: 0, bounces: 0 });
+  const untracked = Math.max(0, combined.sent - combined.tracked);
+
+  // Build steps array with html_body + per-step rollup
+  const steps = stepDefs.map(def => {
+    const s = sendsByStep.get(def.step_number) || {};
+    const stepSent = s.sent || 0;
+    const stepStatus =
+      stepSent === 0 ? 'pending'
+      : stepSent > 0 && campaign.status !== 'failed' ? 'sent'
+      : 'failed';
+    return {
+      step_number: def.step_number,
+      delay_days:  def.delay_days || 0,
+      subject:     def.subject || (def.step_number === 1 ? campaign.subject : '(no subject set)'),
+      html_body:   def.html_body || '',
+      from_name:   campaign.from_name,
+      from_email:  campaign.from_email,
+      sent:        stepSent,
+      tracked:     s.tracked || 0,
+      untracked:   Math.max(0, stepSent - (s.tracked || 0)),
+      opens:       s.opens   || 0,
+      clicks:      s.clicks  || 0,
+      bounces:     s.bounces || 0,
+      sent_at:     s.first_sent_at || null,
+      status:      stepStatus,
+    };
+  });
+  // Fallback for very old single-step campaigns with no row in
+  // email_campaign_steps (theoretically backfilled but defensive).
+  if (steps.length === 0) {
+    steps.push({
+      step_number: 1,
+      delay_days:  0,
+      subject:     campaign.subject || '',
+      html_body:   campaign.html_body || '',
+      from_name:   campaign.from_name,
+      from_email:  campaign.from_email,
+      sent:        combined.sent,
+      tracked:     combined.tracked,
+      untracked:   untracked,
+      opens:       combined.opens,
+      clicks:      combined.clicks,
+      bounces:     combined.bounces,
+      sent_at:     campaign.sent_at,
+      status:      combined.sent > 0 ? 'sent' : 'pending',
+    });
+  }
+
+  // Recent replies — last 30, newest first, with a snippet from body_text.
+  // Snippet is 160 chars; we strip newlines so it sits on one line in the UI.
+  const replies = db.prepare(`
+    SELECT
+      id, from_address, from_name, subject, received_at,
+      classification, body_text
+    FROM email_replies
+    WHERE email_client_id = ? AND matched_campaign_id = ?
+    ORDER BY received_at DESC
+    LIMIT 30
+  `).all(linkedEmailClientId, campaign.id).map(r => ({
+    id:             r.id,
+    from_address:   r.from_address,
+    from_name:      r.from_name,
+    subject:        r.subject,
+    received_at:    r.received_at,
+    classification: r.classification,
+    snippet: (r.body_text || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+  }));
+
+  // Drip awareness — same logic as the list endpoint
+  const stepsTotal = stepDefs.length || 1;
+  const stepsSent  = sendRows.filter(r => (r.sent || 0) > 0).length;
+  const isDrip     = stepsTotal > 1;
+  const dripStatus =
+    stepsSent === 0         ? 'not_started' :
+    stepsSent >= stepsTotal ? 'completed'   :
+                              'in_progress';
+
+  const trackingOn = campaign.tracking_mode && campaign.tracking_mode !== 'off';
+  const trackingSplitAvailable =
+    !trackingOn ? true
+    : combined.tracked > 0 ? true
+    : false;
+
+  res.json({
+    id:            campaign.id,
+    title:         campaign.title,
+    subject:       campaign.subject || '',
+    is_drip:       isDrip,
+    steps_total:   stepsTotal,
+    steps_sent:    stepsSent,
+    drip_status:   dripStatus,
+    tracking_mode: campaign.tracking_mode || 'off',
+    tracking_split_available: trackingSplitAvailable,
+    sent:      combined.sent,
+    tracked:   combined.tracked,
+    untracked: untracked,
+    opens:     combined.opens,
+    clicks:    combined.clicks,
+    bounces:   combined.bounces,
+    unsubs:    campaign.unsubscribe_count || 0,
+    replies:   replies.length,
+    steps,
+    replies_list: replies,
+    started_at: campaign.sent_at || campaign.scheduled_at || campaign.created_at,
   });
 });
 

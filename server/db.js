@@ -401,6 +401,18 @@ db.exec(`
     db.exec(`ALTER TABLE email_sends ADD COLUMN click_count INTEGER DEFAULT 0`);
     console.log('[db] migration: added click_count to email_sends');
   }
+  // 'tracked' — was open/click tracking actually applied to THIS send?
+  // Recorded at send time in ses.js based on shouldTrackRecipient(). Used by
+  // the portal Campaigns view to show an honest "120 tracked / 249 untracked"
+  // split per campaign. Pre-feature rows default to 0; the portal endpoint
+  // detects that case via a per-campaign "tracking_split_available" flag and
+  // hides the split number on historic campaigns (showing only the campaign-
+  // level tracking_mode pill) so we never claim a misleading "0 tracked" for
+  // a campaign that actually was sent with tracking on.
+  if (!sendCols.includes('tracked')) {
+    db.exec(`ALTER TABLE email_sends ADD COLUMN tracked INTEGER DEFAULT 0`);
+    console.log('[db] migration: added tracked to email_sends');
+  }
 }
 
 // 10b. email_campaign_links — hash → original URL, per campaign.
