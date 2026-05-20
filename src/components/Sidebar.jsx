@@ -65,6 +65,14 @@ export default function Sidebar({ onLogout, activeView, onNavigate }) {
 
         <hr style={DIVIDER} />
 
+        {/* CRM — currently one entry, but the section heading makes it cheap
+            to add more later (Warm prospects, Lost deals, etc.) without
+            another sidebar rearrange. */}
+        <div style={SECTION}>CRM</div>
+        <SubItem id="crm-hot-prospects"   label="Hot Prospects"    active={activeView==='crm-hot-prospects'} onNavigate={onNavigate} icon={<HotProspectsIcon />} />
+
+        <hr style={DIVIDER} />
+
         {/* App integration — external admin panels embedded inside Studio.
             Each entry mounts an iframe of the target app's admin URL. Auth is
             handled by a shared-secret bridge (see server/routes/idyq-bridge.js
@@ -153,6 +161,16 @@ function PortalIcon() {
     <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
       <path d="M3 1.5A.5.5 0 013.5 1h6a.5.5 0 01.5.5v3.5h-1V2H4v12h5v-3h1v3.5a.5.5 0 01-.5.5h-6a.5.5 0 01-.5-.5v-13z"/>
       <path d="M11.5 5.5a.5.5 0 01.354.146l2.5 2.5a.5.5 0 010 .708l-2.5 2.5a.5.5 0 11-.708-.708L13.293 8.5H6.5a.5.5 0 010-1h6.793l-1.647-1.646A.5.5 0 0111.5 5.5z"/>
+    </svg>
+  );
+}
+
+function HotProspectsIcon() {
+  // Flame icon — represents "hot" prospects. Single-path SVG to match the
+  // other sidebar icons (currentColor fill, 16x16 viewBox).
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M8 1.3s-3.5 2.5-3.5 6c0 1.93 1.57 3.5 3.5 3.5s3.5-1.57 3.5-3.5C11.5 6.2 10 4.5 10 4.5S9.5 6 8.5 6c0-2 .5-3.2-.5-4.7zM8 9c-1.1 0-2-.9-2-2 0-.55.22-1.05.59-1.41C7 6 7.5 6.5 8 6.5S9 6 9.41 5.59C9.78 5.95 10 6.45 10 7c0 1.1-.9 2-2 2zM4.5 13c0 .83.67 1.5 1.5 1.5h4c.83 0 1.5-.67 1.5-1.5V12h-7v1z"/>
     </svg>
   );
 }

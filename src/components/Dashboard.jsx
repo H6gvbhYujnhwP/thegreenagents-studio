@@ -6,6 +6,7 @@ import ClientDetail from './ClientDetail.jsx';
 import EmailSection from './EmailSection.jsx';
 import PortalAdmin from './PortalAdmin.jsx';
 import IDYQAdmin from './apps/IDYQAdmin.jsx';
+import CrmHotProspects from './CrmHotProspects.jsx';
 
 export default function Dashboard({ onLogout }) {
   const [clients, setClients]           = useState([]);
@@ -99,6 +100,19 @@ export default function Dashboard({ onLogout }) {
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
         <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
         <PortalAdmin />
+      </div>
+    );
+  }
+
+  // ── CRM — Hot Prospects (admin) ───────────────────────────────────────────
+  // Per-customer prospect list with customer-switcher badges at the top.
+  // The component itself fetches /api/email/hot-prospects/customers and
+  // /api/email/hot-prospects?email_client_id=... to drive the screen.
+  if (view === 'crm-hot-prospects') {
+    return (
+      <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+        <CrmHotProspects />
       </div>
     );
   }

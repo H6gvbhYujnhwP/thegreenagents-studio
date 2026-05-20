@@ -107,6 +107,49 @@ router.get('/', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /api/email/hot-prospects/customers
+//
+// List of customers for the admin CRM's customer-switcher badges. Returns
+// every portal-enabled email_client AND every aws_domain/manual one — i.e.
+// the union of "real email customers" and "portal customers" (which can
+// overlap — Manson is both). Critically broader than GET /api/email/clients,
+// which filters out portal-only rows per decision #57 — but the CRM is the
+// operator's mission control across the WHOLE customer roster, so portal-only
+// customers (Cube6 etc.) need to appear here too. Operator-confirmed
+// 2026-05-20 (option B).
+//
+// Each row carries a `prospect_count` so the badge can show how many
+// prospects each customer has. Customers with zero prospects still appear,
+// just with a "0" badge.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/customers', (req, res) => {
+  // The filter: include every row whose source is 'aws_domain'/'manual'
+  // (real email customers) OR whose portal_enabled is 1 (portal customers,
+  // including portal-only ones that GET /api/email/clients hides). The
+  // OR ensures we don't double-count rows that satisfy both — they just
+  // appear once. NULL-source rows are also included for the same race-
+  // safety reason GET /api/email/clients includes them.
+  const rows = db.prepare(`
+    SELECT
+      ec.id,
+      ec.name,
+      ec.color,
+      ec.slug,
+      ec.portal_enabled,
+      ec.source,
+      ec.logo_url,
+      (SELECT COUNT(*) FROM hot_prospects WHERE email_client_id = ec.id) AS prospect_count
+    FROM email_clients ec
+    WHERE ec.source IS NULL
+       OR ec.source IN ('aws_domain', 'manual')
+       OR ec.portal_enabled = 1
+    ORDER BY ec.name ASC
+  `).all();
+
+  res.json({ customers: rows });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/email/hot-prospects
 //
 // Add a prospect to a customer's Hot Prospects list. Body:
