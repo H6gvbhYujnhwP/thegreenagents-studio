@@ -2383,6 +2383,7 @@ function ComposeReplyModal({ reply, onClose, onSend }) {
 // passes `autoOpenProspectId` — used by the inbox's "Open in CRM" link.
 function PortalHotProspects({ autoOpenProspectId, onAutoOpenConsumed }) {
   const [prospects, setProspects] = useState(null);  // null = loading
+  const [hasLinkedInboxes, setHasLinkedInboxes] = useState(false);
   const [search, setSearch]       = useState('');
   const [openProspectId, setOpenProspectId] = useState(null);
   const [error, setError]         = useState(null);
@@ -2391,11 +2392,13 @@ function PortalHotProspects({ autoOpenProspectId, onAutoOpenConsumed }) {
     try {
       const r = await fetch('/api/portal/hot-prospects', { credentials:'include' });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok || d.error) { setError(d.error || `HTTP ${r.status}`); setProspects([]); return; }
+      if (!r.ok || d.error) { setError(d.error || `HTTP ${r.status}`); setProspects([]); setHasLinkedInboxes(false); return; }
       setProspects(d.prospects || []);
+      setHasLinkedInboxes(!!d.has_linked_inboxes);
     } catch (e) {
       setError(String(e.message || e));
       setProspects([]);
+      setHasLinkedInboxes(false);
     }
   }
   useEffect(() => { load(); }, []);
@@ -2473,7 +2476,7 @@ function PortalHotProspects({ autoOpenProspectId, onAutoOpenConsumed }) {
       ) : filtered && filtered.length === 0 ? (
         <div style={{ fontSize:13, color:MUTED, padding:'20px 0' }}>No matches.</div>
       ) : (
-        <PortalProspectList prospects={filtered} onOpen={setOpenProspectId} />
+        <PortalProspectList prospects={filtered} onOpen={setOpenProspectId} showInboxColumn={hasLinkedInboxes} />
       )}
 
       {openProspectId && (
@@ -2542,15 +2545,22 @@ function portalFollowUpFormat(value) {
   return { label: d.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' }), color: TEXT, urgent: false };
 }
 
-function PortalProspectList({ prospects, onOpen }) {
+function PortalProspectList({ prospects, onOpen, showInboxColumn }) {
   if (!prospects || prospects.length === 0) return null;
+  // Grid template: mirrors CrmHotProspects.jsx's ProspectList — adds the
+  // 1.3fr Inbox column between Email and Added when the customer has linked
+  // inboxes. Single-inbox customers (Manson, Tower, etc.) keep the original
+  // 4-column layout so the column doesn't display redundant "self" labels.
+  const gridCols = showInboxColumn
+    ? '1.7fr 1.6fr 1.3fr 0.9fr 0.9fr 32px'
+    : '2fr 1.8fr 1.2fr 1.2fr 32px';
   return (
     <div style={{
       background:CARD, border:`0.5px solid ${BORDER}`, borderRadius:8,
       overflow:'hidden',
     }}>
       <div style={{
-        display:'grid', gridTemplateColumns:'2fr 1.8fr 1.2fr 1.2fr 32px',
+        display:'grid', gridTemplateColumns: gridCols,
         gap:12, padding:'10px 16px',
         background:'#fafaf8', borderBottom:`0.5px solid ${BORDER}`,
         fontSize:11, fontWeight:500, color:MUTED,
@@ -2558,22 +2568,30 @@ function PortalProspectList({ prospects, onOpen }) {
       }}>
         <div>Name</div>
         <div>Email</div>
+        {showInboxColumn && <div>Inbox</div>}
         <div>Added</div>
         <div>Follow up</div>
         <div />
       </div>
       {prospects.map((p, idx) => (
-        <PortalProspectRow key={p.id} prospect={p} isLast={idx === prospects.length - 1} onOpen={() => onOpen(p.id)} />
+        <PortalProspectRow
+          key={p.id}
+          prospect={p}
+          isLast={idx === prospects.length - 1}
+          onOpen={() => onOpen(p.id)}
+          showInboxColumn={showInboxColumn}
+          gridCols={gridCols}
+        />
       ))}
     </div>
   );
 }
-function PortalProspectRow({ prospect, isLast, onOpen }) {
+function PortalProspectRow({ prospect, isLast, onOpen, showInboxColumn, gridCols }) {
   const av = portalAvatarColor(prospect.prospect_name || prospect.prospect_email);
   const fu = portalFollowUpFormat(prospect.follow_up_date);
   return (
     <div onClick={onOpen} style={{
-      display:'grid', gridTemplateColumns:'2fr 1.8fr 1.2fr 1.2fr 32px',
+      display:'grid', gridTemplateColumns: gridCols,
       gap:12, padding:'14px 16px', alignItems:'center',
       borderBottom: isLast ? 'none' : `0.5px solid ${BORDER}`,
       cursor:'pointer',
@@ -2591,6 +2609,18 @@ function PortalProspectRow({ prospect, isLast, onOpen }) {
         }}>{prospect.prospect_name || <span style={{ color:MUTED, fontWeight:400 }}>(no name)</span>}</div>
       </div>
       <div style={{ fontSize:13, color:MUTED, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{prospect.prospect_email}</div>
+      {showInboxColumn && (
+        <div style={{ minWidth:0 }}>
+          {prospect.source_inbox_name && (
+            <span style={{
+              background: GREEN_BG, color: GREEN,
+              fontSize:11, padding:'2px 8px', borderRadius:999,
+              overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+              display:'inline-block', maxWidth:'100%',
+            }}>{prospect.source_inbox_name}</span>
+          )}
+        </div>
+      )}
       <div style={{ fontSize:13, color:MUTED }}>{portalRelativeTime(prospect.added_at)}</div>
       <div style={{ fontSize:13, color: fu.color, fontWeight: fu.urgent ? 500 : 400 }}>{fu.label}</div>
       <div style={{ textAlign:'right', color:'#999', fontSize:18 }}>›</div>
@@ -2728,6 +2758,17 @@ function PortalProspectDetailBody({ data, followUp, setFollowUp, notes, setNotes
               {p.prospect_name || <span style={{ color:MUTED, fontWeight:400 }}>(no name)</span>}
             </div>
             <div style={{ fontSize:13, color:MUTED, marginTop:2 }}>{p.prospect_email}</div>
+            {/* Source-inbox subtitle, only shown when this prospect's customer
+                has linked inboxes (i.e. there's something useful to show).
+                Hidden for single-inbox customers. */}
+            {p.has_linked_inboxes && p.source_inbox_name && (
+              <div style={{ marginTop:4 }}>
+                <span style={{
+                  background: GREEN_BG, color: GREEN,
+                  fontSize:11, padding:'2px 7px', borderRadius:999,
+                }}>From {p.source_inbox_name}</span>
+              </div>
+            )}
           </div>
         </div>
         <button

@@ -121,6 +121,7 @@ export default function CrmHotProspects() {
   const [customers, setCustomers] = useState(null);   // null = loading, [] = none, [...] = list
   const [selectedCustomerId, setSelectedCustomerId] = useState(null);
   const [prospects, setProspects] = useState(null);   // null = loading, [] = none
+  const [hasLinkedInboxes, setHasLinkedInboxes] = useState(false); // server signal: show Inbox column?
   const [search, setSearch] = useState('');
   const [openProspectId, setOpenProspectId] = useState(null);
   const [error, setError] = useState(null);
@@ -173,10 +174,11 @@ export default function CrmHotProspects() {
         const r = await fetch(`/api/email/hot-prospects?email_client_id=${encodeURIComponent(selectedCustomerId)}`);
         const d = await r.json();
         if (cancelled) return;
-        if (!r.ok || d.error) { setProspects([]); return; }
+        if (!r.ok || d.error) { setProspects([]); setHasLinkedInboxes(false); return; }
         setProspects(d.prospects || []);
+        setHasLinkedInboxes(!!d.has_linked_inboxes);
       } catch (e) {
-        if (!cancelled) setProspects([]);
+        if (!cancelled) { setProspects([]); setHasLinkedInboxes(false); }
       }
     })();
     return () => { cancelled = true; };
@@ -196,7 +198,10 @@ export default function CrmHotProspects() {
       if (cR.ok && !cD.error) setCustomers(cD.customers || []);
       if (pR) {
         const pD = await pR.json();
-        if (pR.ok && !pD.error) setProspects(pD.prospects || []);
+        if (pR.ok && !pD.error) {
+          setProspects(pD.prospects || []);
+          setHasLinkedInboxes(!!pD.has_linked_inboxes);
+        }
       }
     } catch {}
   }
@@ -264,6 +269,7 @@ export default function CrmHotProspects() {
         prospects={filteredProspects}
         onOpen={setOpenProspectId}
         empty={prospects && prospects.length === 0}
+        showInboxColumn={hasLinkedInboxes}
       />
 
       {/* Detail modal */}
@@ -339,7 +345,7 @@ function CustomerBadges({ customers, selectedId, onSelect }) {
 
 // ── Prospect list (table) ────────────────────────────────────────────────────
 
-function ProspectList({ prospects, onOpen, empty }) {
+function ProspectList({ prospects, onOpen, empty, showInboxColumn }) {
   if (prospects === null) {
     return <div style={{ fontSize:13, color:MUTED, padding:'20px 0' }}>Loading prospects…</div>;
   }
@@ -359,6 +365,12 @@ function ProspectList({ prospects, onOpen, empty }) {
   if (prospects.length === 0) {
     return <div style={{ fontSize:13, color:MUTED, padding:'20px 0' }}>No matches.</div>;
   }
+  // Grid template: when the Inbox column is visible we add a 1.2fr column
+  // between Email and Added, and trim Name/Email slightly so the row still
+  // fits at the standard CRM screen width.
+  const gridCols = showInboxColumn
+    ? '1.7fr 1.6fr 1.3fr 0.9fr 0.9fr 32px'
+    : '2fr 1.8fr 1.2fr 1.2fr 32px';
   return (
     <div style={{
       background:CARD, border:`0.5px solid ${BORDER}`, borderRadius:8,
@@ -367,7 +379,7 @@ function ProspectList({ prospects, onOpen, empty }) {
       {/* Header row */}
       <div style={{
         display:'grid',
-        gridTemplateColumns:'2fr 1.8fr 1.2fr 1.2fr 32px',
+        gridTemplateColumns: gridCols,
         gap:12, padding:'10px 16px',
         background:BG, borderBottom:`0.5px solid ${BORDER}`,
         fontSize:11, fontWeight:500, color:MUTED,
@@ -375,6 +387,7 @@ function ProspectList({ prospects, onOpen, empty }) {
       }}>
         <div>Name</div>
         <div>Email</div>
+        {showInboxColumn && <div>Inbox</div>}
         <div>Added</div>
         <div>Follow up</div>
         <div />
@@ -386,13 +399,15 @@ function ProspectList({ prospects, onOpen, empty }) {
           prospect={p}
           isLast={idx === prospects.length - 1}
           onOpen={() => onOpen(p.id)}
+          showInboxColumn={showInboxColumn}
+          gridCols={gridCols}
         />
       ))}
     </div>
   );
 }
 
-function ProspectRow({ prospect, isLast, onOpen }) {
+function ProspectRow({ prospect, isLast, onOpen, showInboxColumn, gridCols }) {
   const av = avatarColor(prospect.prospect_name || prospect.prospect_email);
   const fu = formatFollowUp(prospect.follow_up_date);
   return (
@@ -400,7 +415,7 @@ function ProspectRow({ prospect, isLast, onOpen }) {
       onClick={onOpen}
       style={{
         display:'grid',
-        gridTemplateColumns:'2fr 1.8fr 1.2fr 1.2fr 32px',
+        gridTemplateColumns: gridCols,
         gap:12, padding:'14px 16px', alignItems:'center',
         borderBottom: isLast ? 'none' : `0.5px solid ${BORDER}`,
         cursor:'pointer',
@@ -422,6 +437,18 @@ function ProspectRow({ prospect, isLast, onOpen }) {
         fontSize:13, color:MUTED,
         overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
       }}>{prospect.prospect_email}</div>
+      {showInboxColumn && (
+        <div style={{ minWidth:0 }}>
+          {prospect.source_inbox_name && (
+            <span style={{
+              background: GREEN_BG, color: GREEN_HI,
+              fontSize:11, padding:'2px 8px', borderRadius:999,
+              overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+              display:'inline-block', maxWidth:'100%',
+            }}>{prospect.source_inbox_name}</span>
+          )}
+        </div>
+      )}
       <div style={{ fontSize:13, color:MUTED }}>{relativeTime(prospect.added_at)}</div>
       <div style={{ fontSize:13, color: fu.color, fontWeight: fu.urgent ? 500 : 400 }}>{fu.label}</div>
       <div style={{ textAlign:'right', color:TERTIARY, fontSize:18 }}>›</div>
@@ -571,6 +598,17 @@ function DetailBody({ data, followUp, setFollowUp, notes, setNotes, savingState,
               {p.prospect_name || <span style={{ color:MUTED, fontWeight:400 }}>(no name)</span>}
             </div>
             <div style={{ fontSize:13, color:MUTED, marginTop:2 }}>{p.prospect_email}</div>
+            {/* Source-inbox subtitle: only shown when this prospect is part
+                of a linked-inbox customer (i.e. there's something useful to
+                disambiguate). Hidden for single-inbox customers. */}
+            {p.has_linked_inboxes && p.source_inbox_name && (
+              <div style={{ marginTop:4 }}>
+                <span style={{
+                  background: GREEN_BG, color: GREEN_HI,
+                  fontSize:11, padding:'2px 7px', borderRadius:999,
+                }}>From {p.source_inbox_name}</span>
+              </div>
+            )}
           </div>
         </div>
         <button

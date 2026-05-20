@@ -62,6 +62,98 @@ function getEmailClient(id) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Linked-row resolution (decision 2026-05-20, second session)
+//
+// A real customer can have TWO email_clients rows tied to them: a portal
+// anchor (e.g. the cube6 row) and a separate inbox-owning row (e.g. the
+// mail.engineeringsolutions.co.uk row), joined by customer_services with
+// service_key='email'. From the user's mental model these are the same
+// customer — hot prospects flagged on either row should be visible on either
+// side. This helper returns the FULL SET of email_clients ids that belong to
+// the same real customer, given ANY id in that set.
+//
+// Examples:
+//   resolveLinkedSet('cube6')                                  → ['cube6', 'mail.engineeringsolutions.co.uk']
+//   resolveLinkedSet('mail.engineeringsolutions.co.uk')        → ['cube6', 'mail.engineeringsolutions.co.uk']
+//   resolveLinkedSet('manson') (self-linked or unlinked)       → ['manson']
+//
+// Self-links (email_client_id = linked_external_id in customer_services) are
+// the natural default for portal customers using their own row for email — the
+// migration in db.js:1001 explicitly allows them. Self-links contribute no
+// extra ids to the set, so the result is always [inputId] in that case.
+// ─────────────────────────────────────────────────────────────────────────────
+function resolveLinkedSet(emailClientId) {
+  if (!emailClientId) return [];
+  const id = String(emailClientId);
+  const set = new Set([id]);
+
+  // Case 1: this id IS a portal anchor that links OUT to a different email
+  // row. Add that linked row to the set.
+  const outward = db.prepare(`
+    SELECT linked_external_id FROM customer_services
+    WHERE email_client_id = ? AND service_key = 'email'
+      AND linked_external_id IS NOT NULL
+      AND linked_external_id != email_client_id
+  `).get(id);
+  if (outward?.linked_external_id) set.add(String(outward.linked_external_id));
+
+  // Case 2: this id is linked-TO by some portal customer's email service. Add
+  // that portal anchor to the set. (Same self-link exemption — a self-link
+  // shouldn't pull the row into "another customer's" set.)
+  const inward = db.prepare(`
+    SELECT email_client_id FROM customer_services
+    WHERE linked_external_id = ? AND service_key = 'email'
+      AND linked_external_id != email_client_id
+  `).get(id);
+  if (inward?.email_client_id) set.add(String(inward.email_client_id));
+
+  return Array.from(set);
+}
+
+// Build a `WHERE col IN (?, ?, …)` fragment + matching params array.
+// Used so a single-row customer still works (one placeholder) without forking
+// the SQL between the multi-row and single-row cases.
+function inClause(col, ids) {
+  const placeholders = ids.map(() => '?').join(', ');
+  return { sql: `${col} IN (${placeholders})`, params: ids };
+}
+
+// Look up the source-inbox name for a list of email_clients ids in one query.
+// Returns a Map(id → name) so the caller can attach `source_inbox_name` to
+// each prospect row without N+1 queries.
+function getInboxNamesByIds(ids) {
+  if (!ids || ids.length === 0) return new Map();
+  const uniq = Array.from(new Set(ids.map(String)));
+  const placeholders = uniq.map(() => '?').join(', ');
+  const rows = db
+    .prepare(`SELECT id, name FROM email_clients WHERE id IN (${placeholders})`)
+    .all(...uniq);
+  return new Map(rows.map(r => [String(r.id), r.name]));
+}
+
+// Resolve the "CRM customer" — i.e. which row this prospect belongs to from
+// the customer-switcher's point of view. For a linked customer, that's the
+// portal anchor (Cube 6), not the inbox-owning row (mail.engineering…). For
+// a self-linked or unlinked customer, it's the row itself. This is what the
+// admin "Open in CRM" link needs to set as `last_customer_id` so the switcher
+// can find the right card.
+function resolveCrmCustomerId(emailClientId) {
+  if (!emailClientId) return null;
+  const id = String(emailClientId);
+  // If this id is linked-TO by a portal customer's email service (i.e. it's
+  // the inbox row of a linked pair), return the portal anchor's id.
+  const inward = db.prepare(`
+    SELECT email_client_id FROM customer_services
+    WHERE linked_external_id = ? AND service_key = 'email'
+      AND linked_external_id != email_client_id
+  `).get(id);
+  if (inward?.email_client_id) return String(inward.email_client_id);
+  // Otherwise the row IS the customer card (portal anchor with outward link,
+  // self-linked, or unlinked).
+  return id;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/email/hot-prospects?email_client_id=...
 //
 // List one customer's prospects, newest-first by added_at. Optional ?search
@@ -77,6 +169,13 @@ router.get('/', (req, res) => {
     return res.status(404).json({ error: 'email client not found' });
   }
 
+  // Expand to the full linked set: hot prospects flagged from any row that
+  // belongs to the same real customer all roll into this view. For a single-
+  // row customer the set is just [emailClientId] and behaviour is unchanged.
+  const linkedIds = resolveLinkedSet(emailClientId);
+  const inboxNames = getInboxNamesByIds(linkedIds);
+  const inClient = inClause('email_client_id', linkedIds);
+
   const search = String(req.query.search || '').trim().toLowerCase();
   let rows;
   if (search) {
@@ -86,24 +185,36 @@ router.get('/', (req, res) => {
         `SELECT id, email_client_id, prospect_email, prospect_name,
                 follow_up_date, notes, added_by, added_at, updated_at
            FROM hot_prospects
-          WHERE email_client_id = ?
+          WHERE ${inClient.sql}
             AND (LOWER(COALESCE(prospect_name,'')) LIKE ? OR LOWER(prospect_email) LIKE ?)
           ORDER BY added_at DESC`
       )
-      .all(emailClientId, like, like);
+      .all(...inClient.params, like, like);
   } else {
     rows = db
       .prepare(
         `SELECT id, email_client_id, prospect_email, prospect_name,
                 follow_up_date, notes, added_by, added_at, updated_at
            FROM hot_prospects
-          WHERE email_client_id = ?
+          WHERE ${inClient.sql}
           ORDER BY added_at DESC`
       )
-      .all(emailClientId);
+      .all(...inClient.params);
   }
 
-  res.json({ prospects: rows });
+  // Attach source_inbox_name so the frontend can render the Inbox column.
+  // Also expose has_linked_inboxes so the frontend can decide whether to
+  // show the column at all (decision: only when the set has > 1 row).
+  const hasLinkedInboxes = linkedIds.length > 1;
+  const projected = rows.map(r => ({
+    ...r,
+    source_inbox_name: inboxNames.get(String(r.email_client_id)) || null,
+  }));
+
+  res.json({
+    prospects: projected,
+    has_linked_inboxes: hasLinkedInboxes,
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -123,12 +234,23 @@ router.get('/', (req, res) => {
 // just with a "0" badge.
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/customers', (req, res) => {
-  // The filter: include every row whose source is 'aws_domain'/'manual'
-  // (real email customers) OR whose portal_enabled is 1 (portal customers,
-  // including portal-only ones that GET /api/email/clients hides). The
-  // OR ensures we don't double-count rows that satisfy both — they just
-  // appear once. NULL-source rows are also included for the same race-
-  // safety reason GET /api/email/clients includes them.
+  // Hide rows that are linked-TO by a portal customer's email service —
+  // those rows are "covered" by the portal anchor's switcher card and would
+  // otherwise appear as a duplicate badge with its own count. Self-links
+  // (where linked_external_id == email_client_id) are exempt; they're the
+  // natural default and shouldn't pull the row out of the switcher.
+  //
+  // prospect_count aggregates across the linked set so the portal anchor's
+  // card shows the total prospects for the real customer — not just the
+  // ones flagged directly on the anchor row. The correlated subquery walks
+  // the same set logic as resolveLinkedSet() but inlined as SQL because we
+  // need it computed per row in one statement.
+  //
+  // The filter (inherited from the previous version): include every row
+  // whose source is 'aws_domain'/'manual'/null (real or unclassified email
+  // customers) OR whose portal_enabled is 1 (portal customers, including
+  // portal-only ones that GET /api/email/clients hides). Operator-confirmed
+  // 2026-05-20 (option B).
   const rows = db.prepare(`
     SELECT
       ec.id,
@@ -138,11 +260,33 @@ router.get('/customers', (req, res) => {
       ec.portal_enabled,
       ec.source,
       ec.logo_url,
-      (SELECT COUNT(*) FROM hot_prospects WHERE email_client_id = ec.id) AS prospect_count
+      (
+        SELECT COUNT(*) FROM hot_prospects hp
+        WHERE hp.email_client_id = ec.id
+           OR hp.email_client_id IN (
+                SELECT cs.linked_external_id FROM customer_services cs
+                WHERE cs.email_client_id = ec.id
+                  AND cs.service_key = 'email'
+                  AND cs.linked_external_id IS NOT NULL
+                  AND cs.linked_external_id != cs.email_client_id
+              )
+           OR hp.email_client_id IN (
+                SELECT cs2.email_client_id FROM customer_services cs2
+                WHERE cs2.linked_external_id = ec.id
+                  AND cs2.service_key = 'email'
+                  AND cs2.linked_external_id != cs2.email_client_id
+              )
+      ) AS prospect_count
     FROM email_clients ec
-    WHERE ec.source IS NULL
-       OR ec.source IN ('aws_domain', 'manual')
-       OR ec.portal_enabled = 1
+    WHERE (ec.source IS NULL
+           OR ec.source IN ('aws_domain', 'manual')
+           OR ec.portal_enabled = 1)
+      AND NOT EXISTS (
+        SELECT 1 FROM customer_services cs3
+        WHERE cs3.linked_external_id = ec.id
+          AND cs3.service_key = 'email'
+          AND cs3.linked_external_id != cs3.email_client_id
+      )
     ORDER BY ec.name ASC
   `).all();
 
@@ -266,7 +410,14 @@ router.post('/', (req, res) => {
     now
   );
 
-  res.json({ prospect: row, was_new: wasNew });
+  // Tell the caller which switcher card this prospect will live under. For
+  // a linked customer (e.g. mail.engineeringsolutions.co.uk written here but
+  // appearing under Cube 6's card), that's the portal anchor's id. For an
+  // unlinked/self-linked customer it's just the row itself. The frontend's
+  // "Open in CRM" link uses this to set last_customer_id correctly.
+  const crmCustomerId = resolveCrmCustomerId(emailClientId);
+
+  res.json({ prospect: row, was_new: wasNew, crm_customer_id: crmCustomerId });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -372,39 +523,49 @@ router.get('/:id/thread', (req, res) => {
     return res.status(404).json({ error: 'prospect not found' });
   }
 
-  // Inbound: every reply received from this address on any inbox belonging
-  // to this customer. LOWER() comparison matches the normalisation done at
-  // write time. Returning subject/body so the UI can render the thread.
+  // Expand to the full linked set so the thread shows every message we've
+  // ever exchanged with this prospect, regardless of which inbox the message
+  // landed in. Single-row customers are a one-element set — no change in
+  // behaviour for them.
+  const linkedIds = resolveLinkedSet(prospect.email_client_id);
+  const inboxNames = getInboxNamesByIds(linkedIds);
+  const inboundClause  = inClause('email_client_id', linkedIds);
+  const outboundClause = inClause('email_client_id', linkedIds);
+
+  // Inbound: every reply received from this address on any inbox in the
+  // linked set. LOWER() comparison matches the normalisation done at write
+  // time. Returning subject/body so the UI can render the thread.
   const inbound = db
     .prepare(
-      `SELECT id, from_address, from_name, subject, body_text, body_html,
-              received_at, matched_campaign_id
+      `SELECT id, email_client_id, from_address, from_name, subject,
+              body_text, body_html, received_at, matched_campaign_id
          FROM email_replies
-        WHERE email_client_id = ?
+        WHERE ${inboundClause.sql}
           AND LOWER(from_address) = ?
         ORDER BY received_at ASC`
     )
-    .all(prospect.email_client_id, prospect.prospect_email);
+    .all(...inboundClause.params, prospect.prospect_email);
 
-  // Outbound: every message we sent to this address from any of the
-  // customer's mailboxes. Matches against to_address (and optionally
-  // cc_address via a separate LIKE — kept simple here: only direct TO
-  // matches counted, CC chains are noise more often than signal).
+  // Outbound: every message we sent to this address from any inbox in the
+  // linked set. Matches against to_address; CC chains are intentionally not
+  // followed (more noise than signal).
   const outbound = db
     .prepare(
-      `SELECT id, from_address, to_address, subject, body_text, body_html,
-              sent_at, error
+      `SELECT id, email_client_id, from_address, to_address, subject,
+              body_text, body_html, sent_at, error
          FROM email_outbound
-        WHERE email_client_id = ?
+        WHERE ${outboundClause.sql}
           AND LOWER(to_address) = ?
         ORDER BY sent_at ASC`
     )
-    .all(prospect.email_client_id, prospect.prospect_email);
+    .all(...outboundClause.params, prospect.prospect_email);
 
   // Merge + tag direction + sort by timestamp. Each row carries its own
   // timestamp field (received_at vs sent_at); we normalise to `at` for the
-  // sort and leave the original field in place so the UI can show "Received"
-  // vs "Sent" without re-deriving it.
+  // sort and leave the original field in place. Each message also carries
+  // the source-inbox name so the UI can show "via mail.engineering…" if
+  // the customer has linked inboxes (cosmetic; not currently rendered, but
+  // exposed for future).
   const merged = [
     ...inbound.map(r => ({
       kind: 'reply',
@@ -417,6 +578,7 @@ router.get('/:id/thread', (req, res) => {
       body_text: r.body_text,
       body_html: r.body_html,
       matched_campaign_id: r.matched_campaign_id,
+      source_inbox_name: inboxNames.get(String(r.email_client_id)) || null,
     })),
     ...outbound.map(o => ({
       kind: 'outbound',
@@ -429,10 +591,20 @@ router.get('/:id/thread', (req, res) => {
       body_text: o.body_text,
       body_html: o.body_html,
       error: o.error,
+      source_inbox_name: inboxNames.get(String(o.email_client_id)) || null,
     })),
   ].sort((a, b) => String(a.at).localeCompare(String(b.at)));
 
-  res.json({ prospect, thread: merged });
+  // Attach source_inbox_name + has_linked_inboxes to the prospect so the
+  // detail modal can show a "From mail.engineering…" subtitle and decide
+  // whether to render the Inbox column-related metadata at all.
+  const prospectWithSource = {
+    ...prospect,
+    source_inbox_name: inboxNames.get(String(prospect.email_client_id)) || null,
+    has_linked_inboxes: linkedIds.length > 1,
+  };
+
+  res.json({ prospect: prospectWithSource, thread: merged });
 });
 
 export default router;

@@ -1401,9 +1401,55 @@ function _validateFollowUpDate(raw) {
   return s;
 }
 
+// Linked-row resolution for hot prospects. Mirrors resolveLinkedSet() in
+// routes/hot-prospects.js — see the long comment block there for the
+// reasoning. Given any email_clients id, returns the full set of ids that
+// belong to the same real customer (portal anchor + inbox-owning row, when
+// they differ). Used so Rob's portal sees prospects flagged on the linked
+// mail.engineeringsolutions.co.uk row in addition to ones flagged directly
+// against the cube6 anchor.
+function _resolveProspectLinkedSet(emailClientId) {
+  if (!emailClientId) return [];
+  const id = String(emailClientId);
+  const set = new Set([id]);
+  const outward = db.prepare(`
+    SELECT linked_external_id FROM customer_services
+    WHERE email_client_id = ? AND service_key = 'email'
+      AND linked_external_id IS NOT NULL
+      AND linked_external_id != email_client_id
+  `).get(id);
+  if (outward?.linked_external_id) set.add(String(outward.linked_external_id));
+  const inward = db.prepare(`
+    SELECT email_client_id FROM customer_services
+    WHERE linked_external_id = ? AND service_key = 'email'
+      AND linked_external_id != email_client_id
+  `).get(id);
+  if (inward?.email_client_id) set.add(String(inward.email_client_id));
+  return Array.from(set);
+}
+function _inClause(col, ids) {
+  const placeholders = ids.map(() => '?').join(', ');
+  return { sql: `${col} IN (${placeholders})`, params: ids };
+}
+function _getInboxNamesByIds(ids) {
+  if (!ids || ids.length === 0) return new Map();
+  const uniq = Array.from(new Set(ids.map(String)));
+  const placeholders = uniq.map(() => '?').join(', ');
+  const rows = db
+    .prepare(`SELECT id, name FROM email_clients WHERE id IN (${placeholders})`)
+    .all(...uniq);
+  return new Map(rows.map(r => [String(r.id), r.name]));
+}
+
 // GET /api/portal/hot-prospects — list the customer's prospects, newest-first.
+// Expands across the customer's linked email rows so prospects flagged on a
+// linked inbox (e.g. mail.engineering… for Cube 6) appear here.
 router.get('/hot-prospects', (req, res) => {
   const clientId = req.portalClient.id;
+  const linkedIds = _resolveProspectLinkedSet(clientId);
+  const inboxNames = _getInboxNamesByIds(linkedIds);
+  const inClient = _inClause('email_client_id', linkedIds);
+
   const search = String(req.query.search || '').trim().toLowerCase();
   let rows;
   if (search) {
@@ -1413,30 +1459,45 @@ router.get('/hot-prospects', (req, res) => {
         `SELECT id, email_client_id, prospect_email, prospect_name,
                 follow_up_date, notes, added_by, added_at, updated_at
            FROM hot_prospects
-          WHERE email_client_id = ?
+          WHERE ${inClient.sql}
             AND (LOWER(COALESCE(prospect_name,'')) LIKE ? OR LOWER(prospect_email) LIKE ?)
           ORDER BY added_at DESC`
       )
-      .all(clientId, like, like);
+      .all(...inClient.params, like, like);
   } else {
     rows = db
       .prepare(
         `SELECT id, email_client_id, prospect_email, prospect_name,
                 follow_up_date, notes, added_by, added_at, updated_at
            FROM hot_prospects
-          WHERE email_client_id = ?
+          WHERE ${inClient.sql}
           ORDER BY added_at DESC`
       )
-      .all(clientId);
+      .all(...inClient.params);
   }
-  res.json({ prospects: rows });
+
+  const hasLinkedInboxes = linkedIds.length > 1;
+  const projected = rows.map(r => ({
+    ...r,
+    source_inbox_name: inboxNames.get(String(r.email_client_id)) || null,
+  }));
+
+  res.json({ prospects: projected, has_linked_inboxes: hasLinkedInboxes });
 });
 
 // POST /api/portal/hot-prospects — add a prospect. Body:
 //   { prospect_email, prospect_name?, follow_up_date?, notes?, source_reply_id? }
-// No email_client_id in the body — it comes from the session.
+// No email_client_id in the body — it's derived from the session.
+//
+// Option B write path (decision 2026-05-20, second session): the prospect is
+// saved against the customer's INBOX-OWNING row (e.g. mail.engineeringsolu…),
+// NOT the portal anchor (cube6). That keeps the row's email_client_id aligned
+// with the inbox the source_reply_id came from, and matches the admin write
+// path so the source_inbox_name label reads accurately on both sides.
+// Self-linked / unlinked customers fall through to the anchor's own id.
 router.post('/hot-prospects', (req, res) => {
-  const clientId = req.portalClient.id;
+  const portalAnchorId = req.portalClient.id;
+  const inboxOwningId = resolveEmailClientId(portalAnchorId) || portalAnchorId;
   const {
     prospect_email,
     prospect_name,
@@ -1450,15 +1511,21 @@ router.post('/hot-prospects', (req, res) => {
     return res.status(400).json({ error: 'valid prospect_email required' });
   }
 
+  // source_reply_id auto-fills prospect_name. The reply must live on any row
+  // in the customer's linked set (not just the anchor) since the inbox the
+  // reply landed in is the inbox-owning row, not the anchor.
+  const linkedIds = _resolveProspectLinkedSet(portalAnchorId);
+  const inReply = _inClause('email_client_id', linkedIds);
   let resolvedName = (prospect_name !== undefined && prospect_name !== null)
     ? String(prospect_name).trim() || null
     : null;
   if (!resolvedName && source_reply_id) {
     const reply = db
       .prepare(
-        'SELECT from_name FROM email_replies WHERE id = ? AND email_client_id = ?'
+        `SELECT from_name FROM email_replies
+          WHERE id = ? AND ${inReply.sql}`
       )
-      .get(String(source_reply_id), clientId);
+      .get(String(source_reply_id), ...inReply.params);
     if (reply && reply.from_name) {
       resolvedName = String(reply.from_name).trim() || null;
     }
@@ -1475,11 +1542,12 @@ router.post('/hot-prospects', (req, res) => {
 
   const addedBy = `portal:${req.portalUser.id}`;
   // Detect insert-vs-update so the customer-portal "Send to Hot Prospects"
-  // button (shipping in step 5) can show the right banner. Mirrors the admin
-  // POST in routes/hot-prospects.js.
+  // button can show the right banner. The uniqueness key on the table is
+  // (email_client_id, prospect_email) — so look up against the inbox-owning
+  // id, which is what we'll INSERT against.
   const existing = db
     .prepare('SELECT id FROM hot_prospects WHERE email_client_id = ? AND prospect_email = ?')
-    .get(clientId, prospectEmail);
+    .get(inboxOwningId, prospectEmail);
   const wasNew = !existing;
 
   const id = uuid();
@@ -1501,7 +1569,7 @@ router.post('/hot-prospects', (req, res) => {
               follow_up_date, notes, added_by, added_at, updated_at
   `);
   const row = stmt.get(
-    id, clientId, prospectEmail, resolvedName,
+    id, inboxOwningId, prospectEmail, resolvedName,
     followUp, cleanNotes, addedBy, now, now
   );
   res.json({ prospect: row, was_new: wasNew });
@@ -1514,9 +1582,14 @@ router.post('/hot-prospects', (req, res) => {
 router.put('/hot-prospects/:id', (req, res) => {
   const clientId = req.portalClient.id;
   const id = String(req.params.id || '');
+  // Ownership check spans the customer's linked set so a prospect saved
+  // against the linked inbox row (Option B write path) is still editable
+  // by this portal session.
+  const linkedIds = _resolveProspectLinkedSet(clientId);
+  const inOwn = _inClause('email_client_id', linkedIds);
   const existing = db
-    .prepare('SELECT * FROM hot_prospects WHERE id = ? AND email_client_id = ?')
-    .get(id, clientId);
+    .prepare(`SELECT * FROM hot_prospects WHERE id = ? AND ${inOwn.sql}`)
+    .get(id, ...inOwn.params);
   if (!existing) {
     return res.status(404).json({ error: 'prospect not found' });
   }
@@ -1561,13 +1634,17 @@ router.put('/hot-prospects/:id', (req, res) => {
   res.json({ prospect: row });
 });
 
-// DELETE /api/portal/hot-prospects/:id — remove from list. Tenant-scoped.
+// DELETE /api/portal/hot-prospects/:id — remove from list. Tenant-scoped
+// across the customer's linked set so prospects on a linked inbox row are
+// removable from the portal too.
 router.delete('/hot-prospects/:id', (req, res) => {
   const clientId = req.portalClient.id;
   const id = String(req.params.id || '');
+  const linkedIds = _resolveProspectLinkedSet(clientId);
+  const inOwn = _inClause('email_client_id', linkedIds);
   const existing = db
-    .prepare('SELECT id FROM hot_prospects WHERE id = ? AND email_client_id = ?')
-    .get(id, clientId);
+    .prepare(`SELECT id FROM hot_prospects WHERE id = ? AND ${inOwn.sql}`)
+    .get(id, ...inOwn.params);
   if (!existing) {
     return res.status(404).json({ error: 'prospect not found' });
   }
@@ -1576,42 +1653,51 @@ router.delete('/hot-prospects/:id', (req, res) => {
 });
 
 // GET /api/portal/hot-prospects/:id/thread — full email history with this
-// prospect, built live from email_replies + email_outbound. Tenant-scoped.
+// prospect, built live from email_replies + email_outbound. Tenant-scoped
+// across the customer's linked set so messages on a linked inbox row show
+// up in the thread alongside messages on the anchor row.
 router.get('/hot-prospects/:id/thread', (req, res) => {
   const clientId = req.portalClient.id;
   const id = String(req.params.id || '');
+  const linkedIds = _resolveProspectLinkedSet(clientId);
+  const inboxNames = _getInboxNamesByIds(linkedIds);
+  const inOwn = _inClause('email_client_id', linkedIds);
+
   const prospect = db
     .prepare(
       `SELECT id, email_client_id, prospect_email, prospect_name,
               follow_up_date, notes, added_by, added_at, updated_at
-         FROM hot_prospects WHERE id = ? AND email_client_id = ?`
+         FROM hot_prospects WHERE id = ? AND ${inOwn.sql}`
     )
-    .get(id, clientId);
+    .get(id, ...inOwn.params);
   if (!prospect) {
     return res.status(404).json({ error: 'prospect not found' });
   }
 
+  const inboundClause  = _inClause('email_client_id', linkedIds);
+  const outboundClause = _inClause('email_client_id', linkedIds);
+
   const inbound = db
     .prepare(
-      `SELECT id, from_address, from_name, subject, body_text, body_html,
-              received_at, matched_campaign_id
+      `SELECT id, email_client_id, from_address, from_name, subject,
+              body_text, body_html, received_at, matched_campaign_id
          FROM email_replies
-        WHERE email_client_id = ?
+        WHERE ${inboundClause.sql}
           AND LOWER(from_address) = ?
         ORDER BY received_at ASC`
     )
-    .all(prospect.email_client_id, prospect.prospect_email);
+    .all(...inboundClause.params, prospect.prospect_email);
 
   const outbound = db
     .prepare(
-      `SELECT id, from_address, to_address, subject, body_text, body_html,
-              sent_at, error
+      `SELECT id, email_client_id, from_address, to_address, subject,
+              body_text, body_html, sent_at, error
          FROM email_outbound
-        WHERE email_client_id = ?
+        WHERE ${outboundClause.sql}
           AND LOWER(to_address) = ?
         ORDER BY sent_at ASC`
     )
-    .all(prospect.email_client_id, prospect.prospect_email);
+    .all(...outboundClause.params, prospect.prospect_email);
 
   const merged = [
     ...inbound.map(r => ({
@@ -1625,6 +1711,7 @@ router.get('/hot-prospects/:id/thread', (req, res) => {
       body_text: r.body_text,
       body_html: r.body_html,
       matched_campaign_id: r.matched_campaign_id,
+      source_inbox_name: inboxNames.get(String(r.email_client_id)) || null,
     })),
     ...outbound.map(o => ({
       kind: 'outbound',
@@ -1637,10 +1724,17 @@ router.get('/hot-prospects/:id/thread', (req, res) => {
       body_text: o.body_text,
       body_html: o.body_html,
       error: o.error,
+      source_inbox_name: inboxNames.get(String(o.email_client_id)) || null,
     })),
   ].sort((a, b) => String(a.at).localeCompare(String(b.at)));
 
-  res.json({ prospect, thread: merged });
+  const prospectWithSource = {
+    ...prospect,
+    source_inbox_name: inboxNames.get(String(prospect.email_client_id)) || null,
+    has_linked_inboxes: linkedIds.length > 1,
+  };
+
+  res.json({ prospect: prospectWithSource, thread: merged });
 });
 
 export default router;

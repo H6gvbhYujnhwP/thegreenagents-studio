@@ -3052,6 +3052,13 @@ function ReplyDetailModal({replyId, onClose, onAction}){
       setHotProspectBanner({
         kind: d.was_new ? 'added' : 'already',
         prospect_id: d.prospect && d.prospect.id,
+        // crm_customer_id is which switcher card this prospect will appear
+        // under. For a linked customer (e.g. flagged from mail.engineering…
+        // for Cube 6) that's Cube 6's id, NOT the source inbox's id —
+        // because the inbox row is now hidden from the switcher. Fallback
+        // to reply.email_client_id keeps legacy behaviour if the field is
+        // missing (e.g. older deploy briefly mid-rollout).
+        crm_customer_id: (d.crm_customer_id || reply.email_client_id),
       });
       setAddingProspect(false);
     } catch (e) {
@@ -3069,9 +3076,18 @@ function ReplyDetailModal({replyId, onClose, onAction}){
   //     consumption so it doesn't auto-open on subsequent visits)
   // Navigation itself uses a custom DOM event that Dashboard.jsx listens to,
   // so EmailSection.jsx doesn't have to know about Dashboard's view state.
-  function openInCrm(prospectId){
+  //
+  // The customer id we set must be the SWITCHER card id, not the inbox row
+  // id — for a linked customer, the inbox row is hidden from the switcher
+  // and clicking "Open in CRM" with the inbox row id would just land on
+  // the default customer. The banner carries crm_customer_id (returned by
+  // POST /api/email/hot-prospects) which already resolves this correctly.
+  function openInCrm(prospectId, crmCustomerId){
     try {
-      localStorage.setItem('studio.crm.hot_prospects.last_customer_id', reply.email_client_id);
+      const customerId = crmCustomerId || (reply && reply.email_client_id);
+      if (customerId) {
+        localStorage.setItem('studio.crm.hot_prospects.last_customer_id', customerId);
+      }
       if (prospectId) {
         localStorage.setItem('studio.crm.hot_prospects.open_prospect_id', prospectId);
       }
@@ -3214,7 +3230,7 @@ function ReplyDetailModal({replyId, onClose, onAction}){
                 }
               </span>
               <button
-                onClick={() => openInCrm(hotProspectBanner.prospect_id)}
+                onClick={() => openInCrm(hotProspectBanner.prospect_id, hotProspectBanner.crm_customer_id)}
                 style={{
                   background:'transparent', border:'none', padding:0, cursor:'pointer',
                   fontSize:12, color:'inherit', textDecoration:'underline', fontFamily:'inherit',
