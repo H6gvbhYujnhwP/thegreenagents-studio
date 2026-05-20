@@ -2597,17 +2597,62 @@ function relTime(iso){
   return d.toLocaleDateString('en-GB',{day:'numeric',month:'short'});
 }
 
-// Classification badge — same colours as the design mockup
+// Classification badge.
+//
+// Three layers, in priority order:
+//
+//   1. Formspree website-form submissions get their own label
+//      ("Website Prospect", green) — these aren't classifier output, they're
+//      structured form fills, so they bypass classification entirely. The
+//      detection mirrors isFormspreeLead() in formspree-flagger.js (sender
+//      domain + lead-keyword subject). Same gate so the badge stays in step
+//      with the auto-flagger that adds them to Hot Prospects.
+//
+//   2. Campaign-matched replies (campaign_title set) get a "Campaign · "
+//      prefix so the operator can tell at a glance which rows are responses
+//      to outreach vs general inbox traffic. Auto-unsubscribed is always
+//      campaign-only by definition.
+//
+//   3. Non-campaign mail keeps the bare classifier label (admin sees the
+//      full ops detail; the customer portal collapses non-campaign rows to
+//      "Normal email" — see ClassifyBadge in PortalApp.jsx).
+//
+// Decision history (blueprint reference for next chat): this used to show
+// just the bare label. Operator added the Campaign prefix + Website Prospect
+// label 2026-05-20 fifth session — see decisions #36, #69, and the amendment
+// in this session's blueprint addition.
+const FORMSPREE_SUBJECT_KEYWORDS = [
+  'catalogue download', 'website enquiry', 'website inquiry',
+  'contact form', 'form submission', 'new submission',
+  'new lead', 'new enquiry', 'new inquiry',
+];
+function isFormspreeWebsiteLead(reply){
+  const from = String(reply?.from_address || '').toLowerCase();
+  if (!from.endsWith('@formspree.io')) return false;
+  const subj = String(reply?.subject || '').toLowerCase();
+  if (!subj) return false;
+  return FORMSPREE_SUBJECT_KEYWORDS.some(k => subj.includes(k));
+}
 function classifyBadge(reply){
-  if(reply.auto_unsubscribed) return <Badge label="Auto-unsubscribed" color="#633806" bg="#FAEEDA"/>;
-  switch(reply.classification){
-    case 'positive':      return <Badge label="New prospect"     color="#0C447C" bg="#E6F1FB"/>;
-    case 'hard_negative': return <Badge label="Negative"         color="#793F1F" bg="#FAECE7"/>;
-    case 'soft_negative': return <Badge label="Soft negative"    color="#793F1F" bg="#FAECE7"/>;
-    case 'auto_reply':    return <Badge label="Out of office"    color="#5F5E5A" bg="#F1EFE8"/>;
-    case 'forwarding':    return <Badge label="Forwarded"        color="#3C3489" bg="#EEEDFE"/>;
-    case 'neutral':       return <Badge label="Neutral"          color="#5F5E5A" bg="#F1EFE8"/>;
-    default:              return <Badge label="Unclassified"     color="#5F5E5A" bg="#F1EFE8"/>;
+  // 1. Formspree website-form submission — own label, bypasses classifier.
+  if (isFormspreeWebsiteLead(reply)) {
+    return <Badge label="Website Prospect" color="#0F6E56" bg="#E1F5EE"/>;
+  }
+
+  const inCampaign = !!reply.campaign_title;
+  const prefix = inCampaign ? 'Campaign · ' : '';
+
+  if (reply.auto_unsubscribed) {
+    return <Badge label={`${prefix}Auto-unsubscribed`} color="#633806" bg="#FAEEDA"/>;
+  }
+  switch (reply.classification) {
+    case 'positive':      return <Badge label={`${prefix}New prospect`}  color="#0C447C" bg="#E6F1FB"/>;
+    case 'hard_negative': return <Badge label={`${prefix}Negative`}      color="#793F1F" bg="#FAECE7"/>;
+    case 'soft_negative': return <Badge label={`${prefix}Soft negative`} color="#793F1F" bg="#FAECE7"/>;
+    case 'auto_reply':    return <Badge label={`${prefix}Out of office`} color="#5F5E5A" bg="#F1EFE8"/>;
+    case 'forwarding':    return <Badge label={`${prefix}Forwarded`}     color="#3C3489" bg="#EEEDFE"/>;
+    case 'neutral':       return <Badge label={`${prefix}Neutral`}       color="#5F5E5A" bg="#F1EFE8"/>;
+    default:              return <Badge label={`${prefix}Unclassified`}  color="#5F5E5A" bg="#F1EFE8"/>;
   }
 }
 

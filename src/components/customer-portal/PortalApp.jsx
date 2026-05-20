@@ -2154,21 +2154,83 @@ function ReplyRow({ reply, onClick }) {
   );
 }
 
+// Classification badge.
+//
+// Three layers, in priority order — kept in step with admin's classifyBadge
+// in EmailSection.jsx so the two surfaces show the same information. The
+// only deliberate divergences are:
+//
+//   (a) Non-campaign mail collapses to "Normal email" here. On admin it
+//       still shows the bare classifier label. Reasoning: a vendor's OOO
+//       isn't a lead going cold — it's just a vendor — so its
+//       classification is meaningless to the customer.
+//
+//   (b) Missing/null classification shows "Classifying…" here instead of
+//       admin's "Unclassified". It's a transient state (resolves to a
+//       real label in ~10s); "Unclassified" reads as a failure to the
+//       customer, "Classifying…" reads as in-progress.
+//
+// Decision history (blueprint reference for next chat): this used to
+// collapse soft_negative / hard_negative / forwarding all to "Neutral"
+// and OOO was shown as "OOO". Operator chose full parity with admin labels
+// 2026-05-20 fifth session, deliberately amending decisions #36 and #69.
+const FORMSPREE_SUBJECT_KEYWORDS = [
+  'catalogue download', 'website enquiry', 'website inquiry',
+  'contact form', 'form submission', 'new submission',
+  'new lead', 'new enquiry', 'new inquiry',
+];
+function isFormspreeWebsiteLead(reply) {
+  const from = String(reply?.from_address || '').toLowerCase();
+  if (!from.endsWith('@formspree.io')) return false;
+  const subj = String(reply?.subject || '').toLowerCase();
+  if (!subj) return false;
+  return FORMSPREE_SUBJECT_KEYWORDS.some(k => subj.includes(k));
+}
+
+// Admin Badge colour palette mirrored locally so the portal renders
+// the same chrome. Greens/blues come from the existing portal vars; the
+// negatives/forwarded/auto-unsub colours are admin-side and copied verbatim.
+const BADGE_NEG_FG  = '#793F1F';
+const BADGE_NEG_BG  = '#FAECE7';
+const BADGE_FWD_FG  = '#3C3489';
+const BADGE_FWD_BG  = '#EEEDFE';
+const BADGE_GREY_FG = '#5F5E5A';
+const BADGE_GREY_BG = '#F1EFE8';
+const BADGE_UNSUB_FG = '#633806';
+const BADGE_UNSUB_BG = '#FAEEDA';
+
 function ClassifyBadge({ reply }) {
-  // Emails that didn't match any campaign send aren't responses to outreach —
-  // they're whatever else landed in the customer's Gmail INBOX (vendor mail,
-  // newsletters, transactional notifications). The classifier still ran on
-  // them, but its output ('Prospect', 'Unsub'd', etc.) is meaningless for a
-  // non-campaign email and actively misleading. Show a neutral 'Normal email'
-  // tag instead so the customer can tell at a glance which rows are real
-  // campaign replies vs general inbox traffic.
-  if (!reply.campaign_title) {
-    return <span style={{ ...badgeStyle(), background:'#eef0f2', color:MUTED }}>Normal email</span>;
+  const mk = (label, bg, color) => (
+    <span style={{ ...badgeStyle(), background: bg, color }}>{label}</span>
+  );
+
+  // 1. Formspree website-form submission — own label, bypasses classifier.
+  //    Same gate as the auto-flagger in formspree-flagger.js. Shown on BOTH
+  //    portal and admin even though there's no campaign_title, because the
+  //    submission IS the prospect signal.
+  if (isFormspreeWebsiteLead(reply)) {
+    return mk('Website Prospect', GREEN_BG, GREEN);
   }
-  if (reply.auto_unsubscribed) return <span style={{ ...badgeStyle(), background:AMBER_BG, color:AMBER }}>Unsub'd</span>;
-  if (reply.classification === 'positive') return <span style={{ ...badgeStyle(), background:GREEN_BG, color:GREEN }}>Prospect</span>;
-  if (reply.classification === 'auto_reply') return <span style={{ ...badgeStyle(), background:'#f4f1e8', color:MUTED }}>OOO</span>;
-  return <span style={{ ...badgeStyle(), background:'#f4f1e8', color:MUTED }}>Neutral</span>;
+
+  // 2. Non-campaign mail — see comment (a) above.
+  if (!reply.campaign_title) {
+    return mk('Normal email', '#eef0f2', MUTED);
+  }
+
+  // 3. Campaign-matched: prefixed, full label set.
+  const prefix = 'Campaign · ';
+  if (reply.auto_unsubscribed) {
+    return mk(`${prefix}Auto-unsubscribed`, BADGE_UNSUB_BG, BADGE_UNSUB_FG);
+  }
+  switch (reply.classification) {
+    case 'positive':      return mk(`${prefix}New prospect`,  BLUE_BG,        BLUE);
+    case 'hard_negative': return mk(`${prefix}Negative`,      BADGE_NEG_BG,   BADGE_NEG_FG);
+    case 'soft_negative': return mk(`${prefix}Soft negative`, BADGE_NEG_BG,   BADGE_NEG_FG);
+    case 'auto_reply':    return mk(`${prefix}Out of office`, BADGE_GREY_BG,  BADGE_GREY_FG);
+    case 'forwarding':    return mk(`${prefix}Forwarded`,     BADGE_FWD_BG,   BADGE_FWD_FG);
+    case 'neutral':       return mk(`${prefix}Neutral`,       BADGE_GREY_BG,  BADGE_GREY_FG);
+    default:              return mk('Classifying…',           BADGE_GREY_BG,  BADGE_GREY_FG);
+  }
 }
 
 function badgeStyle() {
