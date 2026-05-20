@@ -1474,6 +1474,14 @@ router.post('/hot-prospects', (req, res) => {
     : (String(notes).trim() || null);
 
   const addedBy = `portal:${req.portalUser.id}`;
+  // Detect insert-vs-update so the customer-portal "Send to Hot Prospects"
+  // button (shipping in step 5) can show the right banner. Mirrors the admin
+  // POST in routes/hot-prospects.js.
+  const existing = db
+    .prepare('SELECT id FROM hot_prospects WHERE email_client_id = ? AND prospect_email = ?')
+    .get(clientId, prospectEmail);
+  const wasNew = !existing;
+
   const id = uuid();
   const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
@@ -1496,7 +1504,7 @@ router.post('/hot-prospects', (req, res) => {
     id, clientId, prospectEmail, resolvedName,
     followUp, cleanNotes, addedBy, now, now
   );
-  res.json({ prospect: row });
+  res.json({ prospect: row, was_new: wasNew });
 });
 
 // PUT /api/portal/hot-prospects/:id — update follow-up date / notes / name.

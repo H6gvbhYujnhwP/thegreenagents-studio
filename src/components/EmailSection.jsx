@@ -2992,6 +2992,12 @@ function ReplyDetailModal({replyId, onClose, onAction}){
   // state lives inside this component rather than being lifted to the parent —
   // smaller diff and keeps the change scoped.
   const [composing,setComposing]=useState(false);
+  // Hot Prospects state. addingProspect = button is mid-POST. hotProspectBanner
+  // holds the success/already-on-list message after a successful add:
+  //   { kind: 'added' | 'already', prospect_id: '<uuid>' }
+  // On error we just alert() — failed adds aren't a state worth banner-ing.
+  const [addingProspect,setAddingProspect]=useState(false);
+  const [hotProspectBanner,setHotProspectBanner]=useState(null);
 
   useEffect(()=>{
     fetch(`/api/email/replies/${replyId}`).then(r=>r.json()).then(setReply);
@@ -3008,6 +3014,66 @@ function ReplyDetailModal({replyId, onClose, onAction}){
     setBusy(false);
     if(d.error){alert(d.error);return;}
     onAction();
+    onClose();
+  }
+
+  // Adds the email's sender to this customer's Hot Prospects list via
+  // POST /api/email/hot-prospects. The endpoint upserts — same email +
+  // same customer = same row. The response includes was_new=true|false so
+  // we can tell the operator "Added" vs "Already on the list".
+  //
+  // We don't close the modal on success — the operator is mid-triage and
+  // wants to keep working. The banner offers an "Open in CRM" link if they
+  // do want to jump.
+  async function addToHotProspects(){
+    if (!reply || addingProspect) return;
+    setAddingProspect(true);
+    setHotProspectBanner(null);
+    try {
+      const r = await fetch('/api/email/hot-prospects', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          email_client_id: reply.email_client_id,
+          prospect_email: reply.from_address,
+          prospect_name: reply.from_name || null,
+          source_reply_id: reply.id,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) {
+        alert(d.error || `Couldn't add to Hot Prospects (HTTP ${r.status})`);
+        setAddingProspect(false);
+        return;
+      }
+      setHotProspectBanner({
+        kind: d.was_new ? 'added' : 'already',
+        prospect_id: d.prospect && d.prospect.id,
+      });
+      setAddingProspect(false);
+    } catch (e) {
+      alert(`Couldn't add to Hot Prospects: ${e.message || e}`);
+      setAddingProspect(false);
+    }
+  }
+
+  // Jumps from the inbox modal to the CRM screen with the right customer
+  // selected and this prospect's detail modal open. The CRM screen
+  // (CrmHotProspects.jsx) reads two localStorage keys on mount:
+  //   - studio.crm.hot_prospects.last_customer_id (already used to remember
+  //     the operator's last-selected customer)
+  //   - studio.crm.hot_prospects.open_prospect_id (one-shot; cleared after
+  //     consumption so it doesn't auto-open on subsequent visits)
+  // Navigation itself uses a custom DOM event that Dashboard.jsx listens to,
+  // so EmailSection.jsx doesn't have to know about Dashboard's view state.
+  function openInCrm(prospectId){
+    try {
+      localStorage.setItem('studio.crm.hot_prospects.last_customer_id', reply.email_client_id);
+      if (prospectId) {
+        localStorage.setItem('studio.crm.hot_prospects.open_prospect_id', prospectId);
+      }
+    } catch {} // localStorage can throw in private modes — non-fatal
+    window.dispatchEvent(new CustomEvent('studio:navigate', { detail: { view: 'crm-hot-prospects' } }));
     onClose();
   }
 
@@ -3060,6 +3126,36 @@ function ReplyDetailModal({replyId, onClose, onAction}){
       </div>
     )}
 
+    {/* Hot Prospects banner — shown after a click on "Send to Hot Prospects".
+        Two variants: 'added' (new row created) and 'already' (the prospect was
+        already on this customer's list). Both offer an "Open in CRM" link
+        that jumps to the CRM screen with this prospect's detail open. */}
+    {hotProspectBanner && (
+      <div style={{
+        background: hotProspectBanner.kind === 'added' ? '#E1F5EE' : '#E6F1FB',
+        borderLeft: `3px solid ${hotProspectBanner.kind === 'added' ? GREEN : BLUE}`,
+        borderRadius:6, padding:'8px 12px', marginBottom:12,
+        fontSize:12, color: hotProspectBanner.kind === 'added' ? '#085041' : '#0C447C',
+        lineHeight:1.5,
+        display:'flex', alignItems:'center', justifyContent:'space-between', gap:10,
+      }}>
+        <span>
+          {hotProspectBanner.kind === 'added'
+            ? <><b style={{fontWeight:500}}>✓ Added to Hot Prospects.</b> The full email thread is attached automatically.</>
+            : <><b style={{fontWeight:500}}>Already on the list.</b> No duplicate created — existing follow-up date and notes were kept.</>
+          }
+        </span>
+        <button
+          onClick={() => openInCrm(hotProspectBanner.prospect_id)}
+          style={{
+            background:'transparent', border:'none', padding:0, cursor:'pointer',
+            fontSize:12, color:'inherit', textDecoration:'underline', fontFamily:'inherit',
+            whiteSpace:'nowrap',
+          }}
+        >Open in CRM →</button>
+      </div>
+    )}
+
     {/* Body */}
     <div style={{borderLeft:`2px solid ${BORDER}`,padding:'4px 0 4px 14px',marginBottom:14,maxHeight:300,overflowY:'auto',fontSize:13,color:TEXT,lineHeight:1.6,whiteSpace:'pre-wrap'}}>
       {reply.body_text || <em style={{color:MUTED}}>(no plain text body — message was HTML-only)</em>}
@@ -3071,6 +3167,17 @@ function ReplyDetailModal({replyId, onClose, onAction}){
           Opens AdminComposeReplyModal which sends from the customer's mailbox
           via POST /api/email/replies/:id/send (mirrors the portal endpoint). */}
       <Btn variant="primary" onClick={()=>setComposing(true)} disabled={busy}>Reply</Btn>
+      {/* Send to Hot Prospects — second-most-prominent positive action. POSTs
+          to /api/email/hot-prospects with email_client_id + prospect_email
+          + source_reply_id (used by the endpoint to auto-fill the name from
+          email_replies.from_name when prospect_name isn't supplied). The
+          response includes was_new which drives the success-banner variant.
+          Disabled while the request is in flight. */}
+      <Btn
+        variant="amber"
+        onClick={addToHotProspects}
+        disabled={busy || addingProspect}
+      >{addingProspect ? 'Adding…' : '🔥 Send to Hot Prospects'}</Btn>
       {!reply.classification && (
         <Btn variant="blue" onClick={async()=>{
           setBusy(true);

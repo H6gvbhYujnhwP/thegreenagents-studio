@@ -76,6 +76,20 @@ export default function Dashboard({ onLogout }) {
 
   useEffect(()=>{ syncAndLoad(); loadBrief(); }, []);
 
+  // Cross-component navigation. Other components (e.g. EmailSection's
+  // "Send to Hot Prospects" banner) dispatch a custom DOM event with a target
+  // view id, and we switch the dashboard view in response. Lets us route
+  // between top-level screens without lifting view state out of Dashboard or
+  // wiring callbacks through every intermediate component.
+  useEffect(() => {
+    function onNavigateEvent(e) {
+      const target = e && e.detail && e.detail.view;
+      if (typeof target === 'string') handleNavigate(target);
+    }
+    window.addEventListener('studio:navigate', onNavigateEvent);
+    return () => window.removeEventListener('studio:navigate', onNavigateEvent);
+  }, []);
+
   function handleNavigate(v) {
     setView(v);
     setSelectedClient(null);

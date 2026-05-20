@@ -221,6 +221,16 @@ router.post('/', (req, res) => {
   // see the customer-portal mirror in routes/portal.js.)
   const addedBy = 'admin';
 
+  // Detect insert-vs-update so the frontend can show "Added" vs "Already on
+  // the list". Done as a lookup before the upsert because RETURNING doesn't
+  // give us a "what kind of row this was" signal. Cheap query — the
+  // (email_client_id, prospect_email) UNIQUE index makes this an O(log n)
+  // index hit.
+  const existing = db
+    .prepare('SELECT id FROM hot_prospects WHERE email_client_id = ? AND prospect_email = ?')
+    .get(emailClientId, prospectEmail);
+  const wasNew = !existing;
+
   const id = uuid();
   const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
@@ -256,7 +266,7 @@ router.post('/', (req, res) => {
     now
   );
 
-  res.json({ prospect: row });
+  res.json({ prospect: row, was_new: wasNew });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

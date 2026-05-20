@@ -45,6 +45,11 @@ const DANGER    = '#A32D2D';
 // localStorage key for the last-selected customer id. Scoped so a future
 // CRM screen with a different table doesn't collide.
 const LAST_CUSTOMER_KEY = 'studio.crm.hot_prospects.last_customer_id';
+// One-shot key set by other screens (currently EmailSection.jsx's "Open in
+// CRM" link in the Send-to-Hot-Prospects banner). We read it on mount,
+// auto-open the matching prospect's detail modal, then clear the key so
+// subsequent visits to the CRM screen don't repeatedly auto-open it.
+const OPEN_PROSPECT_KEY = 'studio.crm.hot_prospects.open_prospect_id';
 
 // ── Small visual helpers ─────────────────────────────────────────────────────
 
@@ -121,7 +126,10 @@ export default function CrmHotProspects() {
   const [error, setError] = useState(null);
 
   // Load the customer roster once on mount. Restore last-selected customer
-  // from localStorage if present, otherwise pick the first one.
+  // from localStorage if present, otherwise pick the first one. Also handle
+  // the one-shot OPEN_PROSPECT_KEY — if set by another screen (e.g.
+  // EmailSection's "Open in CRM" link) we auto-open that prospect's detail
+  // modal and clear the key so it only triggers once.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -136,6 +144,17 @@ export default function CrmHotProspects() {
         const stored = localStorage.getItem(LAST_CUSTOMER_KEY);
         const found  = stored && list.find(c => c.id === stored);
         setSelectedCustomerId(found ? stored : list[0].id);
+
+        // Consume the one-shot open-prospect handoff. Clear the key as soon
+        // as we read it so a later navigation back to this screen doesn't
+        // re-open the same prospect.
+        try {
+          const openId = localStorage.getItem(OPEN_PROSPECT_KEY);
+          if (openId) {
+            localStorage.removeItem(OPEN_PROSPECT_KEY);
+            setOpenProspectId(openId);
+          }
+        } catch {}
       } catch (e) {
         if (!cancelled) { setError(String(e.message || e)); setCustomers([]); }
       }
