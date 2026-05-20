@@ -446,7 +446,19 @@ function loginInputStyle() {
 
 // ── CHROME (sidebar + header + page router) ──────────────────────────────────
 function PortalChrome({ user, client, services, onLogout }) {
-  const [page, setPage] = useState('posts');  // posts | inbox | campaigns | settings | facebook (future)
+  const [page, setPage] = useState('posts');  // posts | inbox | campaigns | settings | facebook (future) | hot_prospects
+  // Cross-page handoff: when the customer clicks "Open in CRM" from inside an
+  // inbox email's Hot-Prospects banner, we set this state to the prospect id
+  // then flip the page to 'hot_prospects'. PortalHotProspects reads it on
+  // mount, opens the matching prospect's detail modal, and calls the clearer
+  // so subsequent visits don't auto-open it again. State is lifted to the
+  // chrome (not localStorage) because everything lives inside one component
+  // tree — simpler and survives a stale tab.
+  const [crmOpenProspectId, setCrmOpenProspectId] = useState(null);
+  function navigateToCrmWithProspect(prospectId) {
+    setCrmOpenProspectId(prospectId || null);
+    setPage('hot_prospects');
+  }
 
   // The portal sidebar always shows EVERY service (per Wez's locked-in
   // pre-decision — discoverability over hidden tabs). What changes is what
@@ -540,6 +552,18 @@ function PortalChrome({ user, client, services, onLogout }) {
             />
           </NavSection>
 
+          {/* CRM — currently one entry (Hot Prospects). Section heading set
+              up so adding more lists later (Warm prospects, Lost deals,
+              etc.) is a single NavItem addition with no sidebar rearrange.
+              Visible regardless of Email subscription state — Hot Prospects
+              is its own feature, decoupled from cold-email sending. */}
+          <NavSection heading="CRM">
+            <NavItem label="Hot Prospects"
+              active={page==='hot_prospects'}
+              onClick={() => setPage('hot_prospects')}
+            />
+          </NavSection>
+
           <NavSection heading="Account">
             <NavItem label="Settings"
               active={page==='settings'}
@@ -617,13 +641,21 @@ function PortalChrome({ user, client, services, onLogout }) {
           )}
           {page === 'inbox' && (
             <ServiceGate svc={svc.email} serviceName="Inbox">
-              <PortalInbox />
+              <PortalInbox onNavigateToCrm={navigateToCrmWithProspect} />
             </ServiceGate>
           )}
           {page === 'campaigns' && (
             <ServiceGate svc={svc.email} serviceName="Campaigns">
               <PortalCampaigns />
             </ServiceGate>
+          )}
+          {/* CRM Hot Prospects — not gated by ServiceGate. Hot Prospects is
+              its own feature, available regardless of email-service state. */}
+          {page === 'hot_prospects' && (
+            <PortalHotProspects
+              autoOpenProspectId={crmOpenProspectId}
+              onAutoOpenConsumed={() => setCrmOpenProspectId(null)}
+            />
           )}
           {page === 'facebook' && (
             <ServiceGate svc={svc.facebook} serviceName="Facebook Posts">
@@ -1883,7 +1915,7 @@ function HistoryCampaignCard({ campaign, expanded, onToggle,
 }
 
 // ── INBOX PAGE ───────────────────────────────────────────────────────────────
-function PortalInbox() {
+function PortalInbox({ onNavigateToCrm } = {}) {
   const [replies, setReplies]         = useState(null);  // null=loading, []=none, [...]=list
   const [notSubscribed, setNotSubscribed] = useState(false);
   const [loadError, setLoadError]     = useState(null);
@@ -2007,6 +2039,14 @@ function PortalInbox() {
         <ReplyDetailModal reply={openReply}
           onClose={() => setOpenReply(null)}
           onCompose={() => setComposing(openReply)}
+          onNavigateToCrm={(prospectId) => {
+            // Close the inbox detail then navigate to the CRM page with the
+            // matching prospect's detail modal auto-opened. The chrome holds
+            // the cross-page handoff state — we just call its setter and
+            // close ourselves.
+            setOpenReply(null);
+            if (onNavigateToCrm) onNavigateToCrm(prospectId);
+          }}
         />
       )}
       {composing && (
@@ -2110,7 +2150,49 @@ function badgeStyle() {
 // new untrusted vector here that didn't already exist in their mail client.
 // We do still want the rendered HTML scoped (no global style bleed), so we
 // wrap it in a div with isolation styles.
-function ReplyDetailModal({ reply, onClose, onCompose }) {
+function ReplyDetailModal({ reply, onClose, onCompose, onNavigateToCrm }) {
+  // Hot Prospects state. addingProspect = button is mid-POST. hotProspectBanner
+  // holds the success/already-on-list message after a successful add:
+  //   { kind: 'added' | 'already', prospect_id: '<uuid>' }
+  // Banners stay until the modal closes — the customer should be able to keep
+  // reading the email after they've added the prospect, then click "Open in
+  // CRM" if they want to jump.
+  const [addingProspect, setAddingProspect] = useState(false);
+  const [hotProspectBanner, setHotProspectBanner] = useState(null);
+  const [addError, setAddError] = useState(null);
+
+  async function addToHotProspects() {
+    if (!reply || addingProspect) return;
+    setAddingProspect(true);
+    setAddError(null);
+    setHotProspectBanner(null);
+    try {
+      const r = await fetch('/api/portal/hot-prospects', {
+        method:'POST', credentials:'include',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({
+          prospect_email: reply.from_address,
+          prospect_name:  reply.from_name || null,
+          source_reply_id: reply.id,
+        }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.error) {
+        setAddError(d.error || `Couldn't add to Hot Prospects (HTTP ${r.status})`);
+        setAddingProspect(false);
+        return;
+      }
+      setHotProspectBanner({
+        kind: d.was_new ? 'added' : 'already',
+        prospect_id: d.prospect && d.prospect.id,
+      });
+      setAddingProspect(false);
+    } catch (e) {
+      setAddError(`Couldn't add to Hot Prospects: ${e.message || e}`);
+      setAddingProspect(false);
+    }
+  }
+
   return (
     // Custom layout (not the shared <Modal>) so the action buttons stay
     // pinned at the top while the email body scrolls. Mirrors the admin-side
@@ -2153,9 +2235,25 @@ function ReplyDetailModal({ reply, onClose, onCompose }) {
             }} aria-label="Close">×</button>
           </div>
 
-          {/* Action buttons — pinned. */}
+          {/* Action buttons — pinned. Hot Prospects sits between Reply and
+              Close so the most common positive action stays leftmost. */}
           <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
             <BtnPrimary onClick={onCompose}>Reply</BtnPrimary>
+            {/* Send to Hot Prospects — amber pill-style button. Inline-styled
+                (no shared BtnAmber primitive on the portal side) so the look
+                matches the admin amber variant. */}
+            <button
+              onClick={addToHotProspects}
+              disabled={addingProspect}
+              style={{
+                padding:'8px 14px', fontSize:13, fontWeight:500,
+                background: AMBER_BG, color: AMBER,
+                border:'none', borderRadius:6,
+                cursor: addingProspect ? 'default' : 'pointer',
+                opacity: addingProspect ? 0.7 : 1,
+                fontFamily:'inherit',
+              }}
+            >{addingProspect ? 'Adding…' : '🔥 Send to Hot Prospects'}</button>
             <BtnSecondary onClick={onClose}>Close</BtnSecondary>
           </div>
         </div>
@@ -2167,6 +2265,49 @@ function ReplyDetailModal({ reply, onClose, onCompose }) {
           padding:'14px 26px 24px', overflowY:'auto', flex:1,
           fontSize:13, color:TEXT, lineHeight:1.6,
         }}>
+
+          {/* Hot Prospects banner — shown above the email body after a click
+              on "Send to Hot Prospects". Two variants: 'added' (new row) and
+              'already' (the prospect was already on the list). Both offer
+              "Open in CRM" which closes the inbox modal and navigates to
+              the CRM page with the matching prospect's detail auto-opened. */}
+          {hotProspectBanner && (
+            <div style={{
+              background: hotProspectBanner.kind === 'added' ? GREEN_BG : BLUE_BG,
+              borderLeft: `3px solid ${hotProspectBanner.kind === 'added' ? TGA_GREEN_HI : BLUE}`,
+              borderRadius:6, padding:'8px 12px', marginBottom:14,
+              fontSize:12, color: hotProspectBanner.kind === 'added' ? '#085041' : '#0C447C',
+              lineHeight:1.5,
+              display:'flex', alignItems:'center', justifyContent:'space-between', gap:10,
+            }}>
+              <span>
+                {hotProspectBanner.kind === 'added'
+                  ? <><b style={{fontWeight:500}}>✓ Added to Hot Prospects.</b> The full email thread is attached automatically.</>
+                  : <><b style={{fontWeight:500}}>Already on the list.</b> No duplicate created — existing follow-up date and notes were kept.</>
+                }
+              </span>
+              {onNavigateToCrm && (
+                <button
+                  onClick={() => onNavigateToCrm(hotProspectBanner.prospect_id)}
+                  style={{
+                    background:'transparent', border:'none', padding:0, cursor:'pointer',
+                    fontSize:12, color:'inherit', textDecoration:'underline', fontFamily:'inherit',
+                    whiteSpace:'nowrap',
+                  }}
+                >Open in CRM →</button>
+              )}
+            </div>
+          )}
+
+          {/* Error banner if the add itself failed (network / 500 / etc.). */}
+          {addError && (
+            <div style={{
+              background:'#fdecea', borderLeft:`3px solid ${DANGER}`,
+              borderRadius:6, padding:'8px 12px', marginBottom:14,
+              fontSize:12, color:DANGER, lineHeight:1.5,
+            }}>{addError}</div>
+          )}
+
           {reply.body_html ? (
             <div className="portal-email-body" dangerouslySetInnerHTML={{ __html: reply.body_html }} />
           ) : (
@@ -2231,6 +2372,519 @@ function ComposeReplyModal({ reply, onClose, onSend }) {
         <BtnPrimary onClick={send} disabled={busy || !body.trim()}>{busy ? 'Sending…' : 'Send reply'}</BtnPrimary>
       </div>
     </Modal>
+  );
+}
+
+// ── CRM HOT PROSPECTS PAGE (customer-portal mirror of admin's CrmHotProspects)
+// Single-tenant from the customer's point of view — no customer-switcher (they
+// see only their own list). Reads /api/portal/hot-prospects and supports the
+// same edit-follow-up / edit-notes / delete / view-thread flow as the admin
+// screen. Auto-opens a specific prospect's detail modal when the chrome
+// passes `autoOpenProspectId` — used by the inbox's "Open in CRM" link.
+function PortalHotProspects({ autoOpenProspectId, onAutoOpenConsumed }) {
+  const [prospects, setProspects] = useState(null);  // null = loading
+  const [search, setSearch]       = useState('');
+  const [openProspectId, setOpenProspectId] = useState(null);
+  const [error, setError]         = useState(null);
+
+  async function load() {
+    try {
+      const r = await fetch('/api/portal/hot-prospects', { credentials:'include' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.error) { setError(d.error || `HTTP ${r.status}`); setProspects([]); return; }
+      setProspects(d.prospects || []);
+    } catch (e) {
+      setError(String(e.message || e));
+      setProspects([]);
+    }
+  }
+  useEffect(() => { load(); }, []);
+
+  // Consume the one-shot auto-open prospect id passed in by the chrome
+  // (originating from the inbox's "Open in CRM" link). Clear the handoff
+  // immediately so coming back to this page later doesn't re-open the same
+  // prospect. The detail modal can be reopened by clicking the row again.
+  useEffect(() => {
+    if (autoOpenProspectId) {
+      setOpenProspectId(autoOpenProspectId);
+      if (onAutoOpenConsumed) onAutoOpenConsumed();
+    }
+    // Run once when the prop arrives non-null; rerun if it changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpenProspectId]);
+
+  const filtered = (() => {
+    if (!prospects) return null;
+    const q = search.trim().toLowerCase();
+    if (!q) return prospects;
+    return prospects.filter(p =>
+      (p.prospect_name || '').toLowerCase().includes(q)
+      || (p.prospect_email || '').toLowerCase().includes(q)
+    );
+  })();
+
+  return (
+    <div>
+      <h2 style={pageTitle()}>Hot prospects</h2>
+      <p style={pageSub()}>Prospects you've flagged from your inbox. Open a row to add notes, set a follow-up date, or review the conversation.</p>
+
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, marginTop:14, marginBottom:14 }}>
+        <input
+          type="text"
+          placeholder="Search prospects by name or email…"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          style={{
+            width:300, maxWidth:'100%', padding:'8px 12px',
+            border:`0.5px solid ${BORDER}`, borderRadius:7, fontSize:13,
+            color:TEXT, background:CARD, outline:'none', fontFamily:'inherit',
+          }}
+        />
+        {filtered && (
+          <div style={{ fontSize:12, color:MUTED }}>
+            {filtered.length} prospect{filtered.length===1?'':'s'}
+            {search.trim() && prospects && prospects.length !== filtered.length && (
+              <> (of {prospects.length})</>
+            )}
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div style={{
+          background:'#fdecea', borderLeft:`3px solid ${DANGER}`,
+          borderRadius:6, padding:'10px 14px', marginBottom:14,
+          fontSize:13, color:DANGER, lineHeight:1.5,
+        }}>Couldn't load Hot Prospects: {error}</div>
+      )}
+
+      {prospects === null ? (
+        <div style={{ fontSize:13, color:MUTED, padding:'20px 0' }}>Loading prospects…</div>
+      ) : prospects.length === 0 ? (
+        <div style={{
+          background:CARD, border:`0.5px dashed ${BORDER}`, borderRadius:8,
+          padding:'48px 24px', textAlign:'center', fontSize:14, color:MUTED,
+        }}>
+          <div style={{ fontSize:15, color:TEXT, marginBottom:6 }}>No prospects yet</div>
+          <div style={{ fontSize:13, color:MUTED, lineHeight:1.5, maxWidth:480, margin:'0 auto' }}>
+            Open an email in your Inbox and click <strong style={{ fontWeight:500 }}>Send to Hot Prospects</strong> to add the sender here.
+          </div>
+        </div>
+      ) : filtered && filtered.length === 0 ? (
+        <div style={{ fontSize:13, color:MUTED, padding:'20px 0' }}>No matches.</div>
+      ) : (
+        <PortalProspectList prospects={filtered} onOpen={setOpenProspectId} />
+      )}
+
+      {openProspectId && (
+        <PortalProspectDetailModal
+          prospectId={openProspectId}
+          onClose={() => setOpenProspectId(null)}
+          onChange={load}
+        />
+      )}
+    </div>
+  );
+}
+
+// Customer-side avatar helpers — duplicate of CrmHotProspects' versions but
+// inlined here so PortalApp.jsx stays standalone (no cross-import to an admin
+// component, which lives outside the customer-portal subtree).
+const PORTAL_AVATAR_PALETTE = [
+  { bg: '#E1F5EE', fg: '#085041' },
+  { bg: '#FAECE7', fg: '#712B13' },
+  { bg: '#EEEDFE', fg: '#3C3489' },
+  { bg: '#FBEAF0', fg: '#72243E' },
+  { bg: '#E6F1FB', fg: '#0C447C' },
+  { bg: '#FAEEDA', fg: '#633806' },
+  { bg: '#EAF3DE', fg: '#27500A' },
+];
+function portalAvatarColor(seed) {
+  if (!seed) return PORTAL_AVATAR_PALETTE[0];
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  return PORTAL_AVATAR_PALETTE[h % PORTAL_AVATAR_PALETTE.length];
+}
+function portalInitials(name) {
+  if (!name) return '?';
+  const parts = String(name).trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+function portalRelativeTime(value) {
+  if (!value) return '';
+  let parsed = value;
+  if (typeof parsed === 'string' && /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(parsed)) {
+    parsed = parsed.replace(' ', 'T') + 'Z';
+  }
+  const d = new Date(parsed);
+  if (isNaN(d.getTime())) return '';
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60)       return 'just now';
+  if (diff < 3600)     return `${Math.floor(diff/60)} min ago`;
+  if (diff < 86400)    return `${Math.floor(diff/3600)} hour${Math.floor(diff/3600)===1?'':'s'} ago`;
+  if (diff < 86400*7)  return `${Math.floor(diff/86400)} day${Math.floor(diff/86400)===1?'':'s'} ago`;
+  if (diff < 86400*30) return `${Math.floor(diff/86400/7)} week${Math.floor(diff/86400/7)===1?'':'s'} ago`;
+  return d.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
+}
+function portalFollowUpFormat(value) {
+  if (!value) return { label: 'Not set', color: '#999', urgent: false };
+  const d = new Date(value + 'T00:00:00');
+  if (isNaN(d.getTime())) return { label: value, color: TEXT, urgent: false };
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const days = Math.round((d - today) / 86400000);
+  if (days < 0)  return { label: `${Math.abs(days)} day${Math.abs(days)===1?'':'s'} overdue`, color: DANGER, urgent: true };
+  if (days === 0) return { label: 'Today',    color: AMBER, urgent: true };
+  if (days === 1) return { label: 'Tomorrow', color: AMBER, urgent: true };
+  if (days <= 7)  return { label: d.toLocaleDateString('en-GB', { weekday:'short', day:'numeric', month:'short' }), color: TEXT, urgent: false };
+  return { label: d.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' }), color: TEXT, urgent: false };
+}
+
+function PortalProspectList({ prospects, onOpen }) {
+  if (!prospects || prospects.length === 0) return null;
+  return (
+    <div style={{
+      background:CARD, border:`0.5px solid ${BORDER}`, borderRadius:8,
+      overflow:'hidden',
+    }}>
+      <div style={{
+        display:'grid', gridTemplateColumns:'2fr 1.8fr 1.2fr 1.2fr 32px',
+        gap:12, padding:'10px 16px',
+        background:'#fafaf8', borderBottom:`0.5px solid ${BORDER}`,
+        fontSize:11, fontWeight:500, color:MUTED,
+        textTransform:'uppercase', letterSpacing:'0.5px',
+      }}>
+        <div>Name</div>
+        <div>Email</div>
+        <div>Added</div>
+        <div>Follow up</div>
+        <div />
+      </div>
+      {prospects.map((p, idx) => (
+        <PortalProspectRow key={p.id} prospect={p} isLast={idx === prospects.length - 1} onOpen={() => onOpen(p.id)} />
+      ))}
+    </div>
+  );
+}
+function PortalProspectRow({ prospect, isLast, onOpen }) {
+  const av = portalAvatarColor(prospect.prospect_name || prospect.prospect_email);
+  const fu = portalFollowUpFormat(prospect.follow_up_date);
+  return (
+    <div onClick={onOpen} style={{
+      display:'grid', gridTemplateColumns:'2fr 1.8fr 1.2fr 1.2fr 32px',
+      gap:12, padding:'14px 16px', alignItems:'center',
+      borderBottom: isLast ? 'none' : `0.5px solid ${BORDER}`,
+      cursor:'pointer',
+    }}>
+      <div style={{ display:'flex', alignItems:'center', gap:10, minWidth:0 }}>
+        <div style={{
+          width:32, height:32, borderRadius:'50%',
+          background: av.bg, color: av.fg,
+          display:'flex', alignItems:'center', justifyContent:'center',
+          fontSize:12, fontWeight:500, flexShrink:0,
+        }}>{portalInitials(prospect.prospect_name || prospect.prospect_email)}</div>
+        <div style={{
+          fontSize:14, fontWeight:500, color:TEXT,
+          overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+        }}>{prospect.prospect_name || <span style={{ color:MUTED, fontWeight:400 }}>(no name)</span>}</div>
+      </div>
+      <div style={{ fontSize:13, color:MUTED, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{prospect.prospect_email}</div>
+      <div style={{ fontSize:13, color:MUTED }}>{portalRelativeTime(prospect.added_at)}</div>
+      <div style={{ fontSize:13, color: fu.color, fontWeight: fu.urgent ? 500 : 400 }}>{fu.label}</div>
+      <div style={{ textAlign:'right', color:'#999', fontSize:18 }}>›</div>
+    </div>
+  );
+}
+
+function PortalProspectDetailModal({ prospectId, onClose, onChange }) {
+  const [data, setData] = useState(null);  // { prospect, thread } or { error }
+  const [followUp, setFollowUp] = useState('');
+  const [notes, setNotes] = useState('');
+  const [savingState, setSavingState] = useState(''); // '', 'saving', 'saved', 'error'
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState(null);
+
+  // Fetch the prospect + thread on open.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/portal/hot-prospects/${encodeURIComponent(prospectId)}/thread`, { credentials:'include' });
+        const d = await r.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!r.ok || d.error) { setData({ error: d.error || `HTTP ${r.status}` }); return; }
+        setData(d);
+        setFollowUp(d.prospect.follow_up_date || '');
+        setNotes(d.prospect.notes || '');
+      } catch (e) {
+        if (!cancelled) setData({ error: String(e.message || e) });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [prospectId]);
+
+  // Debounced auto-save (1s) for follow-up and notes, mirrors admin behaviour.
+  const initialLoadRef = useRef(true);
+  useEffect(() => {
+    if (!data || data.error) return;
+    if (initialLoadRef.current) {
+      initialLoadRef.current = false;
+      return;
+    }
+    const original = data.prospect;
+    const nextFollowUp = followUp || null;
+    const nextNotes    = notes    || null;
+    const fuChanged    = (original.follow_up_date || null) !== nextFollowUp;
+    const noteChanged  = (original.notes          || null) !== nextNotes;
+    if (!fuChanged && !noteChanged) return;
+
+    setSavingState('saving');
+    const t = setTimeout(async () => {
+      try {
+        const body = {};
+        if (fuChanged)   body.follow_up_date = nextFollowUp;
+        if (noteChanged) body.notes          = nextNotes;
+        const r = await fetch(`/api/portal/hot-prospects/${encodeURIComponent(prospectId)}`, {
+          method:'PUT', credentials:'include',
+          headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify(body),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.error) { setSavingState('error'); return; }
+        setData(prev => prev ? { ...prev, prospect: d.prospect } : prev);
+        setSavingState('saved');
+        if (onChange) onChange();
+        setTimeout(() => setSavingState(s => s === 'saved' ? '' : s), 1500);
+      } catch (e) {
+        setSavingState('error');
+      }
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [followUp, notes, prospectId, data, onChange]);
+
+  async function removeFromList() {
+    if (!confirm('Remove this prospect from your Hot Prospects list?')) return;
+    setRemoveBusy(true);
+    setRemoveError(null);
+    try {
+      const r = await fetch(`/api/portal/hot-prospects/${encodeURIComponent(prospectId)}`, {
+        method:'DELETE', credentials:'include',
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.error) {
+        setRemoveError(d.error || `HTTP ${r.status}`);
+        setRemoveBusy(false);
+        return;
+      }
+      if (onChange) onChange();
+      onClose();
+    } catch (e) {
+      setRemoveError(String(e.message || e));
+      setRemoveBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="Hot prospect" onClose={onClose} wide>
+      {!data ? (
+        <div style={{ textAlign:'center', padding:30, color:MUTED, fontSize:13 }}>Loading prospect…</div>
+      ) : data.error ? (
+        <div style={{ background:'#fdecea', borderLeft:`3px solid ${DANGER}`, borderRadius:6, padding:'10px 14px', fontSize:13, color:DANGER }}>
+          Couldn't load prospect: {data.error}
+        </div>
+      ) : (
+        <PortalProspectDetailBody
+          data={data}
+          followUp={followUp} setFollowUp={setFollowUp}
+          notes={notes} setNotes={setNotes}
+          savingState={savingState}
+          onRemove={removeFromList}
+          removeBusy={removeBusy}
+          removeError={removeError}
+        />
+      )}
+    </Modal>
+  );
+}
+
+function PortalProspectDetailBody({ data, followUp, setFollowUp, notes, setNotes, savingState, onRemove, removeBusy, removeError }) {
+  const p = data.prospect;
+  const av = portalAvatarColor(p.prospect_name || p.prospect_email);
+  return (
+    <div>
+      {/* Header */}
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:16, marginBottom:16 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:14, minWidth:0 }}>
+          <div style={{
+            width:48, height:48, borderRadius:'50%',
+            background: av.bg, color: av.fg,
+            display:'flex', alignItems:'center', justifyContent:'center',
+            fontSize:16, fontWeight:500, flexShrink:0,
+          }}>{portalInitials(p.prospect_name || p.prospect_email)}</div>
+          <div style={{ minWidth:0 }}>
+            <div style={{ fontSize:17, fontWeight:500, color:TEXT, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+              {p.prospect_name || <span style={{ color:MUTED, fontWeight:400 }}>(no name)</span>}
+            </div>
+            <div style={{ fontSize:13, color:MUTED, marginTop:2 }}>{p.prospect_email}</div>
+          </div>
+        </div>
+        <button
+          onClick={onRemove}
+          disabled={removeBusy}
+          style={{
+            background:'#fdecea', color:DANGER, border:'none',
+            borderRadius:7, padding:'7px 14px', fontSize:13, fontWeight:500,
+            cursor: removeBusy ? 'not-allowed' : 'pointer',
+            opacity: removeBusy ? 0.6 : 1,
+            display:'flex', alignItems:'center', gap:6,
+            fontFamily:'inherit',
+          }}
+        >🗑 Remove from list</button>
+      </div>
+
+      {removeError && (
+        <div style={{ background:'#fdecea', borderLeft:`3px solid ${DANGER}`, borderRadius:6, padding:'8px 12px', marginBottom:12, fontSize:12, color:DANGER }}>
+          {removeError}
+        </div>
+      )}
+
+      <div style={{
+        display:'grid', gridTemplateColumns:'1fr 1fr', gap:16,
+        padding:'14px 0', borderTop:`0.5px solid ${BORDER}`, borderBottom:`0.5px solid ${BORDER}`,
+        marginBottom:16,
+      }}>
+        <div>
+          <div style={{ fontSize:11, color:'#999', marginBottom:6, textTransform:'uppercase', letterSpacing:'0.5px' }}>Added to list</div>
+          <div style={{ fontSize:14, color:TEXT }}>
+            {portalRelativeTime(p.added_at)}
+            <span style={{ color:MUTED, marginLeft:6, fontSize:12 }}>
+              ({(p.added_by || '').startsWith('portal:') ? 'by you' : 'by The Green Agents'})
+            </span>
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize:11, color:'#999', marginBottom:6, textTransform:'uppercase', letterSpacing:'0.5px' }}>Follow up on</div>
+          <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+            <input
+              type="date"
+              value={followUp}
+              onChange={e => setFollowUp(e.target.value)}
+              style={{
+                fontSize:13, padding:'6px 10px',
+                border:`0.5px solid ${BORDER}`, borderRadius:6,
+                color:TEXT, background:CARD, outline:'none', fontFamily:'inherit',
+              }}
+            />
+            {followUp && (
+              <button
+                onClick={() => setFollowUp('')}
+                style={{
+                  fontSize:12, padding:'6px 10px',
+                  background:'#fafaf8', color:MUTED, border:`0.5px solid ${BORDER}`,
+                  borderRadius:6, cursor:'pointer', fontFamily:'inherit',
+                }}
+              >Clear</button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginBottom:18 }}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6 }}>
+          <div style={{ fontSize:11, color:'#999', textTransform:'uppercase', letterSpacing:'0.5px' }}>Notes</div>
+          <div style={{ fontSize:11, color: savingState==='error' ? DANGER : savingState==='saving' ? AMBER : savingState==='saved' ? TGA_GREEN_HI : 'transparent' }}>
+            {savingState === 'saving' && 'Saving…'}
+            {savingState === 'saved'  && '✓ Saved'}
+            {savingState === 'error'  && 'Save failed — will retry on next change'}
+          </div>
+        </div>
+        <textarea
+          value={notes}
+          onChange={e => setNotes(e.target.value)}
+          placeholder="Add a note about this prospect…"
+          style={{
+            width:'100%', minHeight:80, padding:'10px 12px',
+            border:`0.5px solid ${BORDER}`, borderRadius:7,
+            fontSize:13, color:TEXT, background:CARD, outline:'none',
+            boxSizing:'border-box', fontFamily:'inherit',
+            resize:'vertical', lineHeight:1.5,
+          }}
+        />
+      </div>
+
+      <PortalThreadList thread={data.thread || []} />
+    </div>
+  );
+}
+
+function PortalThreadList({ thread }) {
+  return (
+    <div>
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10 }}>
+        <div style={{ fontSize:13, fontWeight:500, color:TEXT }}>Email history with this prospect</div>
+        <div style={{ fontSize:11, color:'#999' }}>
+          {thread.length} message{thread.length===1?'':'s'} · auto-updates
+        </div>
+      </div>
+      {thread.length === 0 ? (
+        <div style={{
+          background:CARD, border:`0.5px dashed ${BORDER}`, borderRadius:7,
+          padding:'20px 14px', fontSize:13, color:MUTED, textAlign:'center',
+        }}>
+          No messages found. The thread builds itself from inbox replies and
+          sent replies — new mail will appear here automatically.
+        </div>
+      ) : (
+        thread.map(msg => <PortalThreadMessage key={`${msg.direction}-${msg.id}`} msg={msg} />)
+      )}
+    </div>
+  );
+}
+function PortalThreadMessage({ msg }) {
+  const isInbound = msg.direction === 'inbound';
+  const arrow = isInbound ? '↩' : '↑';
+  const label = isInbound
+    ? `From ${msg.from_name || msg.from_address} · ${portalRelativeTime(msg.at)}`
+    : `From us · ${portalRelativeTime(msg.at)}`;
+  const date = (() => {
+    if (!msg.at) return '';
+    let v = msg.at;
+    if (typeof v === 'string' && /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(v)) v = v.replace(' ', 'T') + 'Z';
+    const d = new Date(v);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString('en-GB', { weekday:'short', day:'numeric', month:'short' })
+      + ', ' + d.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
+  })();
+  return (
+    <div style={{
+      border:`0.5px solid ${BORDER}`, borderRadius:7,
+      padding:'12px 14px', marginBottom:10,
+    }}>
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6, gap:8 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:12, color:MUTED }}>
+          <span style={{ color: isInbound ? BLUE : TGA_GREEN_HI }}>{arrow}</span>
+          <span>{label}</span>
+        </div>
+        <div style={{ fontSize:11, color:'#999', whiteSpace:'nowrap' }}>{date}</div>
+      </div>
+      {msg.subject && (
+        <div style={{ fontSize:12, color:TEXT, fontWeight:500, marginBottom:6 }}>{msg.subject}</div>
+      )}
+      <div style={{
+        fontSize:13, color:MUTED, lineHeight:1.6,
+        whiteSpace:'pre-wrap',
+        maxHeight:240, overflowY:'auto',
+      }}>
+        {msg.body_text || <em style={{ color:'#999' }}>(no plain text body)</em>}
+      </div>
+      {msg.error && (
+        <div style={{ marginTop:8, fontSize:11, color:DANGER }}>
+          Send failed: {msg.error}
+        </div>
+      )}
+    </div>
   );
 }
 
