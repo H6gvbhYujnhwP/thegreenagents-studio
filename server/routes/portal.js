@@ -1369,4 +1369,270 @@ router.put('/content-rules', (req, res) => {
   res.json({ rules: cleaned });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CRM — Hot Prospects (customer-portal side)
+//
+// Mirrors the admin-side endpoints in routes/hot-prospects.js, but scoped to
+// the signed-in customer's email_client_id (resolved from the session cookie,
+// never trusted from the URL or body — same rule as everywhere else in this
+// file). All rows are added with added_by = 'portal:<client_user_id>' so the
+// origin is auditable.
+//
+// The thread endpoint joins email_replies + email_outbound live, just like
+// the admin one — new mail with the prospect auto-appears.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Local helpers, mirroring routes/hot-prospects.js exactly. Duplicated rather
+// than imported to keep portal.js self-contained (and so a tweak to one side
+// can't accidentally change the other).
+function _normaliseProspectEmail(raw) {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim().toLowerCase();
+  return s.length ? s : null;
+}
+function _validateFollowUpDate(raw) {
+  if (raw === null || raw === undefined || raw === '') return null;
+  const s = String(raw).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return undefined;
+  const d = new Date(s + 'T00:00:00Z');
+  if (isNaN(d.getTime())) return undefined;
+  const iso = d.toISOString().slice(0, 10);
+  if (iso !== s) return undefined;
+  return s;
+}
+
+// GET /api/portal/hot-prospects — list the customer's prospects, newest-first.
+router.get('/hot-prospects', (req, res) => {
+  const clientId = req.portalClient.id;
+  const search = String(req.query.search || '').trim().toLowerCase();
+  let rows;
+  if (search) {
+    const like = `%${search}%`;
+    rows = db
+      .prepare(
+        `SELECT id, email_client_id, prospect_email, prospect_name,
+                follow_up_date, notes, added_by, added_at, updated_at
+           FROM hot_prospects
+          WHERE email_client_id = ?
+            AND (LOWER(COALESCE(prospect_name,'')) LIKE ? OR LOWER(prospect_email) LIKE ?)
+          ORDER BY added_at DESC`
+      )
+      .all(clientId, like, like);
+  } else {
+    rows = db
+      .prepare(
+        `SELECT id, email_client_id, prospect_email, prospect_name,
+                follow_up_date, notes, added_by, added_at, updated_at
+           FROM hot_prospects
+          WHERE email_client_id = ?
+          ORDER BY added_at DESC`
+      )
+      .all(clientId);
+  }
+  res.json({ prospects: rows });
+});
+
+// POST /api/portal/hot-prospects — add a prospect. Body:
+//   { prospect_email, prospect_name?, follow_up_date?, notes?, source_reply_id? }
+// No email_client_id in the body — it comes from the session.
+router.post('/hot-prospects', (req, res) => {
+  const clientId = req.portalClient.id;
+  const {
+    prospect_email,
+    prospect_name,
+    follow_up_date,
+    notes,
+    source_reply_id,
+  } = req.body || {};
+
+  const prospectEmail = _normaliseProspectEmail(prospect_email);
+  if (!prospectEmail || !prospectEmail.includes('@')) {
+    return res.status(400).json({ error: 'valid prospect_email required' });
+  }
+
+  let resolvedName = (prospect_name !== undefined && prospect_name !== null)
+    ? String(prospect_name).trim() || null
+    : null;
+  if (!resolvedName && source_reply_id) {
+    const reply = db
+      .prepare(
+        'SELECT from_name FROM email_replies WHERE id = ? AND email_client_id = ?'
+      )
+      .get(String(source_reply_id), clientId);
+    if (reply && reply.from_name) {
+      resolvedName = String(reply.from_name).trim() || null;
+    }
+  }
+
+  const followUp = _validateFollowUpDate(follow_up_date);
+  if (followUp === undefined) {
+    return res.status(400).json({ error: "follow_up_date must be 'YYYY-MM-DD' or null" });
+  }
+
+  const cleanNotes = (notes === undefined || notes === null)
+    ? null
+    : (String(notes).trim() || null);
+
+  const addedBy = `portal:${req.portalUser.id}`;
+  const id = uuid();
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  const stmt = db.prepare(`
+    INSERT INTO hot_prospects (
+      id, email_client_id, prospect_email, prospect_name,
+      follow_up_date, notes, added_by, added_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(email_client_id, prospect_email) DO UPDATE SET
+      prospect_name  = COALESCE(excluded.prospect_name, hot_prospects.prospect_name),
+      follow_up_date = CASE WHEN excluded.follow_up_date IS NOT NULL
+                            THEN excluded.follow_up_date
+                            ELSE hot_prospects.follow_up_date END,
+      notes          = COALESCE(excluded.notes, hot_prospects.notes),
+      updated_at     = excluded.updated_at
+    RETURNING id, email_client_id, prospect_email, prospect_name,
+              follow_up_date, notes, added_by, added_at, updated_at
+  `);
+  const row = stmt.get(
+    id, clientId, prospectEmail, resolvedName,
+    followUp, cleanNotes, addedBy, now, now
+  );
+  res.json({ prospect: row });
+});
+
+// PUT /api/portal/hot-prospects/:id — update follow-up date / notes / name.
+// Customers can only update prospects on their own list (the id must belong
+// to their email_client_id). Cross-tenant lookups return 404, never 403, to
+// match the project's standing privacy rule.
+router.put('/hot-prospects/:id', (req, res) => {
+  const clientId = req.portalClient.id;
+  const id = String(req.params.id || '');
+  const existing = db
+    .prepare('SELECT * FROM hot_prospects WHERE id = ? AND email_client_id = ?')
+    .get(id, clientId);
+  if (!existing) {
+    return res.status(404).json({ error: 'prospect not found' });
+  }
+
+  const updates = {};
+  if ('follow_up_date' in (req.body || {})) {
+    const v = _validateFollowUpDate(req.body.follow_up_date);
+    if (v === undefined) {
+      return res.status(400).json({ error: "follow_up_date must be 'YYYY-MM-DD' or null" });
+    }
+    updates.follow_up_date = v;
+  }
+  if ('notes' in (req.body || {})) {
+    const raw = req.body.notes;
+    updates.notes = (raw === null || raw === undefined)
+      ? null
+      : (String(raw).trim() || null);
+  }
+  if ('prospect_name' in (req.body || {})) {
+    const raw = req.body.prospect_name;
+    updates.prospect_name = (raw === null || raw === undefined)
+      ? null
+      : (String(raw).trim() || null);
+  }
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: 'no updatable fields supplied' });
+  }
+
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const setClauses = Object.keys(updates).map(k => `${k} = ?`).concat('updated_at = ?');
+  const values = Object.values(updates).concat(now, id);
+
+  db.prepare(`UPDATE hot_prospects SET ${setClauses.join(', ')} WHERE id = ?`).run(...values);
+
+  const row = db
+    .prepare(
+      `SELECT id, email_client_id, prospect_email, prospect_name,
+              follow_up_date, notes, added_by, added_at, updated_at
+         FROM hot_prospects WHERE id = ?`
+    )
+    .get(id);
+  res.json({ prospect: row });
+});
+
+// DELETE /api/portal/hot-prospects/:id — remove from list. Tenant-scoped.
+router.delete('/hot-prospects/:id', (req, res) => {
+  const clientId = req.portalClient.id;
+  const id = String(req.params.id || '');
+  const existing = db
+    .prepare('SELECT id FROM hot_prospects WHERE id = ? AND email_client_id = ?')
+    .get(id, clientId);
+  if (!existing) {
+    return res.status(404).json({ error: 'prospect not found' });
+  }
+  db.prepare('DELETE FROM hot_prospects WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
+// GET /api/portal/hot-prospects/:id/thread — full email history with this
+// prospect, built live from email_replies + email_outbound. Tenant-scoped.
+router.get('/hot-prospects/:id/thread', (req, res) => {
+  const clientId = req.portalClient.id;
+  const id = String(req.params.id || '');
+  const prospect = db
+    .prepare(
+      `SELECT id, email_client_id, prospect_email, prospect_name,
+              follow_up_date, notes, added_by, added_at, updated_at
+         FROM hot_prospects WHERE id = ? AND email_client_id = ?`
+    )
+    .get(id, clientId);
+  if (!prospect) {
+    return res.status(404).json({ error: 'prospect not found' });
+  }
+
+  const inbound = db
+    .prepare(
+      `SELECT id, from_address, from_name, subject, body_text, body_html,
+              received_at, matched_campaign_id
+         FROM email_replies
+        WHERE email_client_id = ?
+          AND LOWER(from_address) = ?
+        ORDER BY received_at ASC`
+    )
+    .all(prospect.email_client_id, prospect.prospect_email);
+
+  const outbound = db
+    .prepare(
+      `SELECT id, from_address, to_address, subject, body_text, body_html,
+              sent_at, error
+         FROM email_outbound
+        WHERE email_client_id = ?
+          AND LOWER(to_address) = ?
+        ORDER BY sent_at ASC`
+    )
+    .all(prospect.email_client_id, prospect.prospect_email);
+
+  const merged = [
+    ...inbound.map(r => ({
+      kind: 'reply',
+      direction: 'inbound',
+      at: r.received_at,
+      id: r.id,
+      from_address: r.from_address,
+      from_name: r.from_name,
+      subject: r.subject,
+      body_text: r.body_text,
+      body_html: r.body_html,
+      matched_campaign_id: r.matched_campaign_id,
+    })),
+    ...outbound.map(o => ({
+      kind: 'outbound',
+      direction: 'outbound',
+      at: o.sent_at,
+      id: o.id,
+      from_address: o.from_address,
+      to_address: o.to_address,
+      subject: o.subject,
+      body_text: o.body_text,
+      body_html: o.body_html,
+      error: o.error,
+    })),
+  ].sort((a, b) => String(a.at).localeCompare(String(b.at)));
+
+  res.json({ prospect, thread: merged });
+});
+
 export default router;

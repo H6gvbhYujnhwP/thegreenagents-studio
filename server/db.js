@@ -1372,3 +1372,40 @@ db.exec(`
   );
   INSERT OR IGNORE INTO linkedin_settings (id) VALUES (1);
 `);
+
+// ── CRM — Hot Prospects ──────────────────────────────────────────────────────
+// One row per (customer, prospect-email). Adding the same prospect twice
+// updates the existing row rather than creating a duplicate (handled at the
+// route layer via INSERT ... ON CONFLICT, with a UNIQUE index here as the
+// belt-and-braces guarantee).
+//
+// added_by is a free-text string: 'admin:<username>' for admin-side adds,
+// 'portal:<client_user_id>' for portal-side adds, so the row's origin is
+// auditable forever.
+//
+// The email thread itself is NOT stored on this row — it's built live by
+// joining email_replies (inbound from this address) + email_outbound (sent
+// to this address) at read time. That way new mail auto-appears in the
+// thread without any sync work, matching the operator-confirmed design
+// (auto-update, append-only history exposure).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS hot_prospects (
+    id TEXT PRIMARY KEY,
+    email_client_id TEXT NOT NULL,
+    prospect_email TEXT NOT NULL,
+    prospect_name TEXT,
+    follow_up_date TEXT,              /* nullable; ISO date 'YYYY-MM-DD' */
+    notes TEXT,
+    added_by TEXT NOT NULL,           /* 'admin:<username>' or 'portal:<client_user_id>' */
+    added_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (email_client_id) REFERENCES email_clients(id)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_hot_prospects_client_email
+    ON hot_prospects(email_client_id, prospect_email);
+  CREATE INDEX IF NOT EXISTS idx_hot_prospects_client_added
+    ON hot_prospects(email_client_id, added_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_hot_prospects_follow_up
+    ON hot_prospects(email_client_id, follow_up_date)
+    WHERE follow_up_date IS NOT NULL;
+`);
