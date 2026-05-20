@@ -41,6 +41,7 @@ const BLUE_BG   = '#E6F1FB';
 const AMBER     = '#854F0B';
 const AMBER_BG  = '#FAEEDA';
 const DANGER    = '#A32D2D';
+const DANGER_BG = '#FCEBEB';
 
 // localStorage key for the last-selected customer id. Scoped so a future
 // CRM screen with a different table doesn't collide.
@@ -122,6 +123,10 @@ export default function CrmHotProspects() {
   const [selectedCustomerId, setSelectedCustomerId] = useState(null);
   const [prospects, setProspects] = useState(null);   // null = loading, [] = none
   const [hasLinkedInboxes, setHasLinkedInboxes] = useState(false); // server signal: show Inbox column?
+  // Sidebar/top-panel due counts — total across all customers. Refreshed
+  // alongside the prospect list and any mutation in the detail modal so
+  // marking-as-converted updates the panel without a page refresh.
+  const [dueCounts, setDueCounts] = useState({ overdue: 0, due_today: 0, total: 0 });
   const [search, setSearch] = useState('');
   const [openProspectId, setOpenProspectId] = useState(null);
   const [error, setError] = useState(null);
@@ -141,6 +146,10 @@ export default function CrmHotProspects() {
         if (!r.ok || d.error) { setError(d.error || `HTTP ${r.status}`); setCustomers([]); return; }
         const list = d.customers || [];
         setCustomers(list);
+        // Fire the due-counts fetch in parallel — independent of the
+        // customer-roster fetch above, so a slow roster query doesn't hold
+        // up the panel. Failure silently leaves dueCounts at zero.
+        fetchDueCounts();
         if (list.length === 0) return;
         const stored = localStorage.getItem(LAST_CUSTOMER_KEY);
         const found  = stored && list.find(c => c.id === stored);
@@ -161,7 +170,25 @@ export default function CrmHotProspects() {
       }
     })();
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Fetch the global due-counts (overdue + today) used by the top panel.
+  // Same endpoint feeds the sidebar badge but the sidebar polls separately;
+  // here we call it directly so the panel updates the instant a mutation
+  // refreshes the screen.
+  async function fetchDueCounts() {
+    try {
+      const r = await fetch('/api/email/hot-prospects/due-counts');
+      if (!r.ok) return;
+      const d = await r.json();
+      setDueCounts({
+        overdue: Number(d.overdue || 0),
+        due_today: Number(d.due_today || 0),
+        total: Number(d.total || 0),
+      });
+    } catch {}
+  }
 
   // Re-load prospects whenever the selected customer changes.
   useEffect(() => {
@@ -185,7 +212,10 @@ export default function CrmHotProspects() {
   }, [selectedCustomerId]);
 
   // Refresh both badges (for prospect_count) and prospect list after any
-  // detail-modal mutation (add / update / delete).
+  // detail-modal mutation (add / update / delete / mark-converted / reopen).
+  // Also re-fetches the global due-counts AND dispatches a cross-component
+  // event so the sidebar badge updates the moment the mutation lands —
+  // without waiting for the sidebar's own 30s poll.
   async function refreshAll() {
     try {
       const [cR, pR] = await Promise.all([
@@ -203,6 +233,8 @@ export default function CrmHotProspects() {
           setHasLinkedInboxes(!!pD.has_linked_inboxes);
         }
       }
+      fetchDueCounts();
+      try { window.dispatchEvent(new CustomEvent('studio:hot-prospects-changed')); } catch {}
     } catch {}
   }
 
@@ -264,6 +296,12 @@ export default function CrmHotProspects() {
           Couldn't load CRM: {error}
         </div>
       )}
+
+      {/* Top-of-CRM follow-up panel. Only renders when there are active
+          follow-ups due today or overdue across all customers — invisible
+          when there's nothing urgent. Aggregated count from the same
+          endpoint that drives the sidebar badge. */}
+      <FollowUpPanel counts={dueCounts} />
 
       <ProspectList
         prospects={filteredProspects}
@@ -393,16 +431,40 @@ function ProspectList({ prospects, onOpen, empty, showInboxColumn }) {
         <div />
       </div>
 
-      {prospects.map((p, idx) => (
-        <ProspectRow
-          key={p.id}
-          prospect={p}
-          isLast={idx === prospects.length - 1}
-          onOpen={() => onOpen(p.id)}
-          showInboxColumn={showInboxColumn}
-          gridCols={gridCols}
-        />
-      ))}
+      {(() => {
+        // Find the index of the first converted prospect — server already
+        // orders converted rows last, so this is just the first row with
+        // closed_at !== null. If none are converted, firstClosed === -1 and
+        // the divider isn't rendered.
+        const firstClosed = prospects.findIndex(p => p.closed_at);
+        const convertedCount = firstClosed >= 0 ? (prospects.length - firstClosed) : 0;
+        return prospects.map((p, idx) => {
+          const showDividerBefore = firstClosed >= 0 && idx === firstClosed;
+          return (
+            <React.Fragment key={p.id}>
+              {showDividerBefore && (
+                <div style={{
+                  padding:'8px 16px',
+                  background:'#f9faf7',
+                  fontSize:11,
+                  textTransform:'uppercase',
+                  letterSpacing:'0.5px',
+                  color:TERTIARY,
+                  borderTop:`0.5px solid ${BORDER}`,
+                  borderBottom:`0.5px solid ${BORDER}`,
+                }}>Converted ({convertedCount})</div>
+              )}
+              <ProspectRow
+                prospect={p}
+                isLast={idx === prospects.length - 1}
+                onOpen={() => onOpen(p.id)}
+                showInboxColumn={showInboxColumn}
+                gridCols={gridCols}
+              />
+            </React.Fragment>
+          );
+        });
+      })()}
     </div>
   );
 }
@@ -410,6 +472,7 @@ function ProspectList({ prospects, onOpen, empty, showInboxColumn }) {
 function ProspectRow({ prospect, isLast, onOpen, showInboxColumn, gridCols }) {
   const av = avatarColor(prospect.prospect_name || prospect.prospect_email);
   const fu = formatFollowUp(prospect.follow_up_date);
+  const isConverted = !!prospect.closed_at;
   return (
     <div
       onClick={onOpen}
@@ -419,6 +482,9 @@ function ProspectRow({ prospect, isLast, onOpen, showInboxColumn, gridCols }) {
         gap:12, padding:'14px 16px', alignItems:'center',
         borderBottom: isLast ? 'none' : `0.5px solid ${BORDER}`,
         cursor:'pointer',
+        // Faint tint on converted rows so they're visually de-emphasised
+        // without being hidden. Matches the mockup.
+        background: isConverted ? '#f9faf7' : 'transparent',
       }}
     >
       <div style={{ display:'flex', alignItems:'center', gap:10, minWidth:0 }}>
@@ -429,9 +495,21 @@ function ProspectRow({ prospect, isLast, onOpen, showInboxColumn, gridCols }) {
           fontSize:12, fontWeight:500, flexShrink:0,
         }}>{initials(prospect.prospect_name || prospect.prospect_email)}</div>
         <div style={{
-          fontSize:14, fontWeight:500, color:TEXT,
-          overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
-        }}>{prospect.prospect_name || <span style={{ color:MUTED, fontWeight:400 }}>(no name)</span>}</div>
+          display:'flex', alignItems:'center', gap:8, minWidth:0, flex:1,
+        }}>
+          <div style={{
+            fontSize:14, fontWeight:500, color:TEXT,
+            overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+            minWidth:0, flex:'0 1 auto',
+          }}>{prospect.prospect_name || <span style={{ color:MUTED, fontWeight:400 }}>(no name)</span>}</div>
+          {isConverted && (
+            <span style={{
+              background: GREEN_BG, color: GREEN_HI,
+              fontSize:11, padding:'1px 7px', borderRadius:999,
+              fontWeight:500, flexShrink:0,
+            }}>✓ Converted</span>
+          )}
+        </div>
       </div>
       <div style={{
         fontSize:13, color:MUTED,
@@ -456,6 +534,35 @@ function ProspectRow({ prospect, isLast, onOpen, showInboxColumn, gridCols }) {
   );
 }
 
+// ── Top-of-CRM follow-up panel ───────────────────────────────────────────────
+// Renders the urgent-count summary above the prospect list. Hidden entirely
+// when there's nothing to action — no value in showing "0 follow-ups". Counts
+// here are global (across all customers) to match the sidebar badge.
+
+function FollowUpPanel({ counts }) {
+  const { overdue, due_today: dueToday, total } = counts || { overdue:0, due_today:0, total:0 };
+  if (!total) return null;
+  // Color: red if anything overdue, amber if only-today.
+  const urgent = overdue > 0;
+  const bg = urgent ? DANGER_BG : AMBER_BG;
+  const borderColor = urgent ? '#F09595' : '#EF9F27';
+  const textColor = urgent ? '#501313' : '#412402';
+  // Compose a single sentence describing the state.
+  const parts = [];
+  if (overdue > 0)  parts.push(`${overdue} overdue`);
+  if (dueToday > 0) parts.push(`${dueToday} due today`);
+  return (
+    <div style={{
+      background: bg, border:`0.5px solid ${borderColor}`,
+      borderRadius:8, padding:'12px 16px', marginBottom:14,
+      fontSize:13, color: textColor,
+    }}>
+      <strong style={{ fontWeight:500 }}>{total} follow-up{total===1?'':'s'} need{total===1?'s':''} attention.</strong>{' '}
+      {parts.join(', ')}.
+    </div>
+  );
+}
+
 // ── Prospect detail modal ────────────────────────────────────────────────────
 
 function ProspectDetailModal({ prospectId, onClose, onChange }) {
@@ -466,6 +573,11 @@ function ProspectDetailModal({ prospectId, onClose, onChange }) {
   const [savingState, setSavingState] = useState(''); // '', 'saving', 'saved'
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState(null);
+  // Tracks the mark-as-converted / reopen network call. Single state — only
+  // one of the two buttons is visible at a time (depends on closed_at), so
+  // one busy flag covers both transitions.
+  const [markBusy, setMarkBusy] = useState(false);
+  const [markError, setMarkError] = useState(null);
 
   // Fetch the prospect + its thread on open.
   useEffect(() => {
@@ -535,6 +647,50 @@ function ProspectDetailModal({ prospectId, onClose, onChange }) {
     return () => clearTimeout(t);
   }, [followUp, notes, prospectId, data, onChange]);
 
+  async function markAsConverted() {
+    if (markBusy) return;
+    setMarkBusy(true);
+    setMarkError(null);
+    try {
+      const r = await fetch(`/api/email/hot-prospects/${encodeURIComponent(prospectId)}/mark-converted`, { method: 'POST' });
+      const d = await r.json();
+      if (!r.ok || d.error) {
+        setMarkError(d.error || `HTTP ${r.status}`);
+        setMarkBusy(false);
+        return;
+      }
+      // Update the local data in-place so the modal swaps to its converted
+      // state (banner + Reopen button) without re-fetching.
+      setData(prev => prev ? { ...prev, prospect: d.prospect } : prev);
+      setMarkBusy(false);
+      onChange();   // refresh badges + list + sidebar event
+    } catch (e) {
+      setMarkError(String(e.message || e));
+      setMarkBusy(false);
+    }
+  }
+
+  async function reopenAsActive() {
+    if (markBusy) return;
+    setMarkBusy(true);
+    setMarkError(null);
+    try {
+      const r = await fetch(`/api/email/hot-prospects/${encodeURIComponent(prospectId)}/reopen`, { method: 'POST' });
+      const d = await r.json();
+      if (!r.ok || d.error) {
+        setMarkError(d.error || `HTTP ${r.status}`);
+        setMarkBusy(false);
+        return;
+      }
+      setData(prev => prev ? { ...prev, prospect: d.prospect } : prev);
+      setMarkBusy(false);
+      onChange();
+    } catch (e) {
+      setMarkError(String(e.message || e));
+      setMarkBusy(false);
+    }
+  }
+
   async function removeFromList() {
     if (!confirm('Remove this prospect from your Hot Prospects list?')) return;
     setRemoveBusy(true);
@@ -572,18 +728,52 @@ function ProspectDetailModal({ prospectId, onClose, onChange }) {
           onRemove={removeFromList}
           removeBusy={removeBusy}
           removeError={removeError}
+          onMarkConverted={markAsConverted}
+          onReopen={reopenAsActive}
+          markBusy={markBusy}
+          markError={markError}
         />
       )}
     </ModalShell>
   );
 }
 
-function DetailBody({ data, followUp, setFollowUp, notes, setNotes, savingState, onRemove, removeBusy, removeError }) {
+function DetailBody({ data, followUp, setFollowUp, notes, setNotes, savingState, onRemove, removeBusy, removeError, onMarkConverted, onReopen, markBusy, markError }) {
   const p = data.prospect;
   const av = avatarColor(p.prospect_name || p.prospect_email);
+  const isConverted = !!p.closed_at;
+
+  // Pretty-print the closed_at for the banner. Stored as 'YYYY-MM-DD HH:MM:SS'
+  // in UTC; the relativeTime helper already handles that format gracefully.
+  // We also include a friendly absolute date.
+  function formatClosedAt(s) {
+    if (!s) return '';
+    try {
+      const d = new Date(String(s).replace(' ', 'T') + 'Z');
+      if (isNaN(d.getTime())) return s;
+      return d.toLocaleDateString('en-GB', { weekday:'short', day:'numeric', month:'short' }) +
+             ' at ' +
+             d.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
+    } catch { return s; }
+  }
 
   return (
     <div>
+      {/* Converted banner — only when the prospect is closed. Shows when +
+          by whom. Hidden while active. */}
+      {isConverted && (
+        <div style={{
+          background: GREEN_BG, border:`0.5px solid #9FE1CB`,
+          borderRadius:8, padding:'10px 14px', marginBottom:14,
+          fontSize:13, color: GREEN_HI,
+        }}>
+          <strong style={{ fontWeight:500 }}>✓ Converted</strong> on {formatClosedAt(p.closed_at)}
+          {p.closed_by && (
+            <> by {(p.closed_by || '').startsWith('portal:') ? 'customer' : 'admin'}</>
+          )}.
+        </div>
+      )}
+
       {/* Header */}
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:16, marginBottom:16 }}>
         <div style={{ display:'flex', alignItems:'center', gap:14, minWidth:0 }}>
@@ -611,21 +801,61 @@ function DetailBody({ data, followUp, setFollowUp, notes, setNotes, savingState,
             )}
           </div>
         </div>
-        <button
-          onClick={onRemove}
-          disabled={removeBusy}
-          style={{
-            background:'#fdecea', color:DANGER, border:'none',
-            borderRadius:7, padding:'7px 14px', fontSize:13, fontWeight:500,
-            cursor: removeBusy ? 'not-allowed' : 'pointer',
-            opacity: removeBusy ? 0.6 : 1,
-            display:'flex', alignItems:'center', gap:6,
-            fontFamily:'inherit',
-          }}
-        >
-          🗑 Remove from list
-        </button>
+        <div style={{ display:'flex', alignItems:'center', gap:8, flexShrink:0 }}>
+          {isConverted ? (
+            <button
+              onClick={onReopen}
+              disabled={markBusy}
+              style={{
+                background:'transparent', color: GREEN_HI,
+                border:`0.5px solid ${GREEN_HI}`,
+                borderRadius:7, padding:'7px 12px', fontSize:13, fontWeight:500,
+                cursor: markBusy ? 'not-allowed' : 'pointer',
+                opacity: markBusy ? 0.6 : 1,
+                fontFamily:'inherit',
+              }}
+            >
+              {markBusy ? 'Reopening…' : 'Reopen as active'}
+            </button>
+          ) : (
+            <button
+              onClick={onMarkConverted}
+              disabled={markBusy}
+              style={{
+                background: GREEN_HI, color:'#fff',
+                border:'none',
+                borderRadius:7, padding:'7px 12px', fontSize:13, fontWeight:500,
+                cursor: markBusy ? 'not-allowed' : 'pointer',
+                opacity: markBusy ? 0.6 : 1,
+                display:'flex', alignItems:'center', gap:6,
+                fontFamily:'inherit',
+              }}
+            >
+              {markBusy ? 'Saving…' : '✓ Mark as converted'}
+            </button>
+          )}
+          <button
+            onClick={onRemove}
+            disabled={removeBusy}
+            style={{
+              background:'#fdecea', color:DANGER, border:'none',
+              borderRadius:7, padding:'7px 14px', fontSize:13, fontWeight:500,
+              cursor: removeBusy ? 'not-allowed' : 'pointer',
+              opacity: removeBusy ? 0.6 : 1,
+              display:'flex', alignItems:'center', gap:6,
+              fontFamily:'inherit',
+            }}
+          >
+            🗑 Remove
+          </button>
+        </div>
       </div>
+
+      {markError && (
+        <div style={{ background:'#fdecea', borderLeft:`3px solid ${DANGER}`, borderRadius:6, padding:'8px 12px', marginBottom:12, fontSize:12, color:DANGER }}>
+          {markError}
+        </div>
+      )}
 
       {removeError && (
         <div style={{ background:'#fdecea', borderLeft:`3px solid ${DANGER}`, borderRadius:6, padding:'8px 12px', marginBottom:12, fontSize:12, color:DANGER }}>

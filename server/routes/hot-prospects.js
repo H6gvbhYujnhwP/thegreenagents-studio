@@ -177,27 +177,53 @@ router.get('/', (req, res) => {
   const inClient = inClause('email_client_id', linkedIds);
 
   const search = String(req.query.search || '').trim().toLowerCase();
+  // Ordering: urgent active (overdue + due today) first, then other active
+  // rows (newest added first), then converted rows at the bottom (most-
+  // recently converted first). The CASE block produces a numeric sort key:
+  //   0 = active and overdue (follow_up_date < today)
+  //   1 = active and due today (follow_up_date == today)
+  //   2 = active otherwise
+  //   3 = converted (closed_at IS NOT NULL)
+  // Within each bucket we sort by follow_up_date ASC where it applies (so
+  // the most-overdue comes first inside bucket 0), then added_at DESC as a
+  // stable tiebreak. date('now') is UTC in SQLite — see project note about
+  // timezone handling; for follow-up urgency UTC midnight is "good enough"
+  // (slightly aggressive in BST but not wrong).
+  const orderBy = `
+    CASE
+      WHEN closed_at IS NOT NULL THEN 3
+      WHEN follow_up_date IS NULL THEN 2
+      WHEN follow_up_date < date('now') THEN 0
+      WHEN follow_up_date = date('now') THEN 1
+      ELSE 2
+    END ASC,
+    follow_up_date ASC,
+    closed_at DESC,
+    added_at DESC
+  `;
   let rows;
   if (search) {
     const like = `%${search}%`;
     rows = db
       .prepare(
         `SELECT id, email_client_id, prospect_email, prospect_name,
-                follow_up_date, notes, added_by, added_at, updated_at
+                follow_up_date, notes, added_by, added_at, updated_at,
+                closed_at, closed_by
            FROM hot_prospects
           WHERE ${inClient.sql}
             AND (LOWER(COALESCE(prospect_name,'')) LIKE ? OR LOWER(prospect_email) LIKE ?)
-          ORDER BY added_at DESC`
+          ORDER BY ${orderBy}`
       )
       .all(...inClient.params, like, like);
   } else {
     rows = db
       .prepare(
         `SELECT id, email_client_id, prospect_email, prospect_name,
-                follow_up_date, notes, added_by, added_at, updated_at
+                follow_up_date, notes, added_by, added_at, updated_at,
+                closed_at, closed_by
            FROM hot_prospects
           WHERE ${inClient.sql}
-          ORDER BY added_at DESC`
+          ORDER BY ${orderBy}`
       )
       .all(...inClient.params);
   }
@@ -262,20 +288,23 @@ router.get('/customers', (req, res) => {
       ec.logo_url,
       (
         SELECT COUNT(*) FROM hot_prospects hp
-        WHERE hp.email_client_id = ec.id
-           OR hp.email_client_id IN (
-                SELECT cs.linked_external_id FROM customer_services cs
-                WHERE cs.email_client_id = ec.id
-                  AND cs.service_key = 'email'
-                  AND cs.linked_external_id IS NOT NULL
-                  AND cs.linked_external_id != cs.email_client_id
-              )
-           OR hp.email_client_id IN (
-                SELECT cs2.email_client_id FROM customer_services cs2
-                WHERE cs2.linked_external_id = ec.id
-                  AND cs2.service_key = 'email'
-                  AND cs2.linked_external_id != cs2.email_client_id
-              )
+        WHERE hp.closed_at IS NULL  /* active only — converted prospects don't count toward the badge */
+          AND (
+                hp.email_client_id = ec.id
+             OR hp.email_client_id IN (
+                  SELECT cs.linked_external_id FROM customer_services cs
+                  WHERE cs.email_client_id = ec.id
+                    AND cs.service_key = 'email'
+                    AND cs.linked_external_id IS NOT NULL
+                    AND cs.linked_external_id != cs.email_client_id
+                )
+             OR hp.email_client_id IN (
+                  SELECT cs2.email_client_id FROM customer_services cs2
+                  WHERE cs2.linked_external_id = ec.id
+                    AND cs2.service_key = 'email'
+                    AND cs2.linked_external_id != cs2.email_client_id
+                )
+          )
       ) AS prospect_count
     FROM email_clients ec
     WHERE (ec.source IS NULL
@@ -395,7 +424,8 @@ router.post('/', (req, res) => {
       notes          = COALESCE(excluded.notes, hot_prospects.notes),
       updated_at     = excluded.updated_at
     RETURNING id, email_client_id, prospect_email, prospect_name,
-              follow_up_date, notes, added_by, added_at, updated_at
+              follow_up_date, notes, added_by, added_at, updated_at,
+              closed_at, closed_by
   `);
 
   const row = stmt.get(
@@ -469,12 +499,111 @@ router.put('/:id', (req, res) => {
   const row = db
     .prepare(
       `SELECT id, email_client_id, prospect_email, prospect_name,
-              follow_up_date, notes, added_by, added_at, updated_at
+              follow_up_date, notes, added_by, added_at, updated_at,
+              closed_at, closed_by
          FROM hot_prospects WHERE id = ?`
     )
     .get(id);
 
   res.json({ prospect: row });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/email/hot-prospects/:id/mark-converted
+//
+// Mark a prospect as converted (became a real customer). Stamps closed_at +
+// closed_by. No-op (and returns success) if the prospect is already converted
+// — calling this on an already-closed row is harmless and idempotent.
+//
+// Converted prospects keep all their data — only their position in the list
+// (pushed to bottom under a Converted divider) and the sidebar/panel badge
+// counts change. They can be reopened via /reopen below.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/:id/mark-converted', (req, res) => {
+  const id = String(req.params.id || '');
+  const existing = db
+    .prepare('SELECT * FROM hot_prospects WHERE id = ?')
+    .get(id);
+  if (!existing) {
+    return res.status(404).json({ error: 'prospect not found' });
+  }
+
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  db.prepare(`
+    UPDATE hot_prospects
+       SET closed_at = COALESCE(closed_at, ?),
+           closed_by = COALESCE(closed_by, ?),
+           updated_at = ?
+     WHERE id = ?
+  `).run(now, 'admin', now, id);
+
+  const row = db
+    .prepare(
+      `SELECT id, email_client_id, prospect_email, prospect_name,
+              follow_up_date, notes, added_by, added_at, updated_at,
+              closed_at, closed_by
+         FROM hot_prospects WHERE id = ?`
+    )
+    .get(id);
+  res.json({ prospect: row });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/email/hot-prospects/:id/reopen
+//
+// Reverse a mark-converted. Clears closed_at + closed_by so the prospect goes
+// back to being active. The follow-up date (if any) and notes are preserved.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/:id/reopen', (req, res) => {
+  const id = String(req.params.id || '');
+  const existing = db
+    .prepare('SELECT id FROM hot_prospects WHERE id = ?')
+    .get(id);
+  if (!existing) {
+    return res.status(404).json({ error: 'prospect not found' });
+  }
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  db.prepare(`
+    UPDATE hot_prospects
+       SET closed_at = NULL, closed_by = NULL, updated_at = ?
+     WHERE id = ?
+  `).run(now, id);
+  const row = db
+    .prepare(
+      `SELECT id, email_client_id, prospect_email, prospect_name,
+              follow_up_date, notes, added_by, added_at, updated_at,
+              closed_at, closed_by
+         FROM hot_prospects WHERE id = ?`
+    )
+    .get(id);
+  res.json({ prospect: row });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/email/hot-prospects/due-counts
+//
+// Powers the admin sidebar badge: { overdue: N, due_today: M, total: N+M }.
+// Counts active (non-converted) prospects across ALL customers — admin's
+// badge is a "you have something to do somewhere in the CRM" nudge, not a
+// per-customer count. The customers list separately exposes prospect_count
+// per card for the in-screen per-customer counts.
+//
+// Light query: scans only hot_prospects with a non-null follow_up_date that's
+// today or earlier and closed_at IS NULL. Partial indexes keep this fast.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/due-counts', (req, res) => {
+  const row = db.prepare(`
+    SELECT
+      SUM(CASE WHEN follow_up_date < date('now') THEN 1 ELSE 0 END) AS overdue,
+      SUM(CASE WHEN follow_up_date = date('now') THEN 1 ELSE 0 END) AS due_today
+    FROM hot_prospects
+    WHERE closed_at IS NULL
+      AND follow_up_date IS NOT NULL
+      AND follow_up_date <= date('now')
+  `).get();
+  const overdue = Number(row?.overdue || 0);
+  const dueToday = Number(row?.due_today || 0);
+  res.json({ overdue, due_today: dueToday, total: overdue + dueToday });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -515,7 +644,8 @@ router.get('/:id/thread', (req, res) => {
   const prospect = db
     .prepare(
       `SELECT id, email_client_id, prospect_email, prospect_name,
-              follow_up_date, notes, added_by, added_at, updated_at
+              follow_up_date, notes, added_by, added_at, updated_at,
+              closed_at, closed_by
          FROM hot_prospects WHERE id = ?`
     )
     .get(id);

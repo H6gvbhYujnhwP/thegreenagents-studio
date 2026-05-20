@@ -1451,27 +1451,43 @@ router.get('/hot-prospects', (req, res) => {
   const inClient = _inClause('email_client_id', linkedIds);
 
   const search = String(req.query.search || '').trim().toLowerCase();
+  // Same urgency-first → converted-last ordering as the admin side.
+  // See routes/hot-prospects.js GET '/' for the explanation.
+  const orderBy = `
+    CASE
+      WHEN closed_at IS NOT NULL THEN 3
+      WHEN follow_up_date IS NULL THEN 2
+      WHEN follow_up_date < date('now') THEN 0
+      WHEN follow_up_date = date('now') THEN 1
+      ELSE 2
+    END ASC,
+    follow_up_date ASC,
+    closed_at DESC,
+    added_at DESC
+  `;
   let rows;
   if (search) {
     const like = `%${search}%`;
     rows = db
       .prepare(
         `SELECT id, email_client_id, prospect_email, prospect_name,
-                follow_up_date, notes, added_by, added_at, updated_at
+                follow_up_date, notes, added_by, added_at, updated_at,
+                closed_at, closed_by
            FROM hot_prospects
           WHERE ${inClient.sql}
             AND (LOWER(COALESCE(prospect_name,'')) LIKE ? OR LOWER(prospect_email) LIKE ?)
-          ORDER BY added_at DESC`
+          ORDER BY ${orderBy}`
       )
       .all(...inClient.params, like, like);
   } else {
     rows = db
       .prepare(
         `SELECT id, email_client_id, prospect_email, prospect_name,
-                follow_up_date, notes, added_by, added_at, updated_at
+                follow_up_date, notes, added_by, added_at, updated_at,
+                closed_at, closed_by
            FROM hot_prospects
           WHERE ${inClient.sql}
-          ORDER BY added_at DESC`
+          ORDER BY ${orderBy}`
       )
       .all(...inClient.params);
   }
@@ -1566,7 +1582,8 @@ router.post('/hot-prospects', (req, res) => {
       notes          = COALESCE(excluded.notes, hot_prospects.notes),
       updated_at     = excluded.updated_at
     RETURNING id, email_client_id, prospect_email, prospect_name,
-              follow_up_date, notes, added_by, added_at, updated_at
+              follow_up_date, notes, added_by, added_at, updated_at,
+              closed_at, closed_by
   `);
   const row = stmt.get(
     id, inboxOwningId, prospectEmail, resolvedName,
@@ -1627,11 +1644,96 @@ router.put('/hot-prospects/:id', (req, res) => {
   const row = db
     .prepare(
       `SELECT id, email_client_id, prospect_email, prospect_name,
-              follow_up_date, notes, added_by, added_at, updated_at
+              follow_up_date, notes, added_by, added_at, updated_at,
+              closed_at, closed_by
          FROM hot_prospects WHERE id = ?`
     )
     .get(id);
   res.json({ prospect: row });
+});
+
+// POST /api/portal/hot-prospects/:id/mark-converted — mark as converted.
+// Tenant-scoped across the customer's linked set. Idempotent: calling on an
+// already-closed row preserves the original closed_at/closed_by.
+router.post('/hot-prospects/:id/mark-converted', (req, res) => {
+  const clientId = req.portalClient.id;
+  const id = String(req.params.id || '');
+  const linkedIds = _resolveProspectLinkedSet(clientId);
+  const inOwn = _inClause('email_client_id', linkedIds);
+  const existing = db
+    .prepare(`SELECT id FROM hot_prospects WHERE id = ? AND ${inOwn.sql}`)
+    .get(id, ...inOwn.params);
+  if (!existing) {
+    return res.status(404).json({ error: 'prospect not found' });
+  }
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const closedBy = `portal:${req.portalUser.id}`;
+  db.prepare(`
+    UPDATE hot_prospects
+       SET closed_at = COALESCE(closed_at, ?),
+           closed_by = COALESCE(closed_by, ?),
+           updated_at = ?
+     WHERE id = ?
+  `).run(now, closedBy, now, id);
+  const row = db
+    .prepare(
+      `SELECT id, email_client_id, prospect_email, prospect_name,
+              follow_up_date, notes, added_by, added_at, updated_at,
+              closed_at, closed_by
+         FROM hot_prospects WHERE id = ?`
+    )
+    .get(id);
+  res.json({ prospect: row });
+});
+
+// POST /api/portal/hot-prospects/:id/reopen — undo a mark-converted.
+router.post('/hot-prospects/:id/reopen', (req, res) => {
+  const clientId = req.portalClient.id;
+  const id = String(req.params.id || '');
+  const linkedIds = _resolveProspectLinkedSet(clientId);
+  const inOwn = _inClause('email_client_id', linkedIds);
+  const existing = db
+    .prepare(`SELECT id FROM hot_prospects WHERE id = ? AND ${inOwn.sql}`)
+    .get(id, ...inOwn.params);
+  if (!existing) {
+    return res.status(404).json({ error: 'prospect not found' });
+  }
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  db.prepare(`
+    UPDATE hot_prospects
+       SET closed_at = NULL, closed_by = NULL, updated_at = ?
+     WHERE id = ?
+  `).run(now, id);
+  const row = db
+    .prepare(
+      `SELECT id, email_client_id, prospect_email, prospect_name,
+              follow_up_date, notes, added_by, added_at, updated_at,
+              closed_at, closed_by
+         FROM hot_prospects WHERE id = ?`
+    )
+    .get(id);
+  res.json({ prospect: row });
+});
+
+// GET /api/portal/hot-prospects/due-counts — sidebar badge counts. Scoped
+// to the customer's linked set, so portal counts reflect only this customer.
+router.get('/hot-prospects/due-counts', (req, res) => {
+  const clientId = req.portalClient.id;
+  const linkedIds = _resolveProspectLinkedSet(clientId);
+  const inOwn = _inClause('email_client_id', linkedIds);
+  const row = db.prepare(`
+    SELECT
+      SUM(CASE WHEN follow_up_date < date('now') THEN 1 ELSE 0 END) AS overdue,
+      SUM(CASE WHEN follow_up_date = date('now') THEN 1 ELSE 0 END) AS due_today
+    FROM hot_prospects
+    WHERE ${inOwn.sql}
+      AND closed_at IS NULL
+      AND follow_up_date IS NOT NULL
+      AND follow_up_date <= date('now')
+  `).get(...inOwn.params);
+  const overdue = Number(row?.overdue || 0);
+  const dueToday = Number(row?.due_today || 0);
+  res.json({ overdue, due_today: dueToday, total: overdue + dueToday });
 });
 
 // DELETE /api/portal/hot-prospects/:id — remove from list. Tenant-scoped
@@ -1666,7 +1768,8 @@ router.get('/hot-prospects/:id/thread', (req, res) => {
   const prospect = db
     .prepare(
       `SELECT id, email_client_id, prospect_email, prospect_name,
-              follow_up_date, notes, added_by, added_at, updated_at
+              follow_up_date, notes, added_by, added_at, updated_at,
+              closed_at, closed_by
          FROM hot_prospects WHERE id = ? AND ${inOwn.sql}`
     )
     .get(id, ...inOwn.params);

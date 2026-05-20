@@ -460,6 +460,34 @@ function PortalChrome({ user, client, services, onLogout }) {
     setPage('hot_prospects');
   }
 
+  // Live due-follow-ups badge for the Hot Prospects nav item. Counts overdue
+  // + due-today across this customer's linked email rows (scoped by the
+  // server, not aggregated like admin). Refreshes on a 30s tick and also
+  // listens for an in-app event the CRM screen dispatches when prospects are
+  // mutated, so the badge drops the instant the customer marks a prospect
+  // converted (no waiting for the next tick).
+  const [hotProspectsDue, setHotProspectsDue] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchDue() {
+      try {
+        const r = await fetch('/api/portal/hot-prospects/due-counts', { credentials:'include' });
+        if (!r.ok) return;
+        const d = await r.json();
+        if (!cancelled) setHotProspectsDue(Number(d.total || 0));
+      } catch {} // backend not yet deployed — silently ignore
+    }
+    fetchDue();
+    const t = setInterval(fetchDue, 30_000);
+    function onMutation() { fetchDue(); }
+    window.addEventListener('studio:hot-prospects-changed', onMutation);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+      window.removeEventListener('studio:hot-prospects-changed', onMutation);
+    };
+  }, []);
+
   // The portal sidebar always shows EVERY service (per Wez's locked-in
   // pre-decision — discoverability over hidden tabs). What changes is what
   // each tab renders inside, based on the `services` object from the server.
@@ -561,6 +589,7 @@ function PortalChrome({ user, client, services, onLogout }) {
             <NavItem label="Hot Prospects"
               active={page==='hot_prospects'}
               onClick={() => setPage('hot_prospects')}
+              badge={hotProspectsDue}
             />
           </NavSection>
 
@@ -754,7 +783,7 @@ function NavSection({ heading, children }) {
   );
 }
 
-function NavItem({ label, active, onClick, dim, suffix }) {
+function NavItem({ label, active, onClick, dim, suffix, badge }) {
   const [hover, setHover] = useState(false);
   return (
     <button onClick={onClick}
@@ -772,6 +801,16 @@ function NavItem({ label, active, onClick, dim, suffix }) {
         width:'100%',
       }}>
       <span style={{ flex:1 }}>{label}</span>
+      {/* Urgent count badge — red pill (matches admin sidebar's urgent badge
+          variant). Only renders when badge > 0. Used by Hot Prospects to
+          surface overdue + due-today follow-ups. */}
+      {badge > 0 && (
+        <span style={{
+          background:'#A32D2D', color:'#fff', fontSize:10, fontWeight:600,
+          padding:'1px 6px', borderRadius:8, minWidth:14, textAlign:'center',
+          lineHeight:1.4,
+        }}>{badge}</span>
+      )}
       {suffix && (
         <span style={{
           fontSize:9, fontWeight:500, padding:'1px 6px',
@@ -2384,6 +2423,10 @@ function ComposeReplyModal({ reply, onClose, onSend }) {
 function PortalHotProspects({ autoOpenProspectId, onAutoOpenConsumed }) {
   const [prospects, setProspects] = useState(null);  // null = loading
   const [hasLinkedInboxes, setHasLinkedInboxes] = useState(false);
+  // Top-of-CRM panel counts. Same shape as the admin side. Scoped to this
+  // customer (server enforces). Fetched in parallel with the list and again
+  // on any mutation refresh.
+  const [dueCounts, setDueCounts] = useState({ overdue: 0, due_today: 0, total: 0 });
   const [search, setSearch]       = useState('');
   const [openProspectId, setOpenProspectId] = useState(null);
   const [error, setError]         = useState(null);
@@ -2401,7 +2444,26 @@ function PortalHotProspects({ autoOpenProspectId, onAutoOpenConsumed }) {
       setHasLinkedInboxes(false);
     }
   }
-  useEffect(() => { load(); }, []);
+  async function loadDueCounts() {
+    try {
+      const r = await fetch('/api/portal/hot-prospects/due-counts', { credentials:'include' });
+      if (!r.ok) return;
+      const d = await r.json();
+      setDueCounts({
+        overdue: Number(d.overdue || 0),
+        due_today: Number(d.due_today || 0),
+        total: Number(d.total || 0),
+      });
+    } catch {}
+  }
+  // Combined refresh after any detail-modal mutation. Also dispatches the
+  // sidebar event so the PortalChrome NavItem badge updates immediately
+  // (no waiting for its own 30s tick).
+  async function refreshAll() {
+    await Promise.all([load(), loadDueCounts()]);
+    try { window.dispatchEvent(new CustomEvent('studio:hot-prospects-changed')); } catch {}
+  }
+  useEffect(() => { load(); loadDueCounts(); }, []);
 
   // Consume the one-shot auto-open prospect id passed in by the chrome
   // (originating from the inbox's "Open in CRM" link). Clear the handoff
@@ -2461,6 +2523,11 @@ function PortalHotProspects({ autoOpenProspectId, onAutoOpenConsumed }) {
         }}>Couldn't load Hot Prospects: {error}</div>
       )}
 
+      {/* Top-of-CRM follow-up panel. Renders only when there are urgent
+          (overdue or due-today) follow-ups for this customer. Invisible
+          when there's nothing to action. */}
+      <PortalFollowUpPanel counts={dueCounts} />
+
       {prospects === null ? (
         <div style={{ fontSize:13, color:MUTED, padding:'20px 0' }}>Loading prospects…</div>
       ) : prospects.length === 0 ? (
@@ -2483,9 +2550,34 @@ function PortalHotProspects({ autoOpenProspectId, onAutoOpenConsumed }) {
         <PortalProspectDetailModal
           prospectId={openProspectId}
           onClose={() => setOpenProspectId(null)}
-          onChange={load}
+          onChange={refreshAll}
         />
       )}
+    </div>
+  );
+}
+
+// Top-of-CRM follow-up panel (portal mirror of CrmHotProspects' FollowUpPanel).
+// Renders red when anything's overdue, amber when only today is due. Hidden
+// when total === 0.
+function PortalFollowUpPanel({ counts }) {
+  const { overdue, due_today: dueToday, total } = counts || { overdue:0, due_today:0, total:0 };
+  if (!total) return null;
+  const urgent = overdue > 0;
+  const bg = urgent ? '#FCEBEB' : '#FAEEDA';
+  const borderColor = urgent ? '#F09595' : '#EF9F27';
+  const textColor = urgent ? '#501313' : '#412402';
+  const parts = [];
+  if (overdue > 0)  parts.push(`${overdue} overdue`);
+  if (dueToday > 0) parts.push(`${dueToday} due today`);
+  return (
+    <div style={{
+      background: bg, border:`0.5px solid ${borderColor}`,
+      borderRadius:8, padding:'12px 16px', marginBottom:14,
+      fontSize:13, color: textColor,
+    }}>
+      <strong style={{ fontWeight:500 }}>{total} follow-up{total===1?'':'s'} need{total===1?'s':''} attention.</strong>{' '}
+      {parts.join(', ')}.
     </div>
   );
 }
@@ -2573,28 +2665,55 @@ function PortalProspectList({ prospects, onOpen, showInboxColumn }) {
         <div>Follow up</div>
         <div />
       </div>
-      {prospects.map((p, idx) => (
-        <PortalProspectRow
-          key={p.id}
-          prospect={p}
-          isLast={idx === prospects.length - 1}
-          onOpen={() => onOpen(p.id)}
-          showInboxColumn={showInboxColumn}
-          gridCols={gridCols}
-        />
-      ))}
+      {(() => {
+        // Server orders converted rows last — find the index of the first
+        // converted row to insert the "Converted (N)" divider. If none are
+        // converted, firstClosed === -1 and the divider isn't rendered.
+        const firstClosed = prospects.findIndex(p => p.closed_at);
+        const convertedCount = firstClosed >= 0 ? (prospects.length - firstClosed) : 0;
+        return prospects.map((p, idx) => {
+          const showDividerBefore = firstClosed >= 0 && idx === firstClosed;
+          return (
+            <React.Fragment key={p.id}>
+              {showDividerBefore && (
+                <div style={{
+                  padding:'8px 16px',
+                  background:'#f9faf7',
+                  fontSize:11,
+                  textTransform:'uppercase',
+                  letterSpacing:'0.5px',
+                  color:'#888780',
+                  borderTop:`0.5px solid ${BORDER}`,
+                  borderBottom:`0.5px solid ${BORDER}`,
+                }}>Converted ({convertedCount})</div>
+              )}
+              <PortalProspectRow
+                prospect={p}
+                isLast={idx === prospects.length - 1}
+                onOpen={() => onOpen(p.id)}
+                showInboxColumn={showInboxColumn}
+                gridCols={gridCols}
+              />
+            </React.Fragment>
+          );
+        });
+      })()}
     </div>
   );
 }
 function PortalProspectRow({ prospect, isLast, onOpen, showInboxColumn, gridCols }) {
   const av = portalAvatarColor(prospect.prospect_name || prospect.prospect_email);
   const fu = portalFollowUpFormat(prospect.follow_up_date);
+  const isConverted = !!prospect.closed_at;
   return (
     <div onClick={onOpen} style={{
       display:'grid', gridTemplateColumns: gridCols,
       gap:12, padding:'14px 16px', alignItems:'center',
       borderBottom: isLast ? 'none' : `0.5px solid ${BORDER}`,
       cursor:'pointer',
+      // Faint tint on converted rows so they're visually de-emphasised
+      // without being hidden. Matches the admin side.
+      background: isConverted ? '#f9faf7' : 'transparent',
     }}>
       <div style={{ display:'flex', alignItems:'center', gap:10, minWidth:0 }}>
         <div style={{
@@ -2604,9 +2723,21 @@ function PortalProspectRow({ prospect, isLast, onOpen, showInboxColumn, gridCols
           fontSize:12, fontWeight:500, flexShrink:0,
         }}>{portalInitials(prospect.prospect_name || prospect.prospect_email)}</div>
         <div style={{
-          fontSize:14, fontWeight:500, color:TEXT,
-          overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
-        }}>{prospect.prospect_name || <span style={{ color:MUTED, fontWeight:400 }}>(no name)</span>}</div>
+          display:'flex', alignItems:'center', gap:8, minWidth:0, flex:1,
+        }}>
+          <div style={{
+            fontSize:14, fontWeight:500, color:TEXT,
+            overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
+            minWidth:0, flex:'0 1 auto',
+          }}>{prospect.prospect_name || <span style={{ color:MUTED, fontWeight:400 }}>(no name)</span>}</div>
+          {isConverted && (
+            <span style={{
+              background: GREEN_BG, color: GREEN,
+              fontSize:11, padding:'1px 7px', borderRadius:999,
+              fontWeight:500, flexShrink:0,
+            }}>✓ Converted</span>
+          )}
+        </div>
       </div>
       <div style={{ fontSize:13, color:MUTED, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{prospect.prospect_email}</div>
       {showInboxColumn && (
@@ -2635,6 +2766,11 @@ function PortalProspectDetailModal({ prospectId, onClose, onChange }) {
   const [savingState, setSavingState] = useState(''); // '', 'saving', 'saved', 'error'
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState(null);
+  // Mark-as-converted / Reopen network state. Single busy flag covers both
+  // transitions — only one of the two buttons is visible at a time depending
+  // on closed_at.
+  const [markBusy, setMarkBusy] = useState(false);
+  const [markError, setMarkError] = useState(null);
 
   // Fetch the prospect + thread on open.
   useEffect(() => {
@@ -2694,6 +2830,52 @@ function PortalProspectDetailModal({ prospectId, onClose, onChange }) {
     return () => clearTimeout(t);
   }, [followUp, notes, prospectId, data, onChange]);
 
+  async function markAsConverted() {
+    if (markBusy) return;
+    setMarkBusy(true);
+    setMarkError(null);
+    try {
+      const r = await fetch(`/api/portal/hot-prospects/${encodeURIComponent(prospectId)}/mark-converted`, {
+        method:'POST', credentials:'include',
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.error) {
+        setMarkError(d.error || `HTTP ${r.status}`);
+        setMarkBusy(false);
+        return;
+      }
+      setData(prev => prev ? { ...prev, prospect: d.prospect } : prev);
+      setMarkBusy(false);
+      if (onChange) onChange();
+    } catch (e) {
+      setMarkError(String(e.message || e));
+      setMarkBusy(false);
+    }
+  }
+
+  async function reopenAsActive() {
+    if (markBusy) return;
+    setMarkBusy(true);
+    setMarkError(null);
+    try {
+      const r = await fetch(`/api/portal/hot-prospects/${encodeURIComponent(prospectId)}/reopen`, {
+        method:'POST', credentials:'include',
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.error) {
+        setMarkError(d.error || `HTTP ${r.status}`);
+        setMarkBusy(false);
+        return;
+      }
+      setData(prev => prev ? { ...prev, prospect: d.prospect } : prev);
+      setMarkBusy(false);
+      if (onChange) onChange();
+    } catch (e) {
+      setMarkError(String(e.message || e));
+      setMarkBusy(false);
+    }
+  }
+
   async function removeFromList() {
     if (!confirm('Remove this prospect from your Hot Prospects list?')) return;
     setRemoveBusy(true);
@@ -2733,17 +2915,48 @@ function PortalProspectDetailModal({ prospectId, onClose, onChange }) {
           onRemove={removeFromList}
           removeBusy={removeBusy}
           removeError={removeError}
+          onMarkConverted={markAsConverted}
+          onReopen={reopenAsActive}
+          markBusy={markBusy}
+          markError={markError}
         />
       )}
     </Modal>
   );
 }
 
-function PortalProspectDetailBody({ data, followUp, setFollowUp, notes, setNotes, savingState, onRemove, removeBusy, removeError }) {
+function PortalProspectDetailBody({ data, followUp, setFollowUp, notes, setNotes, savingState, onRemove, removeBusy, removeError, onMarkConverted, onReopen, markBusy, markError }) {
   const p = data.prospect;
   const av = portalAvatarColor(p.prospect_name || p.prospect_email);
+  const isConverted = !!p.closed_at;
+
+  function formatClosedAt(s) {
+    if (!s) return '';
+    try {
+      const d = new Date(String(s).replace(' ', 'T') + 'Z');
+      if (isNaN(d.getTime())) return s;
+      return d.toLocaleDateString('en-GB', { weekday:'short', day:'numeric', month:'short' }) +
+             ' at ' +
+             d.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
+    } catch { return s; }
+  }
+
   return (
     <div>
+      {/* Converted banner — only when the prospect is closed. */}
+      {isConverted && (
+        <div style={{
+          background: GREEN_BG, border:`0.5px solid #9FE1CB`,
+          borderRadius:8, padding:'10px 14px', marginBottom:14,
+          fontSize:13, color: GREEN,
+        }}>
+          <strong style={{ fontWeight:500 }}>✓ Converted</strong> on {formatClosedAt(p.closed_at)}
+          {p.closed_by && (
+            <> by {(p.closed_by || '').startsWith('portal:') ? 'you' : 'admin'}</>
+          )}.
+        </div>
+      )}
+
       {/* Header */}
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:16, marginBottom:16 }}>
         <div style={{ display:'flex', alignItems:'center', gap:14, minWidth:0 }}>
@@ -2771,19 +2984,55 @@ function PortalProspectDetailBody({ data, followUp, setFollowUp, notes, setNotes
             )}
           </div>
         </div>
-        <button
-          onClick={onRemove}
-          disabled={removeBusy}
-          style={{
-            background:'#fdecea', color:DANGER, border:'none',
-            borderRadius:7, padding:'7px 14px', fontSize:13, fontWeight:500,
-            cursor: removeBusy ? 'not-allowed' : 'pointer',
-            opacity: removeBusy ? 0.6 : 1,
-            display:'flex', alignItems:'center', gap:6,
-            fontFamily:'inherit',
-          }}
-        >🗑 Remove from list</button>
+        <div style={{ display:'flex', alignItems:'center', gap:8, flexShrink:0 }}>
+          {isConverted ? (
+            <button
+              onClick={onReopen}
+              disabled={markBusy}
+              style={{
+                background:'transparent', color: GREEN,
+                border:`0.5px solid ${GREEN}`,
+                borderRadius:7, padding:'7px 12px', fontSize:13, fontWeight:500,
+                cursor: markBusy ? 'not-allowed' : 'pointer',
+                opacity: markBusy ? 0.6 : 1,
+                fontFamily:'inherit',
+              }}
+            >{markBusy ? 'Reopening…' : 'Reopen as active'}</button>
+          ) : (
+            <button
+              onClick={onMarkConverted}
+              disabled={markBusy}
+              style={{
+                background: GREEN, color:'#fff',
+                border:'none',
+                borderRadius:7, padding:'7px 12px', fontSize:13, fontWeight:500,
+                cursor: markBusy ? 'not-allowed' : 'pointer',
+                opacity: markBusy ? 0.6 : 1,
+                display:'flex', alignItems:'center', gap:6,
+                fontFamily:'inherit',
+              }}
+            >{markBusy ? 'Saving…' : '✓ Mark as converted'}</button>
+          )}
+          <button
+            onClick={onRemove}
+            disabled={removeBusy}
+            style={{
+              background:'#fdecea', color:DANGER, border:'none',
+              borderRadius:7, padding:'7px 14px', fontSize:13, fontWeight:500,
+              cursor: removeBusy ? 'not-allowed' : 'pointer',
+              opacity: removeBusy ? 0.6 : 1,
+              display:'flex', alignItems:'center', gap:6,
+              fontFamily:'inherit',
+            }}
+          >🗑 Remove</button>
+        </div>
       </div>
+
+      {markError && (
+        <div style={{ background:'#fdecea', borderLeft:`3px solid ${DANGER}`, borderRadius:6, padding:'8px 12px', marginBottom:12, fontSize:12, color:DANGER }}>
+          {markError}
+        </div>
+      )}
 
       {removeError && (
         <div style={{ background:'#fdecea', borderLeft:`3px solid ${DANGER}`, borderRadius:6, padding:'8px 12px', marginBottom:12, fontSize:12, color:DANGER }}>

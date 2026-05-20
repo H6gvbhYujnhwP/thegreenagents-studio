@@ -8,6 +8,12 @@ export default function Sidebar({ onLogout, activeView, onNavigate }) {
   // Refreshes every 30s while the app is open. Gracefully handles failure
   // (e.g. backend not yet deployed) by hiding the badge.
   const [prospectCount, setProspectCount] = useState(0);
+  // Live due-follow-up badge for the Hot Prospects menu item — total of
+  // overdue + due-today, across all customers (admin-side is mission-control
+  // across the whole roster, so the badge aggregates rather than scoping to
+  // a single customer). Marked-converted prospects are excluded from the
+  // count automatically by the server-side WHERE closed_at IS NULL.
+  const [hotProspectsDue, setHotProspectsDue] = useState(0);
   useEffect(() => {
     let cancelled = false;
     async function fetchCount() {
@@ -18,9 +24,30 @@ export default function Sidebar({ onLogout, activeView, onNavigate }) {
         if (!cancelled) setProspectCount(d.new_prospects || 0);
       } catch {} // backend not yet deployed — silently ignore
     }
+    async function fetchHotProspectsDue() {
+      try {
+        const r = await fetch('/api/email/hot-prospects/due-counts');
+        if (!r.ok) return;
+        const d = await r.json();
+        if (!cancelled) setHotProspectsDue(Number(d.total || 0));
+      } catch {}
+    }
     fetchCount();
-    const t = setInterval(fetchCount, 30_000);
-    return () => { cancelled = true; clearInterval(t); };
+    fetchHotProspectsDue();
+    const t = setInterval(() => {
+      fetchCount();
+      fetchHotProspectsDue();
+    }, 30_000);
+    // Also listen for an in-app event that other screens can dispatch when
+    // they mutate hot-prospects (mark converted, add, delete, etc.) so the
+    // badge updates without waiting for the next 30s tick.
+    function onMutation() { fetchHotProspectsDue(); }
+    window.addEventListener('studio:hot-prospects-changed', onMutation);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+      window.removeEventListener('studio:hot-prospects-changed', onMutation);
+    };
   }, []);
 
   return (
@@ -69,7 +96,7 @@ export default function Sidebar({ onLogout, activeView, onNavigate }) {
             to add more later (Warm prospects, Lost deals, etc.) without
             another sidebar rearrange. */}
         <div style={SECTION}>CRM</div>
-        <SubItem id="crm-hot-prospects"   label="Hot Prospects"    active={activeView==='crm-hot-prospects'} onNavigate={onNavigate} icon={<HotProspectsIcon />} />
+        <SubItem id="crm-hot-prospects"   label="Hot Prospects"    active={activeView==='crm-hot-prospects'} onNavigate={onNavigate} icon={<HotProspectsIcon />} badge={hotProspectsDue} badgeUrgent />
 
         <hr style={DIVIDER} />
 
@@ -107,7 +134,11 @@ function NavItem({ id, label, active, onNavigate, icon, dim, suffix }) {
   );
 }
 
-function SubItem({ id, label, active, onNavigate, icon, badge }) {
+function SubItem({ id, label, active, onNavigate, icon, badge, badgeUrgent }) {
+  // badgeUrgent uses the danger-red colour to signal "needs attention" (used
+  // by Hot Prospects for overdue + due-today follow-ups). Default badge style
+  // is the original calm green (used by Mailboxes for new-prospect counts).
+  const badgeBg = badgeUrgent ? '#A32D2D' : '#1D9E75';
   return (
     <button onClick={()=>onNavigate(id)} style={{
       display:'flex', alignItems:'center', gap:9, width:'100%',
@@ -118,7 +149,7 @@ function SubItem({ id, label, active, onNavigate, icon, badge }) {
       color:active?'#fff':'rgba(255,255,255,0.65)', fontSize:11, textAlign:'left', cursor:'pointer'
     }}>
       {icon}<span style={{flex:1}}>{label}</span>
-      {badge>0 && <span style={{ background:'#1D9E75', color:'#fff', fontSize:10, fontWeight:600, padding:'1px 6px', borderRadius:8, minWidth:14, textAlign:'center', lineHeight:1.4 }}>{badge}</span>}
+      {badge>0 && <span style={{ background:badgeBg, color:'#fff', fontSize:10, fontWeight:600, padding:'1px 6px', borderRadius:8, minWidth:14, textAlign:'center', lineHeight:1.4 }}>{badge}</span>}
     </button>
   );
 }

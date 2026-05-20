@@ -1409,3 +1409,29 @@ db.exec(`
     ON hot_prospects(email_client_id, follow_up_date)
     WHERE follow_up_date IS NOT NULL;
 `);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Migration: hot_prospects.closed_at + closed_by  (decision 2026-05-20, third
+// session — "Mark as converted")
+//
+// `closed_at`  — ISO datetime when the prospect was marked converted (i.e.
+//                became a real customer). NULL means active.
+// `closed_by`  — actor identifier: 'admin' or 'portal:<client_user_id>'.
+//
+// Both nullable; existing rows stay active by default (NULL). Idempotent
+// ALTER pattern: try the ADD COLUMN, swallow the "duplicate column" error
+// SQLite throws when it's already been applied on a previous boot. Matches
+// the pattern already used elsewhere in this file for additive columns.
+// ─────────────────────────────────────────────────────────────────────────────
+try { db.exec(`ALTER TABLE hot_prospects ADD COLUMN closed_at TEXT`); } catch {}
+try { db.exec(`ALTER TABLE hot_prospects ADD COLUMN closed_by TEXT`); } catch {}
+
+// Partial index for the badge/list "is this row converted?" filter.
+// WHERE closed_at IS NOT NULL means the index only stores rows that ARE
+// converted — fast lookups for "converted prospects" without bloating the
+// index with the much larger active-prospects population.
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_hot_prospects_closed_at
+    ON hot_prospects(email_client_id, closed_at)
+    WHERE closed_at IS NOT NULL;
+`);
