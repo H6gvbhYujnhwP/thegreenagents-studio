@@ -202,31 +202,75 @@ async function pollOneInbox(inbox) {
 
         let matchedSubscriberId = null;
         let matchedCampaignId = null;
+
+        // Normalise a message-id for lookup. Inbound replies carry the full
+        // RFC 5322 form: '<0110019e...-000000@eu-north-1.amazonses.com>'.
+        // Our email_sends.message_id stores SES's local id without angle
+        // brackets and without the '@domain' suffix:
+        //   '0110019e...-000000'
+        // So we strip both angle brackets AND everything from '@' onwards
+        // before lookup. Also retain the original-stripped form for an
+        // exact match in case some SES paths DO store the @domain.
+        //
+        // Three-shot lookup per id:
+        //   (1) prefix (no '@domain') — exact match
+        //   (2) original-stripped (might include @domain) — exact match
+        //   (3) prefix LIKE 'prefix%' — defence-in-depth in case the
+        //       stored value has odd formatting we haven't seen yet
+        function lookupSendByMessageId(rawId) {
+          if (!rawId) return null;
+          const stripped = rawId.replace(/[<>]/g, '').trim();
+          const prefix   = stripped.split('@')[0];
+
+          // (1) prefix exact
+          let row = db.prepare(
+            "SELECT subscriber_id, campaign_id FROM email_sends WHERE message_id = ?"
+          ).get(prefix);
+          if (row) return row;
+
+          // (2) original-stripped exact
+          if (stripped !== prefix) {
+            row = db.prepare(
+              "SELECT subscriber_id, campaign_id FROM email_sends WHERE message_id = ?"
+            ).get(stripped);
+            if (row) return row;
+          }
+
+          // (3) prefix LIKE — covers cases where we stored 'prefix@...'
+          //     or any other suffix variation.
+          row = db.prepare(
+            "SELECT subscriber_id, campaign_id FROM email_sends WHERE message_id LIKE ?"
+          ).get(prefix + '%');
+          return row || null;
+        }
+
         if (inReplyTo) {
-          const cleanId = inReplyTo.replace(/[<>]/g, '');
-          const sendRow = db.prepare(
-            "SELECT subscriber_id, campaign_id FROM email_sends WHERE message_id = ? OR message_id = ?"
-          ).get(cleanId, '<' + cleanId + '>');
-          if (sendRow) {
-            matchedSubscriberId = sendRow.subscriber_id;
-            matchedCampaignId = sendRow.campaign_id;
+          const row = lookupSendByMessageId(inReplyTo);
+          if (row) {
+            matchedSubscriberId = row.subscriber_id;
+            matchedCampaignId = row.campaign_id;
           }
         }
-        if (!matchedSubscriberId && refsHeader) {
-          const refIds = refsHeader.split(/\s+/).map(r => r.replace(/[<>]/g, '')).filter(Boolean);
+        if (!matchedCampaignId && refsHeader) {
+          const refIds = refsHeader.split(/\s+/).filter(Boolean);
           for (const refId of refIds) {
-            const sendRow = db.prepare(
-              "SELECT subscriber_id, campaign_id FROM email_sends WHERE message_id = ?"
-            ).get(refId);
-            if (sendRow) {
-              matchedSubscriberId = sendRow.subscriber_id;
-              matchedCampaignId = sendRow.campaign_id;
+            const row = lookupSendByMessageId(refId);
+            if (row) {
+              matchedSubscriberId = row.subscriber_id;
+              matchedCampaignId = row.campaign_id;
               break;
             }
           }
         }
-        // Fall back: match by sender email to any subscriber on this client's lists.
-        // Catches replies where threading headers were stripped by gateways.
+        // Fall back: match by sender email to any subscriber on this client's
+        // lists. Catches replies where threading headers were stripped by
+        // gateways. CRITICAL: when we find a subscriber match, we also look
+        // up that subscriber's MOST RECENT send and stamp matched_campaign_id
+        // — without it, the customer portal can't tell which campaign the
+        // reply belongs to and the reply gets the misleading "Normal email"
+        // label (decision #52's gate behaves correctly downstream — auto-unsub
+        // already requires matched_campaign_id — but the UI surface still
+        // treats it as non-campaign mail).
         if (!matchedSubscriberId && parsed.from?.value?.[0]?.address) {
           const fromAddr = parsed.from.value[0].address.toLowerCase();
           const subRow = db.prepare(`
@@ -235,7 +279,17 @@ async function pollOneInbox(inbox) {
             WHERE LOWER(s.email) = ? AND l.email_client_id = ?
             ORDER BY s.created_at DESC LIMIT 1
           `).get(fromAddr, inbox.email_client_id);
-          if (subRow) matchedSubscriberId = subRow.id;
+          if (subRow) {
+            matchedSubscriberId = subRow.id;
+            // Stamp the most recent campaign this subscriber was sent so the
+            // customer portal can label the reply with its campaign title.
+            const latestSend = db.prepare(`
+              SELECT campaign_id FROM email_sends
+              WHERE subscriber_id = ?
+              ORDER BY sent_at DESC LIMIT 1
+            `).get(matchedSubscriberId);
+            if (latestSend) matchedCampaignId = latestSend.campaign_id;
+          }
         }
 
         const fromValue = parsed.from?.value?.[0] || {};

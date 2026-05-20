@@ -110,6 +110,27 @@ async function classifyPending() {
     const needAI = [];
     for (const reply of pending) {
       try {
+        // Pre-pass: Formspree mail is NEVER a campaign reply. It's either a
+        // customer's website form submission (auto-flagged to Hot Prospects by
+        // formspree-flagger.js) or Formspree's own product newsletter. Either
+        // way the classifier should not run — Haiku has been observed labelling
+        // form-submission bodies as 'soft_negative'/'hard_negative' which is
+        // both wrong and (if the row had a matched_campaign_id) would trigger
+        // an inappropriate auto-unsubscribe. Set neutral with a clear reason
+        // so the row doesn't reprocess and the customer portal shows it as
+        // normal mail rather than a flagged negative reply.
+        const fromAddrLc = (reply.from_address || '').toLowerCase();
+        if (fromAddrLc.endsWith('@formspree.io')) {
+          await applyClassification(reply, {
+            classification: 'neutral',
+            confidence: 1.0,
+            reason: 'Formspree mail — not a campaign reply (skipped classification)',
+          });
+          stats.byPass.regex++;  // count as a regex-tier skip
+          stats.processed++;
+          continue;
+        }
+
         const r1 = classifyByRegex(reply);
         if (r1) {
           await applyClassification(reply, r1);
