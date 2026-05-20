@@ -9,6 +9,9 @@
  *     AND whose subject matches the lead-keyword list (same detector as
  *     the live poller hook)
  *   - For each match, re-parses the body to extract prospect email + name
+ *   - Skips any row whose parsed email matches the customer's own mailbox
+ *     or sending domain (same filter the live hook applies — see isOwnAddress
+ *     in formspree-flagger.js)
  *   - Upserts into hot_prospects via the same path the live hook uses
  *     (so duplicates safely refresh existing rows rather than creating
  *     a second one)
@@ -23,7 +26,13 @@
  */
 
 import db from '../db.js';
-import { isFormspreeLead, parseFormspreeBody, localPartToName, upsertProspectAuto } from '../services/formspree-flagger.js';
+import {
+  isFormspreeLead,
+  parseFormspreeBody,
+  localPartToName,
+  upsertProspectAuto,
+  isOwnAddress,
+} from '../services/formspree-flagger.js';
 
 console.log('[backfill] starting Formspree-prospect sweep…');
 const startedAt = Date.now();
@@ -44,6 +53,7 @@ let flagged = 0;
 let updated = 0;
 let skippedNotLead = 0;
 let skippedNoEmail = 0;
+let skippedOwnAddress = 0;
 
 for (const r of rows) {
   // Build the minimal parsed-shape the detector expects.
@@ -62,7 +72,16 @@ for (const r of rows) {
   const { email, name } = parseFormspreeBody(r.body_text, r.body_html);
   if (!email) {
     skippedNoEmail++;
-    console.warn(`[backfill] no email parseable from reply ${r.id} — subject="${r.subject || ''}"`);
+    console.warn(`[backfill] no LABELLED email parseable from reply ${r.id} — subject="${r.subject || ''}"`);
+    continue;
+  }
+
+  // Second defence: skip the customer's own mailbox or any address on a
+  // domain they send from. Catches the same junk-row class that the parser
+  // tightening is also designed to prevent.
+  if (isOwnAddress(r.email_client_id, email)) {
+    skippedOwnAddress++;
+    console.log(`[backfill]   skipping own-address ${email} for client=${r.email_client_id} (reply ${r.id})`);
     continue;
   }
 
@@ -87,6 +106,6 @@ for (const r of rows) {
 }
 
 const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-console.log(`[backfill] done in ${elapsed}s — added=${flagged}, refreshed=${updated}, skipped(not_lead)=${skippedNotLead}, skipped(no_email)=${skippedNoEmail}, total_rows_seen=${rows.length}`);
+console.log(`[backfill] done in ${elapsed}s — added=${flagged}, refreshed=${updated}, skipped(not_lead)=${skippedNotLead}, skipped(no_email)=${skippedNoEmail}, skipped(own_address)=${skippedOwnAddress}, total_rows_seen=${rows.length}`);
 
 process.exit(0);

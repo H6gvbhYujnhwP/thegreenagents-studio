@@ -15,24 +15,31 @@
  *   own product newsletter) is NOT a lead and must be ignored. The keyword
  *   list is conservative; extend it as new form types appear.
  *
- * - Parse extracts the prospect's email from the body. We look for the
- *   FIRST line containing both an email-shaped string AND a label that
- *   suggests it's the submitter's address (e.g. "email:", "Email:",
- *   "your email"). Falls back to "any email-shaped string in the body that
- *   isn't @formspree.io or @edpgroup.co.uk-style internal-looking addresses".
- *   If we can't extract an email at all, the email is skipped — we log it
- *   but never write a garbage row. The Render log line lets us spot patterns
- *   the parser misses so we can tighten rules over time.
+ * - PARSER IS LABELLED-ONLY — no bare-email fallback. (Tightened 2026-05-20
+ *   fifth session after the bare fallback grabbed `mailbox: kevin@...` on
+ *   the EDP website-enquiry template — the form's own destination mailbox,
+ *   not the submitter. See blueprint lesson #68: "the bare-fallback in a
+ *   parser is where junk creeps in.") If we can't find a properly-labelled
+ *   email field we skip the row and log it — better to miss than to add
+ *   wrong. The log line lets us notice new templates that need parser
+ *   support.
+ *
+ * - LABEL/VALUE CAN BE SAME-LINE OR TWO-LINE. EDP's catalogue-download
+ *   template is "name: Wez" on one line. EDP's website-enquiry template
+ *   has the label on its own line and the value on the next. Both forms
+ *   are accepted.
+ *
+ * - OWN-MAILBOX / OWN-DOMAIN FILTER as a second defence. Even if a parser
+ *   bug ever resurrects the wrong-field problem, we won't write a junk row
+ *   for the customer's own mailbox address or any sending domain they own.
+ *   See `isOwnAddress()` below.
  *
  * - Name preference order: parsed from body → email local-part with
- *   title-casing → null (which is fine; the table allows null name). In
- *   practice the body parse covers EDP's catalogue and form templates so
- *   the local-part fallback is rare.
+ *   title-casing → null (which is fine; the table allows null name).
  *
  * - added_by = 'auto:formspree' (a new actor value). The CRM frontend
  *   currently shows 'admin' vs 'portal:*'; this just becomes another value
- *   so the audit trail is clean. No frontend changes required — the badge
- *   row already renders whatever string is in the column.
+ *   so the audit trail is clean.
  *
  * - Upsert behaviour matches the existing /api/email/hot-prospects POST
  *   route exactly (INSERT ON CONFLICT DO UPDATE), so re-flagging an
@@ -61,8 +68,8 @@ const FORMSPREE_SENDER_RE = /@formspree\.io$/i;
 // "Formspree" alone — their newsletter ("Enrich Your Leads with Formspree")
 // matches that but isn't a lead.
 //
-// Conservative list; extend as new form templates surface. Each entry is a
-// substring (case-insensitive). Customer form templates we've seen so far:
+// Conservative list; extend as new form templates surface. Customer form
+// templates we've seen so far:
 //   - "EDP catalogue download — ..." (EDP)
 //   - "EDP website enquiry — ..." (EDP)
 // Generic patterns added: "form submission", "new submission", "contact form".
@@ -99,24 +106,24 @@ export function isFormspreeLead(parsed) {
 // ─── Body parsing ────────────────────────────────────────────────────────────
 
 // Email regex — kept simple; we strip surrounding punctuation when matching.
-// Excludes nothing — even @formspree.io can match, the higher level filters it.
 const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
 
-// Email regex (global) for the "scan whole body" fallback.
-const EMAIL_RE_GLOBAL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
-
-// Labels that suggest "this is the submitter's email". Case-insensitive.
-// We accept "email:", "Email :", "your email", "email address", etc.
-const EMAIL_LABEL_RE = /(^|\s)(your[\s_-]?email|email[\s_-]?address|email|e-?mail)[\s:_-]*$/i;
+// Labels that mean "this is the SUBMITTER's email" — the prospect we want
+// to flag. We deliberately do NOT include "mailbox" (that's the form's
+// destination address, i.e. the customer's own inbox) or "_replyto" alone
+// (Formspree config field that can echo the form owner's address).
+//
+// Accepted forms include "email:", "Email :", "your email", "email address".
+const EMAIL_LABEL_RE =
+  /^\s*(your[\s_-]?email|email[\s_-]?address|email|e-?mail|from[\s_-]?email)\s*:?\s*$/i;
 
 // Labels that suggest "this is the submitter's name".
-const NAME_LABEL_RE = /(^|\s)(your[\s_-]?name|name|full[\s_-]?name|contact[\s_-]?name)[\s:_-]*$/i;
+const NAME_LABEL_RE =
+  /^\s*(your[\s_-]?name|name|full[\s_-]?name|contact[\s_-]?name|from[\s_-]?name)\s*:?\s*$/i;
 
-// Senders to ignore when picking an email from the body — addresses that are
-// obviously infrastructure rather than the submitter. (Formspree itself, and
-// noreply-style addresses.) Anything matching this is skipped during the
-// scan-whole-body fallback.
-const INFRASTRUCTURE_SENDER_RE = /^(noreply|no-reply|donotreply|do-not-reply|mailer-daemon|postmaster)@|@formspree\.io$/i;
+// Addresses to ignore even if labelled — infrastructure / sender-side noise.
+const INFRASTRUCTURE_SENDER_RE =
+  /^(noreply|no-reply|donotreply|do-not-reply|mailer-daemon|postmaster)@|@formspree\.io$/i;
 
 /**
  * Title-case an email local-part for use as a name fallback.
@@ -131,7 +138,6 @@ export function localPartToName(email) {
   if (/^\d+$/.test(local)) return null;
   if (local.length < 2) return null;
 
-  // Split on common separators, keep alphabetic chunks, title-case each.
   const parts = local
     .split(/[._\-+]/)
     .filter(p => /[a-zA-Z]/.test(p))
@@ -143,18 +149,20 @@ export function localPartToName(email) {
 /**
  * Parse a Formspree submission body to extract the submitter's email + name.
  *
- * Strategy:
- *   1. Scan the plain-text body line by line. For each line that looks like
- *      "Label: value", check if the label is an email or name label and the
- *      value matches the expected shape.
- *   2. If no labelled email was found, fall back to the FIRST email-shaped
- *      string in the body that isn't an infrastructure address.
- *   3. Name comes from a labelled name field if found, otherwise null (the
- *      caller will fall back to local-part title-casing).
+ * Strategy — LABELLED ONLY, no bare-email fallback:
+ *   1. Split into trimmed non-empty lines.
+ *   2. For each line, treat it as a potential label/value pair in either of:
+ *        (a) SAME-LINE  — "label: value"     (catalogue-download template)
+ *        (b) TWO-LINE   — "label:" or "label" on one line, value on the next
+ *                         (website-enquiry template)
+ *      An email field is only accepted if its label matches EMAIL_LABEL_RE
+ *      (deliberately excludes "mailbox" — that's the destination, not the
+ *      submitter). Same for name labels.
+ *   3. If no labelled email is found, return { email: null, name: null } —
+ *      the caller will skip and log. We prefer missing a row to writing
+ *      a wrong one.
  *
- * Returns { email, name } — email may be null if nothing parseable was found.
- * Name may be null too (caller decides what to do).
- *
+ * Returns { email, name }. Email is lowercased. Name may be null.
  * Never throws — body might be HTML-only, encoded weirdly, etc.
  */
 export function parseFormspreeBody(bodyText, bodyHtml) {
@@ -183,48 +191,125 @@ export function parseFormspreeBody(bodyText, bodyHtml) {
   let labelledEmail = null;
   let labelledName = null;
 
-  // Pass 1: look for "label: value" pairs.
-  for (const line of lines) {
-    // Split on first colon — labels are short.
-    const colonIdx = line.indexOf(':');
-    if (colonIdx < 1 || colonIdx > 40) continue;
-    const label = line.slice(0, colonIdx);
-    const value = line.slice(colonIdx + 1).trim();
-    if (!value) continue;
+  /**
+   * Try to read a label off a line. Returns 'email' | 'name' | null.
+   * Accepts the label with or without a trailing colon, since the two-line
+   * template has the colon on the label line ("email:") OR sometimes not.
+   */
+  const labelKind = (line) => {
+    if (EMAIL_LABEL_RE.test(line)) return 'email';
+    if (NAME_LABEL_RE.test(line)) return 'name';
+    return null;
+  };
 
-    // Email field?
-    if (!labelledEmail && EMAIL_LABEL_RE.test(label)) {
-      const m = value.match(EMAIL_RE);
+  /**
+   * Attempt to read a same-line "label: value". Returns { kind, value } or null.
+   * Only fires when there's a colon AND something non-empty after it.
+   */
+  const readSameLine = (line) => {
+    const colonIdx = line.indexOf(':');
+    if (colonIdx < 1 || colonIdx > 40) return null;
+    const label = line.slice(0, colonIdx).trim();
+    const value = line.slice(colonIdx + 1).trim();
+    if (!value) return null;
+    if (EMAIL_LABEL_RE.test(label)) return { kind: 'email', value };
+    if (NAME_LABEL_RE.test(label)) return { kind: 'name', value };
+    return null;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // First, try same-line "label: value".
+    const sameLine = readSameLine(line);
+    if (sameLine) {
+      if (sameLine.kind === 'email' && !labelledEmail) {
+        const m = sameLine.value.match(EMAIL_RE);
+        if (m && !INFRASTRUCTURE_SENDER_RE.test(m[0])) {
+          labelledEmail = m[0].toLowerCase();
+        }
+      } else if (sameLine.kind === 'name' && !labelledName) {
+        const clean = sameLine.value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        if (clean && clean.length <= 120) labelledName = clean;
+      }
+      if (labelledEmail && labelledName) break;
+      continue;
+    }
+
+    // Second, try two-line: this line is a bare label, value is the next line.
+    const kind = labelKind(line);
+    if (!kind) continue;
+    const next = lines[i + 1];
+    if (!next) continue;
+
+    if (kind === 'email' && !labelledEmail) {
+      const m = next.match(EMAIL_RE);
       if (m && !INFRASTRUCTURE_SENDER_RE.test(m[0])) {
         labelledEmail = m[0].toLowerCase();
       }
+    } else if (kind === 'name' && !labelledName) {
+      const clean = next.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      if (clean && clean.length <= 120) labelledName = clean;
     }
-    // Name field?
-    if (!labelledName && NAME_LABEL_RE.test(label)) {
-      // Strip any trailing field markers ("_replyto" etc) and HTML residue.
-      const clean = value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-      if (clean && clean.length <= 120) {
-        labelledName = clean;
-      }
-    }
-
     if (labelledEmail && labelledName) break;
   }
 
-  // Pass 2: if we didn't find a labelled email, take the first email-shaped
-  // string in the body that isn't infrastructure.
-  let email = labelledEmail;
-  if (!email) {
-    const matches = text.match(EMAIL_RE_GLOBAL) || [];
-    for (const m of matches) {
-      if (!INFRASTRUCTURE_SENDER_RE.test(m)) {
-        email = m.toLowerCase();
-        break;
-      }
-    }
-  }
+  return { email: labelledEmail, name: labelledName };
+}
 
-  return { email, name: labelledName };
+// ─── Own-mailbox / own-domain filter ─────────────────────────────────────────
+
+/**
+ * Returns true if `prospectEmail` is one of the customer's own addresses
+ * — either an exact match for a connected `email_inboxes` address, or its
+ * domain matches a domain the customer sends from (the host portion of any
+ * `email_brands.from_email` or `email_lists.from_email` row tied to the
+ * same email_client_id).
+ *
+ * Used as a second defence in case the parser ever picks the wrong field
+ * again. Returns true to mean SKIP THIS EMAIL.
+ *
+ * Never throws — on any DB error, returns false (fail open, prefer false
+ * negatives to crashing the poller). Logs the error.
+ */
+export function isOwnAddress(emailClientId, prospectEmail) {
+  if (!emailClientId || !prospectEmail) return false;
+  try {
+    const lower = String(prospectEmail).toLowerCase();
+    const at = lower.indexOf('@');
+    if (at < 1) return false;
+    const domain = lower.slice(at + 1);
+
+    // Exact match: any connected mailbox address for this email_client_id.
+    const inbox = db
+      .prepare(
+        'SELECT 1 FROM email_inboxes WHERE email_client_id = ? AND LOWER(email_address) = ? LIMIT 1'
+      )
+      .get(emailClientId, lower);
+    if (inbox) return true;
+
+    // Domain match: any send-from address tied to this email_client_id.
+    // Look at both email_brands and email_lists. Compare on the host portion.
+    const fromRows = db
+      .prepare(`
+        SELECT from_email FROM email_brands WHERE email_client_id = ?
+        UNION
+        SELECT from_email FROM email_lists  WHERE email_client_id = ?
+      `)
+      .all(emailClientId, emailClientId);
+
+    for (const row of fromRows) {
+      const fe = String(row.from_email || '').toLowerCase();
+      const feAt = fe.indexOf('@');
+      if (feAt < 0) continue;
+      const feDomain = fe.slice(feAt + 1);
+      if (feDomain && feDomain === domain) return true;
+    }
+    return false;
+  } catch (err) {
+    console.error(`[formspree-flagger] isOwnAddress check failed: ${err.message}`);
+    return false;
+  }
 }
 
 // ─── Upsert into hot_prospects ───────────────────────────────────────────────
@@ -284,8 +369,9 @@ export function upsertProspectAuto({ emailClientId, prospectEmail, prospectName 
  *   - emailClientId: inbox.email_client_id from the poller
  *
  * Returns one of:
- *   - { action: 'skipped', reason: '...' }   not a Formspree lead, or product newsletter
- *   - { action: 'no_email' }                  was a lead but couldn't parse a prospect email
+ *   - { action: 'skipped', reason: '...' }   not a Formspree lead, or product newsletter,
+ *                                             or own mailbox/domain
+ *   - { action: 'no_email' }                  was a lead but couldn't parse a labelled email
  *   - { action: 'flagged', was_new, prospect_email, prospect_name }
  *
  * Never throws.
@@ -297,8 +383,21 @@ export function processFormspreeLead(parsed, emailClientId) {
 
   const { email, name } = parseFormspreeBody(parsed.text, parsed.html);
   if (!email) {
-    console.warn(`[formspree-flagger] Lead detected but no parseable email — subject="${parsed.subject || ''}", inbox client=${emailClientId}`);
+    console.warn(
+      `[formspree-flagger] Lead detected but no LABELLED email — subject="${parsed.subject || ''}", inbox client=${emailClientId}. ` +
+      `Parser only accepts labelled email fields (no bare-email fallback). Check whether this is a new template that needs label support.`
+    );
     return { action: 'no_email' };
+  }
+
+  // Second defence: never flag the customer's own mailbox or a domain they
+  // send from. If the parser ever picks the wrong field again, this catches it.
+  if (isOwnAddress(emailClientId, email)) {
+    console.log(
+      `[formspree-flagger] Skipping own-address ${email} for client=${emailClientId} ` +
+      `(matches a connected mailbox or sending domain — not a real prospect).`
+    );
+    return { action: 'skipped', reason: 'own_address' };
   }
 
   // Name resolution: parsed name > local-part title-case > null.
