@@ -2986,6 +2986,12 @@ function MailboxDetail({inbox, onRefresh}){
 function ReplyDetailModal({replyId, onClose, onAction}){
   const [reply,setReply]=useState(null);
   const [busy,setBusy]=useState(false);
+  // When the operator clicks "Reply", we swap this modal out for the compose
+  // modal (rendered below). Cancelling compose returns here; sending compose
+  // closes the whole flow. Same pattern as the customer portal except the
+  // state lives inside this component rather than being lifted to the parent —
+  // smaller diff and keeps the change scoped.
+  const [composing,setComposing]=useState(false);
 
   useEffect(()=>{
     fetch(`/api/email/replies/${replyId}`).then(r=>r.json()).then(setReply);
@@ -3008,6 +3014,17 @@ function ReplyDetailModal({replyId, onClose, onAction}){
   if(!reply) return(<Modal title="Loading…" onClose={onClose}>
     <div style={{textAlign:'center',padding:30,color:MUTED,fontSize:13}}>Fetching reply…</div>
   </Modal>);
+
+  // Swap out the detail view for the compose view when the operator has
+  // clicked "Reply". Cancel returns to detail; successful Send closes the
+  // whole flow via onClose() so the inbox list refreshes underneath.
+  if (composing) {
+    return <AdminComposeReplyModal
+      reply={reply}
+      onCancel={() => setComposing(false)}
+      onSent={() => { onAction(); onClose(); }}
+    />;
+  }
 
   return(<Modal title="Email" onClose={onClose} wide>
     {/* Header: sender */}
@@ -3050,6 +3067,10 @@ function ReplyDetailModal({replyId, onClose, onAction}){
 
     {/* Actions */}
     <div style={{display:'flex',gap:8,flexWrap:'wrap',justifyContent:'flex-end',paddingTop:12,borderTop:`0.5px solid ${BORDER}`}}>
+      {/* Reply — primary green, matches the customer-portal action.
+          Opens AdminComposeReplyModal which sends from the customer's mailbox
+          via POST /api/email/replies/:id/send (mirrors the portal endpoint). */}
+      <Btn variant="primary" onClick={()=>setComposing(true)} disabled={busy}>Reply</Btn>
       {!reply.classification && (
         <Btn variant="blue" onClick={async()=>{
           setBusy(true);
@@ -3074,6 +3095,88 @@ function ReplyDetailModal({replyId, onClose, onAction}){
       )}
       <ReclassifyDropdown disabled={busy} current={reply.classification} onChoose={c=>action('reclassify',{classification:c})}/>
       <Btn onClick={onClose} disabled={busy}>Close</Btn>
+    </div>
+  </Modal>);
+}
+
+// ── Admin compose-reply modal ────────────────────────────────────────────────
+// Opened from ReplyDetailModal's "Reply" button. Composes a plain-text reply
+// and POSTs to /api/email/replies/:id/send, which sends via SES from the
+// mailbox the inbound originally arrived on (with the customer's default
+// from-name) and threads via In-Reply-To + References.
+//
+// Mirrors the customer-portal ComposeReplyModal in PortalApp.jsx but uses
+// EmailSection.jsx's local primitives (Modal, Input, Btn) so the visual style
+// matches the rest of the admin UI.
+function AdminComposeReplyModal({ reply, onCancel, onSent }){
+  const [cc, setCc]     = useState('');
+  const [body, setBody] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function send(){
+    if(!body.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await fetch(`/api/email/replies/${reply.id}/send`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ cc: cc.trim(), body }),
+      });
+      const d = await r.json();
+      if(!r.ok || d.error){
+        setError(d.error || `Send failed (HTTP ${r.status})`);
+        setBusy(false);
+        return;
+      }
+      onSent();
+    } catch (e){
+      setError(String(e.message || e));
+      setBusy(false);
+    }
+  }
+
+  // Subject preview: prefix "Re:" if not already a reply, matching the
+  // backend's logic so what the operator sees matches what actually goes out.
+  const inboundSubject = reply.subject || '';
+  const previewSubject = /^re:/i.test(inboundSubject)
+    ? inboundSubject
+    : `Re: ${inboundSubject || '(no subject)'}`;
+
+  return(<Modal title={`Reply to ${reply.from_name || reply.from_address}`} onClose={() => !busy && onCancel()} wide>
+    <div style={{fontSize:12,color:MUTED,marginBottom:14,lineHeight:1.6}}>
+      To: <strong style={{color:TEXT,fontWeight:500}}>{reply.from_address}</strong><br/>
+      Subject: <strong style={{color:TEXT,fontWeight:500}}>{previewSubject}</strong>
+    </div>
+
+    <Input label="CC (optional)" value={cc} onChange={setCc} placeholder="someone@yourcompany.co.uk"/>
+
+    <div style={{marginBottom:14}}>
+      <label style={{display:'block',fontSize:12,color:MUTED,marginBottom:4}}>Your reply *</label>
+      <textarea
+        value={body}
+        onChange={e => setBody(e.target.value)}
+        placeholder="Type your reply…"
+        autoFocus
+        disabled={busy}
+        style={{
+          width:'100%',padding:'10px 12px',border:`0.5px solid ${BORDER}`,borderRadius:7,
+          fontSize:13,color:TEXT,background:CARD,outline:'none',boxSizing:'border-box',
+          fontFamily:'inherit',minHeight:200,resize:'vertical',lineHeight:1.5,
+        }}
+      />
+    </div>
+
+    {error && (
+      <div style={{background:'#fdecea',borderLeft:`3px solid ${DANGER}`,borderRadius:6,padding:'8px 12px',marginBottom:12,fontSize:12,color:DANGER,lineHeight:1.5}}>
+        {error}
+      </div>
+    )}
+
+    <div style={{display:'flex',justifyContent:'flex-end',gap:8,paddingTop:12,borderTop:`0.5px solid ${BORDER}`}}>
+      <Btn onClick={onCancel} disabled={busy}>Cancel</Btn>
+      <Btn variant="primary" onClick={send} disabled={busy || !body.trim()}>{busy ? 'Sending…' : 'Send reply'}</Btn>
     </div>
   </Modal>);
 }

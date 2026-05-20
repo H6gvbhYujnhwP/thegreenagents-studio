@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import https from 'https';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
-import { sendCampaign, getQuota, getVerifiedDomains } from '../services/ses.js';
+import { sendCampaign, sendEmail, getQuota, getVerifiedDomains } from '../services/ses.js';
 import { getLinkUrl, TRANSPARENT_GIF } from '../services/tracking.js';
 import { getTouchCountsBulk, shouldTrackRecipient } from '../services/touch-count.js';
 import { encrypt, selfTest as cryptoSelfTest } from '../services/crypto-vault.js';
@@ -2059,6 +2059,150 @@ router.post('/replies/:id/manual-unsubscribe', (req, res) => {
               VALUES (?, 'user', 'manual_unsubscribe', 'subscriber', ?, ?, ?)`)
     .run(uuid(), email, req.params.id, JSON.stringify({ email_client_id: r.email_client_id, lists_affected: subs.length }));
   res.json({ ok: true, lists_affected: subs.length });
+});
+
+// POST /api/email/replies/:id/send — admin reply to an inbound message.
+//
+// Mirrors the customer-portal POST /api/portal/replies/:id/send endpoint
+// (server/routes/portal.js) in behaviour: resolves the reply + its inbox,
+// builds RFC 5322 threading headers (In-Reply-To + References), persists an
+// email_outbound row up front, then calls SES. On SES success the row gets
+// stamped with the SES MessageId; on failure the error is stored on the row
+// and the request returns 502.
+//
+// Differences from the portal version:
+//   - There's no portal user — client_user_id stays NULL.
+//   - From-name uses the email_client's default_from_name when set, falling
+//     back to the email_client's display name. Recipients see a sender
+//     consistent with what they'd see from a campaign, not from the operator.
+//   - actor in the audit log is 'admin'.
+//
+// Body: { cc?: string, body: string }
+router.post('/replies/:id/send', async (req, res) => {
+  const { cc = '', body = '' } = req.body || {};
+  const bodyText = String(body || '').trim();
+  const ccText   = String(cc   || '').trim();
+
+  if (!bodyText) {
+    return res.status(400).json({ error: 'Reply body cannot be empty.' });
+  }
+
+  // Resolve the reply + its mailbox + the customer's default-from settings.
+  const reply = db.prepare(`
+    SELECT
+      r.id, r.email_client_id, r.inbox_id, r.message_id,
+      r.from_address, r.from_name, r.subject,
+      r.in_reply_to, r.references_header,
+      i.email_address AS mailbox_address,
+      ec.name              AS client_name,
+      ec.default_from_name AS client_default_from_name
+    FROM email_replies r
+    LEFT JOIN email_inboxes i  ON i.id  = r.inbox_id
+    LEFT JOIN email_clients ec ON ec.id = r.email_client_id
+    WHERE r.id = ?
+  `).get(req.params.id);
+
+  if (!reply) return res.status(404).json({ error: 'Not found' });
+  if (!reply.mailbox_address) {
+    return res.status(500).json({ error: 'Mailbox for this reply could not be resolved.' });
+  }
+
+  // Threading chain — same construction as the portal endpoint.
+  const inReplyTo = reply.message_id || null;
+  const refsParts = [
+    reply.references_header || '',
+    reply.message_id || '',
+  ].filter(Boolean).join(' ').trim() || null;
+
+  // Subject — prefix "Re: " unless the inbound is already a reply.
+  const inboundSubject = reply.subject || '';
+  const replySubject = /^re:/i.test(inboundSubject)
+    ? inboundSubject
+    : `Re: ${inboundSubject || '(no subject)'}`;
+
+  // From-name resolution (operator confirmed: use customer's default_from_name).
+  // Fallbacks keep this never-empty so the SES envelope is always well-formed.
+  const fromName  = (reply.client_default_from_name && reply.client_default_from_name.trim())
+                  || reply.client_name
+                  || 'Reply';
+  const fromEmail = reply.mailbox_address;
+
+  // Plain → HTML body wrapper, same escaping as the portal version.
+  const htmlBody = `<div>${bodyText
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\n/g, '<br>')}</div>`;
+
+  // Persist the outbound row before SES runs. If SES throws we update with
+  // error; on success we stamp the MessageId. Either way the body is never lost.
+  const outboundId = `eo_${uuid()}`;
+  db.prepare(`
+    INSERT INTO email_outbound (
+      id, email_client_id, in_reply_to_reply_id, client_user_id,
+      from_address, to_address, cc_address, subject,
+      body_text, body_html,
+      message_id, in_reply_to_header, references_header
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    outboundId,
+    reply.email_client_id,
+    reply.id,
+    null,                       // client_user_id — admin send, no portal user
+    fromEmail,
+    reply.from_address,
+    ccText || null,
+    replySubject,
+    bodyText,
+    htmlBody,
+    null,
+    inReplyTo,
+    refsParts,
+  );
+
+  try {
+    const { messageId } = await sendEmail({
+      to:        reply.from_address,
+      toName:    reply.from_name || null,
+      fromName,
+      fromEmail,
+      replyTo:   fromEmail,
+      subject:   replySubject,
+      htmlBody,
+      plainBody: bodyText,
+      // 1:1 reply — no campaign tracking.
+      track_opens:  false,
+      track_clicks: false,
+      track_unsub:  false,
+      // Threading.
+      inReplyTo,
+      references: refsParts,
+    });
+
+    db.prepare(`UPDATE email_outbound SET message_id = ? WHERE id = ?`)
+      .run(messageId || null, outboundId);
+
+    // Audit-log the action for parity with the portal side's behaviour.
+    db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, reply_id, metadata)
+                VALUES (?, 'admin', 'reply_sent', 'reply', ?, ?, ?)`)
+      .run(
+        uuid(),
+        req.params.id,
+        req.params.id,
+        JSON.stringify({
+          outbound_id: outboundId,
+          to: reply.from_address,
+          from: fromEmail,
+        }),
+      );
+
+    res.json({ ok: true, message_id: messageId, outbound_id: outboundId });
+  } catch (err) {
+    console.error(`[admin] reply send failed for ${req.params.id}:`, err.message);
+    db.prepare(`UPDATE email_outbound SET error = ? WHERE id = ?`)
+      .run(err.message.slice(0, 500), outboundId);
+    res.status(502).json({ error: `Send failed: ${err.message}` });
+  }
 });
 
 // GET /api/email/audit-log — recent actions, optionally filtered
