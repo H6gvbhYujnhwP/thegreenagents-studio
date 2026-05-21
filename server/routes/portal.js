@@ -29,6 +29,7 @@ import { generateImage, recompositeLogoFromUrl } from '../services/gemini.js';
 import { uploadImageToR2 } from '../services/r2.js';
 import { queuePost } from '../services/supergrow.js';
 import { sendEmail } from '../services/ses.js';
+import { resolveLinkedSet, resolveCrmCustomerId } from './hot-prospects.js';
 import { v4 as uuid } from 'uuid';
 
 const router = Router();
@@ -1014,6 +1015,98 @@ router.get('/campaigns-history', (req, res) => {
 // filter. We never trust an id from the URL or body. 404 (not 403) for cross-
 // tenant lookups so we don't leak existence of other customers' replies.
 
+// ─────────────────────────────────────────────────────────────────────────────
+// attachInboxBadges(rows, ecid)
+//
+// Mirror of the admin helper in server/routes/email.js, simplified because
+// the portal request shape is single-tenant (every row shares one
+// email_client_id, passed in as `ecid`).
+//
+// Decorates each row with:
+//   hot_prospect_id              — UUID of matching hot_prospects row or null.
+//                                  Drives the "On Hot Prospects list" badge
+//                                  AND is the click target for the in-tree
+//                                  navigateToCrmWithProspect() handoff.
+//   hot_prospect_crm_customer_id — Included for parity with admin; the portal
+//                                  is single-tenant so the frontend doesn't
+//                                  use it, but returning it keeps the
+//                                  endpoint shape symmetric.
+//   contact_unsubscribed         — true if the sender is unsubscribed from
+//                                  any of this customer's lists (status or
+//                                  unsubscribed_at populated).
+//
+// Hot-prospects lookup uses the full linked set per decision #85; subscribers
+// belong to a single email_client so that lookup uses ecid directly.
+//
+// Errors are caught and logged so a JOIN failure never blanks out the inbox.
+// ─────────────────────────────────────────────────────────────────────────────
+function attachInboxBadges(rows, ecid) {
+  for (const r of rows) {
+    r.hot_prospect_id = null;
+    r.hot_prospect_crm_customer_id = null;
+    r.contact_unsubscribed = false;
+  }
+  if (!rows || rows.length === 0 || !ecid) return rows;
+
+  try {
+    const addrSet = new Set();
+    for (const r of rows) {
+      const a = r.from_address ? String(r.from_address).toLowerCase() : null;
+      if (a) addrSet.add(a);
+    }
+    if (addrSet.size === 0) return rows;
+    const addrs = Array.from(addrSet);
+    const addrPlaceholders = addrs.map(() => '?').join(',');
+
+    // Hot Prospects: across the full linked set
+    const linkedIds = resolveLinkedSet(ecid);
+    const idPlaceholders = linkedIds.map(() => '?').join(',');
+    const hpRows = db.prepare(`
+      SELECT id, email_client_id, LOWER(prospect_email) AS addr
+      FROM hot_prospects
+      WHERE email_client_id IN (${idPlaceholders})
+        AND LOWER(prospect_email) IN (${addrPlaceholders})
+    `).all(...linkedIds, ...addrs);
+    const hpByAddr = new Map();
+    for (const hp of hpRows) {
+      hpByAddr.set(hp.addr, {
+        id: hp.id,
+        crm_customer_id: resolveCrmCustomerId(hp.email_client_id),
+      });
+    }
+
+    // Subscribers: linked-set scoping too (not just the single ecid).
+    // For a linked customer (Cube6 anchor + mail.eng inbox row, decision #85)
+    // the mailing lists live under the anchor, not the inbox row. Scoping the
+    // subscribers JOIN to the inbox row alone would miss every real
+    // unsubscribe. Use the same linked-set as Hot Prospects above so the
+    // answer is correct regardless of which row owns the lists.
+    const subRows = db.prepare(`
+      SELECT DISTINCT LOWER(s.email) AS addr
+      FROM email_subscribers s
+      JOIN email_lists l ON l.id = s.list_id
+      WHERE l.email_client_id IN (${idPlaceholders})
+        AND LOWER(s.email) IN (${addrPlaceholders})
+        AND (s.status = 'unsubscribed' OR s.unsubscribed_at IS NOT NULL)
+    `).all(...linkedIds, ...addrs);
+    const unsubAddrs = new Set(subRows.map(r => r.addr));
+
+    for (const r of rows) {
+      const a = r.from_address ? String(r.from_address).toLowerCase() : null;
+      if (!a) continue;
+      const hp = hpByAddr.get(a);
+      if (hp) {
+        r.hot_prospect_id = hp.id;
+        r.hot_prospect_crm_customer_id = hp.crm_customer_id;
+      }
+      if (unsubAddrs.has(a)) r.contact_unsubscribed = true;
+    }
+  } catch (e) {
+    console.warn('[portal] attachInboxBadges failed (non-fatal):', e?.message || e);
+  }
+  return rows;
+}
+
 // ─── GET /api/portal/inbox ────────────────────────────────────────────────────
 // Recent replies for this customer's mailboxes. Frontend renders each row with
 // from name + address, subject, snippet, classification badge (Prospect / OOO /
@@ -1039,6 +1132,9 @@ router.get('/inbox', (req, res) => {
     LIMIT 100
   `).all(linkedEmailClientId);
 
+  // Decorate every row with the Hot Prospect + Unsubscribed status badges.
+  attachInboxBadges(rows, linkedEmailClientId);
+
   // Build a short snippet (first ~160 chars of body_text, or empty). This is
   // what the inbox row preview shows; full body comes from GET /replies/:id.
   const replies = rows.map(r => ({
@@ -1052,6 +1148,9 @@ router.get('/inbox', (req, res) => {
     auto_unsubscribed: !!r.auto_unsubscribed,
     campaign_title:    r.campaign_title || null,
     step_number:       null, // step number isn't currently stored on email_replies
+    hot_prospect_id:              r.hot_prospect_id              || null,
+    hot_prospect_crm_customer_id: r.hot_prospect_crm_customer_id || null,
+    contact_unsubscribed:         !!r.contact_unsubscribed,
   }));
 
   res.json({ replies, not_subscribed: false });
@@ -1083,6 +1182,10 @@ router.get('/replies/:id', (req, res) => {
     return res.status(404).json({ error: 'Not found' });
   }
 
+  // Decorate with the same two badge fields the list endpoint returns, so the
+  // detail modal can render them alongside the classification badge.
+  attachInboxBadges([row], linkedEmailClientId);
+
   res.json({
     id:                row.id,
     from_address:      row.from_address,
@@ -1095,6 +1198,9 @@ router.get('/replies/:id', (req, res) => {
     auto_unsubscribed: !!row.auto_unsubscribed,
     campaign_title:    row.campaign_title || null,
     mailbox_address:   row.mailbox_address || null,
+    hot_prospect_id:              row.hot_prospect_id              || null,
+    hot_prospect_crm_customer_id: row.hot_prospect_crm_customer_id || null,
+    contact_unsubscribed:         !!row.contact_unsubscribed,
   });
 });
 

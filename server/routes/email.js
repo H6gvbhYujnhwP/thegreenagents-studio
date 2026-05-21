@@ -10,6 +10,7 @@ import { encrypt, selfTest as cryptoSelfTest } from '../services/crypto-vault.js
 import { testImapCredentials, pollSingleInbox } from '../services/imap-poller.js';
 import { parseFirstName, parseAndCacheList, templateUsesFirstName, renderTemplate } from '../services/name-parser.js';
 import { classifyPendingOnce, classifyOneReply } from '../services/classify-replies.js';
+import { resolveLinkedSet, resolveCrmCustomerId } from './hot-prospects.js';
 import dns from 'dns';
 import { promisify } from 'util';
 
@@ -1929,6 +1930,160 @@ router.post('/mailboxes/:id/resync', async (req, res) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// attachInboxBadges(rows)
+//
+// Decorates a list of email_replies rows (or a single row passed as a one-
+// element array) with two extra fields that the frontend uses to render
+// secondary status badges next to the classification badge:
+//
+//   hot_prospect_id              — UUID of the matching hot_prospects row, or
+//                                  null. Drives the "On Hot Prospects list"
+//                                  badge + the Open-in-CRM click target.
+//   hot_prospect_crm_customer_id — Anchor id for Open-in-CRM (decision #85 —
+//                                  for a linked customer this is the portal
+//                                  anchor, not the inbox-owning row).
+//   contact_unsubscribed         — true if the sender's email matches any
+//                                  subscribers row under this customer's
+//                                  lists with status='unsubscribed' OR
+//                                  unsubscribed_at populated.
+//
+// Both lookups are batched across all rows so a 100-row page is two SQL
+// queries, not 200. Mutates rows in place and also returns them for chainability.
+//
+// Both fields are PRESENT on every row (default null/false) so the frontend
+// never has to guard against undefined. Errors are swallowed — a JOIN
+// failure shouldn't blank out the inbox.
+// ─────────────────────────────────────────────────────────────────────────────
+function attachInboxBadges(rows) {
+  // Pre-default so callers can rely on the keys being present
+  for (const r of rows) {
+    r.hot_prospect_id = null;
+    r.hot_prospect_crm_customer_id = null;
+    r.contact_unsubscribed = false;
+  }
+  if (!rows || rows.length === 0) return rows;
+
+  try {
+    // Collect distinct (email_client_id, lowercased from_address) pairs. In
+    // practice all rows in one mailbox view share the same email_client_id,
+    // but the function takes a generic list so we don't assume that.
+    const pairs = [];
+    const seen = new Set();
+    for (const r of rows) {
+      const ecid = r.email_client_id ? String(r.email_client_id) : null;
+      const addr = r.from_address ? String(r.from_address).toLowerCase() : null;
+      if (!ecid || !addr) continue;
+      const key = ecid + '|' + addr;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pairs.push({ ecid, addr });
+    }
+    if (pairs.length === 0) return rows;
+
+    // Hot Prospects: lookup keyed by (linked-set of email_client_ids, email).
+    // We resolve each ecid's linked set once, then run one batched query per
+    // distinct linked-set + address combination. In the common single-customer
+    // case (one mailbox, all rows share one ecid, one linked set), that's a
+    // single batched query against all sender addresses.
+    const hpMap = new Map(); // key = `${ecid}|${addr}` → { id, crm_customer_id }
+    const linkedSetCache = new Map(); // ecid → resolved set
+    function getLinkedSet(ecid) {
+      if (linkedSetCache.has(ecid)) return linkedSetCache.get(ecid);
+      const set = resolveLinkedSet(ecid);
+      linkedSetCache.set(ecid, set);
+      return set;
+    }
+
+    // Group pairs by their linked set so we can do ONE query per distinct set.
+    const groupedBySet = new Map(); // setKey → { ids:[...], pairs:[{ecid, addr}] }
+    for (const p of pairs) {
+      const ids = getLinkedSet(p.ecid);
+      const setKey = ids.slice().sort().join(',');
+      if (!groupedBySet.has(setKey)) {
+        groupedBySet.set(setKey, { ids, pairs: [] });
+      }
+      groupedBySet.get(setKey).pairs.push(p);
+    }
+
+    for (const group of groupedBySet.values()) {
+      const addrs = Array.from(new Set(group.pairs.map(p => p.addr)));
+      if (addrs.length === 0) continue;
+      const idPlaceholders = group.ids.map(() => '?').join(',');
+      const addrPlaceholders = addrs.map(() => '?').join(',');
+      const hpRows = db.prepare(`
+        SELECT id, email_client_id, prospect_email
+        FROM hot_prospects
+        WHERE email_client_id IN (${idPlaceholders})
+          AND LOWER(prospect_email) IN (${addrPlaceholders})
+      `).all(...group.ids, ...addrs);
+      for (const hp of hpRows) {
+        // Store keyed by the original reply's ecid (not the hp row's ecid)
+        // because the badge needs to map back to the row. Any pair in this
+        // group that matches the address gets this prospect.
+        for (const p of group.pairs) {
+          if (p.addr === String(hp.prospect_email).toLowerCase()) {
+            hpMap.set(p.ecid + '|' + p.addr, {
+              id: hp.id,
+              crm_customer_id: resolveCrmCustomerId(hp.email_client_id),
+            });
+          }
+        }
+      }
+    }
+
+    // Subscribers: lookup keyed by (linked-set of email_client_ids, email).
+    // Lists belong to a single email_client_id, BUT for linked customers
+    // (decision #85) the lists could be under EITHER the portal anchor row
+    // OR the inbox-owning row in principle. Scoping the JOIN to the inbox
+    // row alone would miss real unsubscribes when the lists actually live
+    // under the anchor (the common case). Use the same linked-set as Hot
+    // Prospects to keep the answer correct for all customer shapes.
+    const unsubMap = new Set(); // `${ecid}|${addr}` if unsubscribed
+    for (const group of groupedBySet.values()) {
+      const addrs = Array.from(new Set(group.pairs.map(p => p.addr)));
+      if (addrs.length === 0) continue;
+      const idPlaceholders = group.ids.map(() => '?').join(',');
+      const addrPlaceholders = addrs.map(() => '?').join(',');
+      const subRows = db.prepare(`
+        SELECT DISTINCT LOWER(s.email) AS email
+        FROM email_subscribers s
+        JOIN email_lists l ON l.id = s.list_id
+        WHERE l.email_client_id IN (${idPlaceholders})
+          AND LOWER(s.email) IN (${addrPlaceholders})
+          AND (s.status = 'unsubscribed' OR s.unsubscribed_at IS NOT NULL)
+      `).all(...group.ids, ...addrs);
+      for (const sr of subRows) {
+        for (const p of group.pairs) {
+          if (p.addr === sr.email) {
+            unsubMap.add(p.ecid + '|' + p.addr);
+          }
+        }
+      }
+    }
+
+    // Stamp results back onto every row
+    for (const r of rows) {
+      const ecid = r.email_client_id ? String(r.email_client_id) : null;
+      const addr = r.from_address ? String(r.from_address).toLowerCase() : null;
+      if (!ecid || !addr) continue;
+      const key = ecid + '|' + addr;
+      const hp = hpMap.get(key);
+      if (hp) {
+        r.hot_prospect_id = hp.id;
+        r.hot_prospect_crm_customer_id = hp.crm_customer_id;
+      }
+      if (unsubMap.has(key)) {
+        r.contact_unsubscribed = true;
+      }
+    }
+  } catch (e) {
+    // Never let badge lookup break the inbox load. Log + continue with defaults.
+    console.warn('[email] attachInboxBadges failed (non-fatal):', e?.message || e);
+  }
+  return rows;
+}
+
 // GET /api/email/mailboxes/:id/replies — list replies for one inbox
 // query params: ?bucket=all|prospects|auto_unsubscribed|out_of_office&limit=50
 router.get('/mailboxes/:id/replies', (req, res) => {
@@ -1958,6 +2113,18 @@ router.get('/mailboxes/:id/replies', (req, res) => {
     LIMIT ?
   `).all(...args, limit);
 
+  // Attach per-row "has been added to Hot Prospects" + "contact unsubscribed"
+  // badges. Both signals are looked up by (customer, sender-email). Hot
+  // Prospects spans the linked set per decision #85 (Cube6 anchor + the linked
+  // inbox row count as one customer); subscribers belong to lists, lists belong
+  // to a single email_client_id, so the subscriber lookup uses the reply's own
+  // email_client_id.
+  //
+  // For efficiency we resolve the linked set ONCE per request (all replies on
+  // a given mailbox/inbox share the same email_client_id), then do two batched
+  // lookups across all sender addresses in this page of results.
+  attachInboxBadges(rows);
+
   // Trim huge body fields for the list view — full bodies fetched on detail
   for (const r of rows) {
     if (r.body_text && r.body_text.length > 500) r.body_text = r.body_text.slice(0, 500) + '…';
@@ -1979,6 +2146,8 @@ router.get('/replies/:id', (req, res) => {
     WHERE r.id = ?
   `).get(req.params.id);
   if (!r) return res.status(404).json({ error: 'Not found' });
+  // Decorate with hot_prospect_id + contact_unsubscribed for the modal badges.
+  attachInboxBadges([r]);
   res.json(r);
 });
 

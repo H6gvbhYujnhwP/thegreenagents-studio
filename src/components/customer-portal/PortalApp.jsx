@@ -2129,7 +2129,14 @@ function PortalInbox({ onNavigateToCrm } = {}) {
             padding:'14px 14px 8px', borderBottom:`0.5px solid ${BORDER}`,
           }}>Recent replies — click to read &amp; reply</div>
           {replies.map(r => (
-            <ReplyRow key={r.id} reply={r} onClick={() => openReplyDetail(r)} />
+            <ReplyRow key={r.id} reply={r} onClick={() => openReplyDetail(r)}
+              onNavigateToCrm={(prospectId) => {
+                // Row-level "On Hot Prospects list" pill click: bypass the
+                // row's onClick (stopPropagation in the badge) and jump
+                // straight to CRM via the chrome's in-tree handoff.
+                if (onNavigateToCrm) onNavigateToCrm(prospectId);
+              }}
+            />
           ))}
         </div>
       )}
@@ -2188,13 +2195,13 @@ function StatCard({ label, value, sub }) {
   );
 }
 
-function ReplyRow({ reply, onClick }) {
+function ReplyRow({ reply, onClick, onNavigateToCrm }) {
   const [hover, setHover] = useState(false);
   return (
     <div onClick={onClick}
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       style={{
-        display:'grid', gridTemplateColumns:'220px 1fr 90px 90px',
+        display:'grid', gridTemplateColumns:'220px 1fr 160px 90px',
         gap:10, alignItems:'center', padding:'10px 14px',
         borderBottom:`0.5px solid ${BORDER}`, fontSize:12, cursor:'pointer',
         background: hover ? '#fafaf8' : 'transparent',
@@ -2208,9 +2215,62 @@ function ReplyRow({ reply, onClick }) {
         <div style={{ color:TEXT, marginBottom:2 }}>{reply.subject}</div>
         <div>{reply.snippet}</div>
       </div>
-      <ClassifyBadge reply={reply} />
+      <div style={{ display:'flex', flexWrap:'wrap', gap:4, justifyContent:'flex-start', alignItems:'center' }}>
+        <ClassifyBadge reply={reply} />
+        <PortalActionBadges reply={reply} onNavigateToCrm={onNavigateToCrm} />
+      </div>
       <div style={{ color:TERTIARY_TEXT, fontSize:11, textAlign:'right' }}>{relTime(reply.received_at)}</div>
     </div>
+  );
+}
+
+// ── Customer-portal action-taken badges ──────────────────────────────────────
+// Mirror of the admin ActionBadges in EmailSection.jsx — kept in step per
+// decision #92 (admin/portal classification surfaces show the same data
+// with same labels by default).
+//
+//   • On Hot Prospects list  — amber pill, clickable. Closes the inbox row's
+//     click bubble (stopPropagation) so it doesn't ALSO trigger the row's
+//     detail-modal open, then routes to the CRM page with the matching
+//     prospect's detail modal auto-opened. Uses the in-tree navigation
+//     callback chain (not localStorage like admin) since the portal lives
+//     in one component tree.
+//   • Unsubscribed           — grey pill, not clickable. Customer-portal
+//     audiences don't have a contacts page to land on; the badge IS the
+//     answer.
+//
+// Backend fills hot_prospect_id + hot_prospect_crm_customer_id +
+// contact_unsubscribed via attachInboxBadges in server/routes/portal.js.
+// (crm_customer_id isn't used here — the portal is single-tenant — but it
+// IS returned for endpoint-shape symmetry with admin.)
+function PortalActionBadges({ reply, onNavigateToCrm }) {
+  const onList = !!reply?.hot_prospect_id;
+  const unsubd = !!reply?.contact_unsubscribed;
+  if (!onList && !unsubd) return null;
+  return (
+    <>
+      {onList && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (onNavigateToCrm) onNavigateToCrm(reply.hot_prospect_id);
+          }}
+          title="Open in CRM"
+          style={{
+            fontSize:10, padding:'2px 7px', borderRadius:4, fontWeight:500,
+            background: BADGE_UNSUB_BG, color: BADGE_UNSUB_FG, whiteSpace:'nowrap',
+            border:'none', cursor:'pointer', fontFamily:'inherit',
+          }}
+        >On Hot Prospects list</button>
+      )}
+      {unsubd && (
+        <span style={{
+          fontSize:10, padding:'2px 7px', borderRadius:4, fontWeight:500,
+          background: BADGE_GREY_BG, color: BADGE_GREY_FG, whiteSpace:'nowrap',
+        }}>Unsubscribed</span>
+      )}
+    </>
   );
 }
 
@@ -2381,7 +2441,15 @@ function ReplyDetailModal({ reply, onClose, onCompose, onNavigateToCrm }) {
                   <div style={{ fontSize:14, fontWeight:500, color:TEXT }}>{reply.from_name}</div>
                   <div style={{ fontSize:12, color:MUTED }}>{reply.from_address}</div>
                 </div>
-                <ClassifyBadge reply={reply} />
+                <div style={{ display:'flex', flexWrap:'wrap', gap:4, alignItems:'center', justifyContent:'flex-end' }}>
+                  <ClassifyBadge reply={reply} />
+                  <PortalActionBadges reply={reply} onNavigateToCrm={(prospectId) => {
+                    // Modal-level "On Hot Prospects list" click: close
+                    // this modal first then jump to CRM, mirroring how the
+                    // Open-in-CRM banner link behaves.
+                    if (onNavigateToCrm) onNavigateToCrm(prospectId);
+                  }} />
+                </div>
               </div>
               <div style={{ fontSize:13, color:TEXT, marginTop:8, fontWeight:500 }}>{reply.subject}</div>
               <div style={{ fontSize:11, color:MUTED, marginTop:4 }}>

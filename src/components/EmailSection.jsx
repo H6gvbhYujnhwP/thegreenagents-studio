@@ -2656,6 +2656,73 @@ function classifyBadge(reply){
   }
 }
 
+// ── Secondary "action-taken" status badges ────────────────────────────────────
+// Rendered next to classifyBadge on inbox rows AND in the reply-detail modal
+// header. Surfaces, at a glance, two pieces of state that the operator would
+// otherwise have to dig for:
+//
+//   • On Hot Prospects list  — amber pill, clickable; opens this prospect's
+//     detail modal in the CRM screen (same handoff as the success banner
+//     after Send-to-Hot-Prospects).
+//   • Unsubscribed           — grey pill, not clickable. Means this sender
+//     is currently unsubscribed from at least one of the customer's mailing
+//     lists (whether by their own link-click, auto-unsubscribe by the
+//     classifier, or manual removal). End-state — no destination to link to.
+//
+// Backend supplies hot_prospect_id + hot_prospect_crm_customer_id +
+// contact_unsubscribed on every reply row (see attachInboxBadges in
+// server/routes/email.js).
+//
+// The "On Hot Prospects list" click handler uses the SAME localStorage +
+// custom-event handoff that ReplyDetailModal's openInCrm uses (see comment
+// near openInCrm — Dashboard.jsx listens for studio:navigate and switches
+// view; CRM screen reads open_prospect_id on mount). Inlined here so the
+// badge works from the inbox row directly without prop-drilling through
+// MailboxDetail → ReplyDetailModal.
+function openHotProspectInCrm(prospectId, crmCustomerId){
+  try {
+    if (crmCustomerId) {
+      localStorage.setItem('studio.crm.hot_prospects.last_customer_id', crmCustomerId);
+    }
+    if (prospectId) {
+      localStorage.setItem('studio.crm.hot_prospects.open_prospect_id', prospectId);
+    }
+  } catch {} // private-browsing tolerance — non-fatal
+  window.dispatchEvent(new CustomEvent('studio:navigate', { detail: { view: 'crm-hot-prospects' } }));
+}
+
+function ActionBadges({ reply, onBeforeNavigate }) {
+  const onList = !!reply?.hot_prospect_id;
+  const unsubd = !!reply?.contact_unsubscribed;
+  if (!onList && !unsubd) return null;
+  return (
+    <>
+      {onList && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation(); // don't also open the inbox-row detail modal
+            if (onBeforeNavigate) onBeforeNavigate();
+            openHotProspectInCrm(reply.hot_prospect_id, reply.hot_prospect_crm_customer_id);
+          }}
+          title="Open in CRM"
+          style={{
+            fontSize:11, padding:'2px 8px', borderRadius:20, fontWeight:500,
+            background:'#FAEEDA', color:'#633806', whiteSpace:'nowrap',
+            border:'none', cursor:'pointer', fontFamily:'inherit',
+          }}
+        >On Hot Prospects list</button>
+      )}
+      {unsubd && (
+        <span style={{
+          fontSize:11, padding:'2px 8px', borderRadius:20, fontWeight:500,
+          background:'#F1EFE8', color:'#5F5E5A', whiteSpace:'nowrap',
+        }}>Unsubscribed</span>
+      )}
+    </>
+  );
+}
+
 // ── Top-level Mailboxes section ───────────────────────────────────────────────
 function MailboxesSection(){
   const [inboxes,setInboxes]=useState([]);
@@ -2955,8 +3022,9 @@ function MailboxDetail({inbox, onRefresh}){
               {r.subject||'(no subject)'}
             </div>
           </div>
-          <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',justifyContent:'flex-end'}}>
             {classifyBadge(r)}
+            <ActionBadges reply={r} />
           </div>
           <span style={{fontSize:11,color:MUTED,whiteSpace:'nowrap'}}>{relTime(r.received_at)}</span>
         </div>
@@ -3187,7 +3255,10 @@ function ReplyDetailModal({replyId, onClose, onAction}){
                   <div style={{fontSize:15,fontWeight:500,color:TEXT}}>{reply.from_name||reply.from_address}</div>
                   <div style={{fontSize:12,color:MUTED}}>{reply.from_address} · {relTime(reply.received_at)}</div>
                 </div>
-                {classifyBadge(reply)}
+                <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',justifyContent:'flex-end'}}>
+                  {classifyBadge(reply)}
+                  <ActionBadges reply={reply} onBeforeNavigate={onClose} />
+                </div>
               </div>
               <div style={{fontSize:14,color:TEXT,fontWeight:500,marginTop:8}}>{reply.subject||'(no subject)'}</div>
             </div>

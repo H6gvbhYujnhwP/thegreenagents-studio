@@ -835,4 +835,20 @@ router.get('/:id/thread', (req, res) => {
   res.json({ prospect: prospectWithSource, thread: merged });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Named exports for use by other route files.
+//
+// These two helpers are the canonical "which email_clients rows belong to the
+// same real customer?" / "what's the CRM switcher card id for this row?"
+// resolvers. Per blueprint lesson #64, any future feature reading or filtering
+// against email_client_id for Hot-Prospects-style cross-customer ownership
+// should use these rather than re-implementing single-id logic.
+//
+// Used by:
+//   - server/routes/email.js   — to attach hot_prospect_id / unsubscribed
+//                                badges to inbox rows
+//   - server/routes/portal.js  — same, for the customer-portal inbox
+// ─────────────────────────────────────────────────────────────────────────────
+export { resolveLinkedSet, resolveCrmCustomerId };
+
 export default router;
