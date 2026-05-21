@@ -3114,10 +3114,60 @@ function ReplyDetailModal({replyId, onClose, onAction}){
   // On error we just alert() — failed adds aren't a state worth banner-ing.
   const [addingProspect,setAddingProspect]=useState(false);
   const [hotProspectBanner,setHotProspectBanner]=useState(null);
+  // Status message shown next to the Unsubscribe / Re-subscribe buttons —
+  // kind = 'success' | 'info' (e.g. "not on any list"). Cleared on close
+  // and on the next button click. Stays visible after the click so the
+  // operator sees confirmation of what happened.
+  const [subResubStatus,setSubResubStatus]=useState(null);
 
   useEffect(()=>{
     fetch(`/api/email/replies/${replyId}`).then(r=>r.json()).then(setReply);
   },[replyId]);
+
+  // Re-fetch the reply (after sub/resub) so the badge state updates without
+  // closing the modal. Also re-runs onAction() so the underlying inbox list
+  // refreshes in the background.
+  async function refetchReply(){
+    try {
+      const r = await fetch(`/api/email/replies/${replyId}`);
+      if (r.ok) setReply(await r.json());
+    } catch {}
+    if (onAction) onAction();
+  }
+
+  // Unsubscribe / Re-subscribe handler. Different from action() above:
+  //   1. Doesn't close the modal — refetches the reply so the badges update
+  //      and the button row swaps Unsubscribe ↔ Re-subscribe in place.
+  //   2. Handles the three-shape response (ok=true / not_on_lists /
+  //      already_unsubscribed / already_subscribed) with inline status text
+  //      rather than just alert(). The "not on any list" case in particular
+  //      is information the operator needs to see, not a failure.
+  async function manualSubResub(action){
+    if (!reply || busy) return;
+    setBusy(true);
+    setSubResubStatus(null);
+    try {
+      const r = await fetch(`/api/email/replies/${replyId}/${action}`, { method:'POST' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok && !d.code) {
+        alert(d.error || `${action} failed (HTTP ${r.status})`);
+        setBusy(false);
+        return;
+      }
+      if (d.ok) {
+        const what = action === 'manual-unsubscribe' ? 'Unsubscribed' : 'Re-subscribed';
+        setSubResubStatus({ kind:'success', text:`✓ ${what} from ${d.lists_affected} list${d.lists_affected===1?'':'s'}` });
+      } else if (d.code) {
+        // not_on_lists / already_unsubscribed / already_subscribed
+        setSubResubStatus({ kind:'info', text: d.message });
+      }
+      await refetchReply();
+    } catch (e) {
+      alert(`${action} failed: ${e.message || e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function action(name, opts={}){
     setBusy(true);
@@ -3291,14 +3341,44 @@ function ReplyDetailModal({replyId, onClose, onAction}){
             {reply.classification==='positive' && !reply.handled_at && (
               <Btn variant="primary" onClick={()=>action('handle')} disabled={busy}>Mark as handled</Btn>
             )}
-            {!reply.auto_unsubscribed && (
+            {/* Unsubscribe / Re-subscribe — toggles based on the contact's
+                current state in email_subscribers (not the per-reply
+                auto_unsubscribed flag which is audit-only history). When
+                contact_unsubscribed is true, show the Re-subscribe button
+                + a "✓ Already unsubscribed" label so the state is obvious.
+                Both buttons gate behind confirm() — reversible action, no
+                need for a stricter typed-phrase gate. */}
+            {reply.contact_unsubscribed ? (
+              <>
+                <span style={{
+                  fontSize:11, padding:'2px 8px', borderRadius:20, fontWeight:500,
+                  background:'#F1EFE8', color:'#5F5E5A', whiteSpace:'nowrap',
+                  alignSelf:'center',
+                }}>✓ Already unsubscribed</span>
+                <Btn variant="default" onClick={()=>{
+                  if(confirm(`Re-subscribe ${reply.from_address} to your mailing lists?`)) manualSubResub('manual-resubscribe');
+                }} disabled={busy}>Re-subscribe</Btn>
+              </>
+            ) : (
               <Btn variant="danger" onClick={()=>{
-                if(confirm(`Unsubscribe ${reply.from_address} from all lists in this client?`)) action('manual-unsubscribe');
+                if(confirm(`Unsubscribe ${reply.from_address} from all of your mailing lists?`)) manualSubResub('manual-unsubscribe');
               }} disabled={busy}>Unsubscribe</Btn>
             )}
             <ReclassifyDropdown disabled={busy} current={reply.classification} onChoose={c=>action('reclassify',{classification:c})}/>
             <Btn onClick={onClose} disabled={busy}>Close</Btn>
           </div>
+
+          {/* Inline status line for the most recent unsub/resub click. Stays
+              visible after the action so the operator sees confirmation —
+              especially important for the "not on any list" message which
+              isn't a failure, just information. */}
+          {subResubStatus && (
+            <div style={{
+              marginTop:8, fontSize:12,
+              color: subResubStatus.kind === 'success' ? '#085041' : '#5F5E5A',
+              fontStyle: subResubStatus.kind === 'info' ? 'italic' : 'normal',
+            }}>{subResubStatus.text}</div>
+          )}
 
         </div>
 

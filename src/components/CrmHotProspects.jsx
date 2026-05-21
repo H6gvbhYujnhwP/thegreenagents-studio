@@ -799,6 +799,44 @@ function ProspectDetailModal({ prospectId, onClose, onChange }) {
     }
   }
 
+  // Re-subscribe handler. Only invoked from a button that's only shown when
+  // p.contact_unsubscribed === true. Flips the prospect back to subscribed
+  // across the customer's linked set; locally updates the prospect copy on
+  // success so the banner + button disappear without a refetch. Mirror of
+  // the portal handler.
+  const [resubBusy, setResubBusy] = useState(false);
+  const [resubStatus, setResubStatus] = useState(null);
+  async function resubscribeProspect() {
+    if (resubBusy || !data?.prospect) return;
+    if (!confirm(`Re-subscribe ${data.prospect.prospect_email} to your mailing lists?`)) return;
+    setResubBusy(true);
+    setResubStatus(null);
+    try {
+      const r = await fetch(`/api/email/hot-prospects/${encodeURIComponent(prospectId)}/resubscribe`, {
+        method: 'POST',
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok && !d.code) {
+        setResubStatus({ kind:'error', text: d.error || `Re-subscribe failed (HTTP ${r.status})` });
+        setResubBusy(false);
+        return;
+      }
+      if (d.ok) {
+        setResubStatus({ kind:'success', text: `✓ Re-subscribed to ${d.lists_affected} list${d.lists_affected===1?'':'s'}` });
+        setData(prev => prev ? { ...prev, prospect: { ...prev.prospect, contact_unsubscribed: false } } : prev);
+      } else if (d.code) {
+        setResubStatus({ kind:'info', text: d.message });
+        if (d.code === 'already_subscribed' || d.code === 'not_on_lists') {
+          setData(prev => prev ? { ...prev, prospect: { ...prev.prospect, contact_unsubscribed: false } } : prev);
+        }
+      }
+    } catch (e) {
+      setResubStatus({ kind:'error', text: `Re-subscribe failed: ${e.message || e}` });
+    } finally {
+      setResubBusy(false);
+    }
+  }
+
   return (
     <ModalShell onClose={onClose} wide>
       {!data ? (
@@ -822,13 +860,16 @@ function ProspectDetailModal({ prospectId, onClose, onChange }) {
           onReopen={reopenAsActive}
           markBusy={markBusy}
           markError={markError}
+          onResubscribe={resubscribeProspect}
+          resubBusy={resubBusy}
+          resubStatus={resubStatus}
         />
       )}
     </ModalShell>
   );
 }
 
-function DetailBody({ data, followUp, setFollowUp, notes, setNotes, status, setStatus, tagColor, setTagColor, savingState, onRemove, removeBusy, removeError, onMarkConverted, onReopen, markBusy, markError }) {
+function DetailBody({ data, followUp, setFollowUp, notes, setNotes, status, setStatus, tagColor, setTagColor, savingState, onRemove, removeBusy, removeError, onMarkConverted, onReopen, markBusy, markError, onResubscribe, resubBusy, resubStatus }) {
   const p = data.prospect;
   const av = avatarColor(p.prospect_name || p.prospect_email);
   const isConverted = !!p.closed_at;
@@ -951,6 +992,49 @@ function DetailBody({ data, followUp, setFollowUp, notes, setNotes, status, setS
         <div style={{ background:'#fdecea', borderLeft:`3px solid ${DANGER}`, borderRadius:6, padding:'8px 12px', marginBottom:12, fontSize:12, color:DANGER }}>
           {removeError}
         </div>
+      )}
+
+      {/* Re-subscribe banner — only shown when the prospect's email is
+          currently unsubscribed from at least one of the customer's mailing
+          lists (contact_unsubscribed === true). Hidden for prospects with no
+          subscriber rows at all (website-form leads etc.) — those need the
+          Subscribers admin section to be added, not a re-toggle here. The
+          status line below mirrors the per-reply modal pattern. */}
+      {p.contact_unsubscribed && (
+        <div style={{
+          marginBottom:12,
+          padding:'10px 14px',
+          background: AMBER_BG,
+          borderLeft: `3px solid ${AMBER}`,
+          borderRadius:6,
+          display:'flex', alignItems:'center', justifyContent:'space-between', gap:12,
+          flexWrap:'wrap',
+        }}>
+          <div style={{ fontSize:12, color:'#5F5E5A', lineHeight:1.5 }}>
+            <b style={{fontWeight:500, color:TEXT}}>🚫 Unsubscribed from your mailing list.</b>{' '}
+            Re-subscribe them if you'd like to include them in future campaigns.
+          </div>
+          <button
+            onClick={onResubscribe}
+            disabled={resubBusy}
+            style={{
+              background: AMBER, color:'#fff', border:'none',
+              borderRadius:7, padding:'7px 12px', fontSize:13, fontWeight:500,
+              cursor: resubBusy ? 'not-allowed' : 'pointer',
+              opacity: resubBusy ? 0.6 : 1,
+              fontFamily:'inherit', whiteSpace:'nowrap',
+            }}
+          >{resubBusy ? 'Re-subscribing…' : 'Re-subscribe'}</button>
+        </div>
+      )}
+      {resubStatus && (
+        <div style={{
+          marginBottom:12, fontSize:12,
+          color: resubStatus.kind === 'success' ? '#085041'
+               : resubStatus.kind === 'error'   ? DANGER
+               : '#5F5E5A',
+          fontStyle: resubStatus.kind === 'info' ? 'italic' : 'normal',
+        }}>{resubStatus.text}</div>
       )}
 
       {/* Meta row: added / follow-up */}

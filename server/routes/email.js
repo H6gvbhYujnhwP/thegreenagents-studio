@@ -2204,21 +2204,66 @@ router.post('/replies/classify-now', async (req, res) => {
   }
 });
 
-// POST /api/email/replies/:id/manual-unsubscribe — operator unsubscribes the sender
-// from all lists belonging to this email_client
+// POST /api/email/replies/:id/manual-unsubscribe — operator unsubscribes the
+// sender from all of this customer's mailing lists.
+//
+// "This customer" = the linked set per decision #85, so a reply that arrived
+// on the inbox row (mail.eng) still unsubscribes the sender from lists under
+// the portal anchor (Cube6). Single-customer flows are unaffected — the
+// linked set is just [self] in that case.
+//
+// Three response shapes (frontend keys off `code` when ok=false):
+//   1. ok=true, lists_affected=N           — at least one subscriber row
+//                                            flipped, OR contact was already
+//                                            unsubscribed on every row we
+//                                            found. Per-reply flag stamped
+//                                            either way (audit signal).
+//   2. ok=false, code='not_on_lists'       — sender's email isn't on ANY of
+//                                            this customer's mailing lists.
+//                                            Nothing flipped, nothing
+//                                            stamped — honest refusal so
+//                                            the operator knows.
+//   3. ok=false, code='already_unsubscribed' — every subscriber row was
+//                                              already unsubscribed.
+//                                              Different from (1) because
+//                                              there was nothing to do at
+//                                              the subscriber level.
 router.post('/replies/:id/manual-unsubscribe', (req, res) => {
   const r = db.prepare('SELECT * FROM email_replies WHERE id=?').get(req.params.id);
   if (!r) return res.status(404).json({ error: 'Not found' });
 
   const email = r.from_address;
-  // Find all subscribers with this email across all lists belonging to this email_client
-  const subs = db.prepare(`
+  const emailLc = String(email || '').toLowerCase();
+  const linkedIds = resolveLinkedSet(r.email_client_id);
+  const idPlaceholders = linkedIds.map(() => '?').join(',');
+
+  // ALL subscriber rows for this email under the customer's linked set,
+  // regardless of current status. We need to know if (a) there are any rows
+  // at all, and (b) which are still active and need flipping.
+  const allRows = db.prepare(`
     SELECT s.* FROM email_subscribers s
     JOIN email_lists l ON s.list_id = l.id
-    WHERE LOWER(s.email) = ? AND l.email_client_id = ? AND s.status = 'subscribed'
-  `).all(email, r.email_client_id);
+    WHERE LOWER(s.email) = ? AND l.email_client_id IN (${idPlaceholders})
+  `).all(emailLc, ...linkedIds);
 
-  for (const s of subs) {
+  if (allRows.length === 0) {
+    return res.json({
+      ok: false,
+      code: 'not_on_lists',
+      message: 'This contact isn\'t on any of your mailing lists, so there\'s nothing to unsubscribe.',
+    });
+  }
+
+  const subscribedRows = allRows.filter(s => s.status === 'subscribed');
+  if (subscribedRows.length === 0) {
+    return res.json({
+      ok: false,
+      code: 'already_unsubscribed',
+      message: 'This contact is already unsubscribed from all of your mailing lists.',
+    });
+  }
+
+  for (const s of subscribedRows) {
     db.prepare("UPDATE email_subscribers SET status='unsubscribed', unsubscribed_at=datetime('now') WHERE id=?").run(s.id);
     db.prepare(`UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?`)
       .run(s.list_id, s.list_id);
@@ -2226,8 +2271,72 @@ router.post('/replies/:id/manual-unsubscribe', (req, res) => {
   db.prepare('UPDATE email_replies SET auto_unsubscribed=1 WHERE id=?').run(req.params.id);
   db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, reply_id, metadata)
               VALUES (?, 'user', 'manual_unsubscribe', 'subscriber', ?, ?, ?)`)
-    .run(uuid(), email, req.params.id, JSON.stringify({ email_client_id: r.email_client_id, lists_affected: subs.length }));
-  res.json({ ok: true, lists_affected: subs.length });
+    .run(uuid(), email, req.params.id, JSON.stringify({
+      email_client_id: r.email_client_id,
+      linked_ids: linkedIds,
+      lists_affected: subscribedRows.length,
+    }));
+  res.json({ ok: true, lists_affected: subscribedRows.length });
+});
+
+// POST /api/email/replies/:id/manual-resubscribe — reverse of the above.
+//
+// Flips every unsubscribed subscriber row for this email back to status =
+// 'subscribed' and clears unsubscribed_at, across the linked set. Does NOT
+// touch the per-reply auto_unsubscribed flag — that's audit history for the
+// reply, not the contact's current state. (The new "contact_unsubscribed"
+// pill reads from email_subscribers, not from this flag, so dropping the
+// pill on next load is the visible effect.)
+//
+// Same three-shape response pattern as unsubscribe:
+//   ok=true, lists_affected=N             — at least one row flipped back
+//   ok=false, code='not_on_lists'         — no subscriber rows exist at all
+//   ok=false, code='already_subscribed'   — all rows already active
+router.post('/replies/:id/manual-resubscribe', (req, res) => {
+  const r = db.prepare('SELECT * FROM email_replies WHERE id=?').get(req.params.id);
+  if (!r) return res.status(404).json({ error: 'Not found' });
+
+  const email = r.from_address;
+  const emailLc = String(email || '').toLowerCase();
+  const linkedIds = resolveLinkedSet(r.email_client_id);
+  const idPlaceholders = linkedIds.map(() => '?').join(',');
+
+  const allRows = db.prepare(`
+    SELECT s.* FROM email_subscribers s
+    JOIN email_lists l ON s.list_id = l.id
+    WHERE LOWER(s.email) = ? AND l.email_client_id IN (${idPlaceholders})
+  `).all(emailLc, ...linkedIds);
+
+  if (allRows.length === 0) {
+    return res.json({
+      ok: false,
+      code: 'not_on_lists',
+      message: 'This contact isn\'t on any of your mailing lists.',
+    });
+  }
+
+  const unsubRows = allRows.filter(s => s.status === 'unsubscribed');
+  if (unsubRows.length === 0) {
+    return res.json({
+      ok: false,
+      code: 'already_subscribed',
+      message: 'This contact is already subscribed to all of your mailing lists.',
+    });
+  }
+
+  for (const s of unsubRows) {
+    db.prepare("UPDATE email_subscribers SET status='subscribed', unsubscribed_at=NULL WHERE id=?").run(s.id);
+    db.prepare(`UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?`)
+      .run(s.list_id, s.list_id);
+  }
+  db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, reply_id, metadata)
+              VALUES (?, 'user', 'manual_resubscribe', 'subscriber', ?, ?, ?)`)
+    .run(uuid(), email, req.params.id, JSON.stringify({
+      email_client_id: r.email_client_id,
+      linked_ids: linkedIds,
+      lists_affected: unsubRows.length,
+    }));
+  res.json({ ok: true, lists_affected: unsubRows.length });
 });
 
 // POST /api/email/replies/:id/send — admin reply to an inbound message.

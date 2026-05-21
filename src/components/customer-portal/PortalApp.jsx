@@ -2371,7 +2371,7 @@ function badgeStyle() {
 // new untrusted vector here that didn't already exist in their mail client.
 // We do still want the rendered HTML scoped (no global style bleed), so we
 // wrap it in a div with isolation styles.
-function ReplyDetailModal({ reply, onClose, onCompose, onNavigateToCrm }) {
+function ReplyDetailModal({ reply: replyProp, onClose, onCompose, onNavigateToCrm }) {
   // Hot Prospects state. addingProspect = button is mid-POST. hotProspectBanner
   // holds the success/already-on-list message after a successful add:
   //   { kind: 'added' | 'already', prospect_id: '<uuid>' }
@@ -2381,6 +2381,52 @@ function ReplyDetailModal({ reply, onClose, onCompose, onNavigateToCrm }) {
   const [addingProspect, setAddingProspect] = useState(false);
   const [hotProspectBanner, setHotProspectBanner] = useState(null);
   const [addError, setAddError] = useState(null);
+
+  // Local copy of the reply object so sub/resub clicks can mutate
+  // contact_unsubscribed in place without refetching the inbox list. Falls
+  // back to the prop on first render. A separate `subResubStatus` carries
+  // the inline status line that appears after each click.
+  const [replyOverride, setReplyOverride] = useState(null);
+  const reply = replyOverride || replyProp;
+  const [subResubBusy, setSubResubBusy] = useState(false);
+  const [subResubStatus, setSubResubStatus] = useState(null);
+
+  // Unsubscribe / Re-subscribe handler. Same three-shape response handling
+  // as the admin side. Updates contact_unsubscribed locally so the badge +
+  // button row swap state without a network round-trip.
+  async function manualSubResub(action) {
+    if (!reply || subResubBusy) return;
+    setSubResubBusy(true);
+    setSubResubStatus(null);
+    try {
+      const r = await fetch(`/api/portal/replies/${encodeURIComponent(reply.id)}/${action}`, {
+        method: 'POST', credentials: 'include',
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok && !d.code) {
+        setSubResubStatus({ kind:'error', text: d.error || `${action} failed (HTTP ${r.status})` });
+        setSubResubBusy(false);
+        return;
+      }
+      if (d.ok) {
+        const what = action === 'manual-unsubscribe' ? 'Unsubscribed' : 'Re-subscribed';
+        setSubResubStatus({ kind:'success', text: `✓ ${what} from ${d.lists_affected} list${d.lists_affected===1?'':'s'}` });
+        // Flip the local copy so the badges + buttons update in place. The
+        // grey "Unsubscribed" pill reads from contact_unsubscribed; flipping
+        // it here means the next render shows the right state.
+        setReplyOverride({
+          ...reply,
+          contact_unsubscribed: action === 'manual-unsubscribe',
+        });
+      } else if (d.code) {
+        setSubResubStatus({ kind:'info', text: d.message });
+      }
+    } catch (e) {
+      setSubResubStatus({ kind:'error', text: `${action} failed: ${e.message || e}` });
+    } finally {
+      setSubResubBusy(false);
+    }
+  }
 
   async function addToHotProspects() {
     if (!reply || addingProspect) return;
@@ -2483,8 +2529,68 @@ function ReplyDetailModal({ reply, onClose, onCompose, onNavigateToCrm }) {
                 fontFamily:'inherit',
               }}
             >{addingProspect ? 'Adding…' : '🔥 Send to Hot Prospects'}</button>
+            {/* Unsubscribe / Re-subscribe — toggles based on contact's
+                current state in email_subscribers. When contact_unsubscribed
+                is true, replaces the Unsubscribe button with a confirmation
+                label + Re-subscribe button. Same three-shape backend
+                response handling (success/info/error) as the admin side. */}
+            {reply.contact_unsubscribed ? (
+              <>
+                <span style={{
+                  padding:'8px 12px', fontSize:12,
+                  background:'#F1EFE8', color:'#5F5E5A',
+                  borderRadius:6, alignSelf:'center',
+                }}>✓ Already unsubscribed</span>
+                <button
+                  onClick={() => {
+                    if (confirm(`Re-subscribe ${reply.from_address} to your mailing lists?`)) {
+                      manualSubResub('manual-resubscribe');
+                    }
+                  }}
+                  disabled={subResubBusy}
+                  style={{
+                    padding:'8px 14px', fontSize:13,
+                    background:CARD, color:TEXT, border:`0.5px solid ${BORDER}`, borderRadius:6,
+                    cursor: subResubBusy ? 'default' : 'pointer',
+                    opacity: subResubBusy ? 0.7 : 1,
+                    fontFamily:'inherit',
+                  }}
+                >Re-subscribe</button>
+              </>
+            ) : (
+              <button
+                onClick={() => {
+                  if (confirm(`Unsubscribe ${reply.from_address} from all of your mailing lists?`)) {
+                    manualSubResub('manual-unsubscribe');
+                  }
+                }}
+                disabled={subResubBusy}
+                style={{
+                  padding:'8px 14px', fontSize:13, fontWeight:500,
+                  background:'#fdecea', color:'#a73a30',
+                  border:'none', borderRadius:6,
+                  cursor: subResubBusy ? 'default' : 'pointer',
+                  opacity: subResubBusy ? 0.7 : 1,
+                  fontFamily:'inherit',
+                }}
+              >Unsubscribe</button>
+            )}
             <BtnSecondary onClick={onClose}>Close</BtnSecondary>
           </div>
+
+          {/* Inline status line for the most recent unsub/resub action.
+              Three flavours: success (green), info (grey italic, e.g. "not on
+              any list"), error (red). Stays visible until the next click so
+              the customer sees confirmation of what happened. */}
+          {subResubStatus && (
+            <div style={{
+              marginTop:8, fontSize:12,
+              color: subResubStatus.kind === 'success' ? '#085041'
+                   : subResubStatus.kind === 'error'   ? '#a73a30'
+                   : '#5F5E5A',
+              fontStyle: subResubStatus.kind === 'info' ? 'italic' : 'normal',
+            }}>{subResubStatus.text}</div>
+          )}
         </div>
 
         {/* Scrolling body — preserves sender's formatting like a real email
@@ -3133,6 +3239,47 @@ function PortalProspectDetailModal({ prospectId, onClose, onChange }) {
     }
   }
 
+  // Re-subscribe handler. Only triggered from a button that's only shown
+  // when prospect.contact_unsubscribed === true. Flips the prospect back to
+  // subscribed across the customer's linked set; updates the local prospect
+  // copy in-place on success so the button disappears.
+  const [resubBusy, setResubBusy] = useState(false);
+  const [resubStatus, setResubStatus] = useState(null);
+  async function resubscribeProspect() {
+    if (resubBusy || !data?.prospect) return;
+    if (!confirm(`Re-subscribe ${data.prospect.prospect_email} to your mailing lists?`)) return;
+    setResubBusy(true);
+    setResubStatus(null);
+    try {
+      const r = await fetch(`/api/portal/hot-prospects/${encodeURIComponent(prospectId)}/resubscribe`, {
+        method:'POST', credentials:'include',
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok && !d.code) {
+        setResubStatus({ kind:'error', text: d.error || `Re-subscribe failed (HTTP ${r.status})` });
+        setResubBusy(false);
+        return;
+      }
+      if (d.ok) {
+        setResubStatus({ kind:'success', text: `✓ Re-subscribed to ${d.lists_affected} list${d.lists_affected===1?'':'s'}` });
+        // Flip the prospect locally so the button disappears.
+        setData(prev => prev ? { ...prev, prospect: { ...prev.prospect, contact_unsubscribed: false } } : prev);
+      } else if (d.code) {
+        setResubStatus({ kind:'info', text: d.message });
+        // Edge-case: prospect was flagged as unsubbed at fetch time but is
+        // somehow already subscribed now (another tab? admin action?). Clear
+        // the local flag so the UI re-syncs.
+        if (d.code === 'already_subscribed' || d.code === 'not_on_lists') {
+          setData(prev => prev ? { ...prev, prospect: { ...prev.prospect, contact_unsubscribed: false } } : prev);
+        }
+      }
+    } catch (e) {
+      setResubStatus({ kind:'error', text: `Re-subscribe failed: ${e.message || e}` });
+    } finally {
+      setResubBusy(false);
+    }
+  }
+
   return (
     <Modal title="Hot prospect" onClose={onClose} wide>
       {!data ? (
@@ -3156,13 +3303,16 @@ function PortalProspectDetailModal({ prospectId, onClose, onChange }) {
           onReopen={reopenAsActive}
           markBusy={markBusy}
           markError={markError}
+          onResubscribe={resubscribeProspect}
+          resubBusy={resubBusy}
+          resubStatus={resubStatus}
         />
       )}
     </Modal>
   );
 }
 
-function PortalProspectDetailBody({ data, followUp, setFollowUp, notes, setNotes, status, setStatus, tagColor, setTagColor, savingState, onRemove, removeBusy, removeError, onMarkConverted, onReopen, markBusy, markError }) {
+function PortalProspectDetailBody({ data, followUp, setFollowUp, notes, setNotes, status, setStatus, tagColor, setTagColor, savingState, onRemove, removeBusy, removeError, onMarkConverted, onReopen, markBusy, markError, onResubscribe, resubBusy, resubStatus }) {
   const p = data.prospect;
   const av = portalAvatarColor(p.prospect_name || p.prospect_email);
   const isConverted = !!p.closed_at;
@@ -3264,6 +3414,49 @@ function PortalProspectDetailBody({ data, followUp, setFollowUp, notes, setNotes
           >🗑 Remove</button>
         </div>
       </div>
+
+      {/* Re-subscribe — only appears when the contact is currently
+          unsubscribed from at least one of the customer's mailing lists.
+          Hidden for prospects who came in via website forms (no subscriber
+          rows at all) — those need the Subscribers admin section, not a
+          toggle button. Status line below the button mirrors the per-reply
+          modal's pattern. */}
+      {p.contact_unsubscribed && (
+        <div style={{
+          marginBottom:12,
+          padding:'10px 14px',
+          background: '#FFF8E6',
+          borderLeft: `3px solid ${AMBER}`,
+          borderRadius:6,
+          display:'flex', alignItems:'center', justifyContent:'space-between', gap:12,
+          flexWrap:'wrap',
+        }}>
+          <div style={{ fontSize:12, color:'#5F5E5A', lineHeight:1.5 }}>
+            <b style={{fontWeight:500, color:TEXT}}>🚫 Unsubscribed from your mailing list.</b>{' '}
+            Re-subscribe them if you'd like to include them in future campaigns.
+          </div>
+          <button
+            onClick={onResubscribe}
+            disabled={resubBusy}
+            style={{
+              background: AMBER, color:'#fff', border:'none',
+              borderRadius:7, padding:'7px 12px', fontSize:13, fontWeight:500,
+              cursor: resubBusy ? 'not-allowed' : 'pointer',
+              opacity: resubBusy ? 0.6 : 1,
+              fontFamily:'inherit', whiteSpace:'nowrap',
+            }}
+          >{resubBusy ? 'Re-subscribing…' : 'Re-subscribe'}</button>
+        </div>
+      )}
+      {resubStatus && (
+        <div style={{
+          marginBottom:12, fontSize:12,
+          color: resubStatus.kind === 'success' ? '#085041'
+               : resubStatus.kind === 'error'   ? DANGER
+               : '#5F5E5A',
+          fontStyle: resubStatus.kind === 'info' ? 'italic' : 'normal',
+        }}>{resubStatus.text}</div>
+      )}
 
       {markError && (
         <div style={{ background:'#fdecea', borderLeft:`3px solid ${DANGER}`, borderRadius:6, padding:'8px 12px', marginBottom:12, fontSize:12, color:DANGER }}>

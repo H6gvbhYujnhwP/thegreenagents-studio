@@ -1334,6 +1334,133 @@ router.post('/replies/:id/send', async (req, res) => {
   }
 });
 
+// ─── POST /api/portal/replies/:id/manual-unsubscribe ──────────────────────────
+// Customer-side unsubscribe button. Mirror of the admin endpoint in
+// routes/email.js. Same three response shapes (ok=true / not_on_lists /
+// already_unsubscribed) so the frontend can render the same UI feedback.
+//
+// Tenant-scoped: the reply MUST belong to this customer's linked email_client.
+// 404 (not 403) on cross-tenant lookups, consistent with the rest of the
+// portal API (don't leak existence of other customers' replies).
+//
+// Audit log entry is tagged actor='user' with the portal client_user_id so
+// we can tell admin-side unsubscribes apart from customer-side ones forever.
+router.post('/replies/:id/manual-unsubscribe', (req, res) => {
+  const linkedEmailClientId = resolveEmailClientId(req.portalClient.id);
+  if (!linkedEmailClientId) return res.status(404).json({ error: 'Not found' });
+
+  const r = db.prepare('SELECT * FROM email_replies WHERE id = ?').get(req.params.id);
+  if (!r || r.email_client_id !== linkedEmailClientId) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  const email = r.from_address;
+  const emailLc = String(email || '').toLowerCase();
+  const linkedIds = resolveLinkedSet(r.email_client_id);
+  const idPlaceholders = linkedIds.map(() => '?').join(',');
+
+  const allRows = db.prepare(`
+    SELECT s.* FROM email_subscribers s
+    JOIN email_lists l ON s.list_id = l.id
+    WHERE LOWER(s.email) = ? AND l.email_client_id IN (${idPlaceholders})
+  `).all(emailLc, ...linkedIds);
+
+  if (allRows.length === 0) {
+    return res.json({
+      ok: false,
+      code: 'not_on_lists',
+      message: 'This contact isn\'t on any of your mailing lists, so there\'s nothing to unsubscribe.',
+    });
+  }
+  const subscribedRows = allRows.filter(s => s.status === 'subscribed');
+  if (subscribedRows.length === 0) {
+    return res.json({
+      ok: false,
+      code: 'already_unsubscribed',
+      message: 'This contact is already unsubscribed from all of your mailing lists.',
+    });
+  }
+  for (const s of subscribedRows) {
+    db.prepare("UPDATE email_subscribers SET status='unsubscribed', unsubscribed_at=datetime('now') WHERE id=?").run(s.id);
+    db.prepare(`UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?`)
+      .run(s.list_id, s.list_id);
+  }
+  db.prepare('UPDATE email_replies SET auto_unsubscribed=1 WHERE id=?').run(req.params.id);
+  db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, reply_id, metadata)
+              VALUES (?, ?, 'manual_unsubscribe', 'subscriber', ?, ?, ?)`)
+    .run(
+      uuid(),
+      'portal:' + (req.portalUser?.id || 'unknown'),
+      email, req.params.id, JSON.stringify({
+        email_client_id: r.email_client_id,
+        linked_ids: linkedIds,
+        lists_affected: subscribedRows.length,
+        source: 'portal',
+      })
+    );
+  res.json({ ok: true, lists_affected: subscribedRows.length });
+});
+
+// ─── POST /api/portal/replies/:id/manual-resubscribe ──────────────────────────
+// Mirror of the admin endpoint. Same three-shape response (ok=true /
+// not_on_lists / already_subscribed). Does NOT touch the per-reply
+// auto_unsubscribed flag — it's audit history for the reply, not contact
+// state. Tenant-scoped (404 cross-tenant).
+router.post('/replies/:id/manual-resubscribe', (req, res) => {
+  const linkedEmailClientId = resolveEmailClientId(req.portalClient.id);
+  if (!linkedEmailClientId) return res.status(404).json({ error: 'Not found' });
+
+  const r = db.prepare('SELECT * FROM email_replies WHERE id = ?').get(req.params.id);
+  if (!r || r.email_client_id !== linkedEmailClientId) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  const email = r.from_address;
+  const emailLc = String(email || '').toLowerCase();
+  const linkedIds = resolveLinkedSet(r.email_client_id);
+  const idPlaceholders = linkedIds.map(() => '?').join(',');
+
+  const allRows = db.prepare(`
+    SELECT s.* FROM email_subscribers s
+    JOIN email_lists l ON s.list_id = l.id
+    WHERE LOWER(s.email) = ? AND l.email_client_id IN (${idPlaceholders})
+  `).all(emailLc, ...linkedIds);
+
+  if (allRows.length === 0) {
+    return res.json({
+      ok: false,
+      code: 'not_on_lists',
+      message: 'This contact isn\'t on any of your mailing lists.',
+    });
+  }
+  const unsubRows = allRows.filter(s => s.status === 'unsubscribed');
+  if (unsubRows.length === 0) {
+    return res.json({
+      ok: false,
+      code: 'already_subscribed',
+      message: 'This contact is already subscribed to all of your mailing lists.',
+    });
+  }
+  for (const s of unsubRows) {
+    db.prepare("UPDATE email_subscribers SET status='subscribed', unsubscribed_at=NULL WHERE id=?").run(s.id);
+    db.prepare(`UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?`)
+      .run(s.list_id, s.list_id);
+  }
+  db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, reply_id, metadata)
+              VALUES (?, ?, 'manual_resubscribe', 'subscriber', ?, ?, ?)`)
+    .run(
+      uuid(),
+      'portal:' + (req.portalUser?.id || 'unknown'),
+      email, req.params.id, JSON.stringify({
+        email_client_id: r.email_client_id,
+        linked_ids: linkedIds,
+        lists_affected: unsubRows.length,
+        source: 'portal',
+      })
+    );
+  res.json({ ok: true, lists_affected: unsubRows.length });
+});
+
 // ─── 3b-iii: Campaigns view ───────────────────────────────────────────────────
 // Read-only list of email campaigns the customer has had sent on their behalf.
 // Filtered by the email-service-linked email_client (same join as inbox).
@@ -1900,6 +2027,37 @@ function _getInboxNamesByIds(ids) {
   return new Map(rows.map(r => [String(r.id), r.name]));
 }
 
+// Look up which of a list of emails are currently unsubscribed under any of
+// the customer's linked email_client_ids. Mirror of the helper in
+// routes/hot-prospects.js (kept local rather than imported so the portal
+// helpers stay self-contained — see comment near _resolveProspectLinkedSet).
+// Returns a Set of LOWERCASE addresses.
+function computePortalUnsubAddresses(linkedIds, emails) {
+  const out = new Set();
+  if (!linkedIds || linkedIds.length === 0) return out;
+  if (!emails || emails.length === 0) return out;
+  const addrsLc = Array.from(new Set(
+    emails.filter(Boolean).map(e => String(e).toLowerCase())
+  ));
+  if (addrsLc.length === 0) return out;
+  const idPlaceholders = linkedIds.map(() => '?').join(',');
+  const addrPlaceholders = addrsLc.map(() => '?').join(',');
+  try {
+    const rows = db.prepare(`
+      SELECT DISTINCT LOWER(s.email) AS addr
+      FROM email_subscribers s
+      JOIN email_lists l ON l.id = s.list_id
+      WHERE l.email_client_id IN (${idPlaceholders})
+        AND LOWER(s.email) IN (${addrPlaceholders})
+        AND (s.status = 'unsubscribed' OR s.unsubscribed_at IS NOT NULL)
+    `).all(...linkedIds, ...addrsLc);
+    for (const r of rows) out.add(r.addr);
+  } catch (e) {
+    console.warn('[portal] computePortalUnsubAddresses failed (non-fatal):', e?.message || e);
+  }
+  return out;
+}
+
 // GET /api/portal/hot-prospects — list the customer's prospects, newest-first.
 // Expands across the customer's linked email rows so prospects flagged on a
 // linked inbox (e.g. mail.engineering… for Cube 6) appear here.
@@ -1954,9 +2112,14 @@ router.get('/hot-prospects', (req, res) => {
   }
 
   const hasLinkedInboxes = linkedIds.length > 1;
+  // contact_unsubscribed per prospect — drives the Re-subscribe button in
+  // the detail modal. Same lookup as the inbox helper; null/empty addresses
+  // are tolerated by computePortalUnsubAddresses.
+  const unsubAddrs = computePortalUnsubAddresses(linkedIds, rows.map(r => r.prospect_email));
   const projected = rows.map(r => ({
     ...r,
     source_inbox_name: inboxNames.get(String(r.email_client_id)) || null,
+    contact_unsubscribed: unsubAddrs.has(String(r.prospect_email || '').toLowerCase()),
   }));
 
   res.json({ prospects: projected, has_linked_inboxes: hasLinkedInboxes });
@@ -2188,6 +2351,70 @@ router.get('/hot-prospects/unread-count', (req, res) => {
   res.json({ count: row?.count || 0 });
 });
 
+// POST /api/portal/hot-prospects/:id/resubscribe — re-subscribe a Hot
+// Prospect back to the customer's mailing lists. Mirror of the admin
+// endpoint in routes/hot-prospects.js. Tenant-scoped across the linked
+// set so a prospect belonging to a foreign customer can't be touched.
+//
+// Returns the same three-shape response (ok=true / not_on_lists /
+// already_subscribed) so the frontend can show consistent feedback.
+router.post('/hot-prospects/:id/resubscribe', (req, res) => {
+  const clientId = req.portalClient.id;
+  const id = String(req.params.id || '');
+  const linkedIds = _resolveProspectLinkedSet(clientId);
+  const inOwn = _inClause('email_client_id', linkedIds);
+  const prospect = db
+    .prepare(`SELECT * FROM hot_prospects WHERE id = ? AND ${inOwn.sql}`)
+    .get(id, ...inOwn.params);
+  if (!prospect) {
+    return res.status(404).json({ error: 'prospect not found' });
+  }
+
+  const emailLc = String(prospect.prospect_email || '').toLowerCase();
+  const idPlaceholders = linkedIds.map(() => '?').join(',');
+
+  const allRows = db.prepare(`
+    SELECT s.* FROM email_subscribers s
+    JOIN email_lists l ON s.list_id = l.id
+    WHERE LOWER(s.email) = ? AND l.email_client_id IN (${idPlaceholders})
+  `).all(emailLc, ...linkedIds);
+
+  if (allRows.length === 0) {
+    return res.json({
+      ok: false,
+      code: 'not_on_lists',
+      message: 'This contact isn\'t on any of your mailing lists.',
+    });
+  }
+  const unsubRows = allRows.filter(s => s.status === 'unsubscribed');
+  if (unsubRows.length === 0) {
+    return res.json({
+      ok: false,
+      code: 'already_subscribed',
+      message: 'This contact is already subscribed to all of your mailing lists.',
+    });
+  }
+  for (const s of unsubRows) {
+    db.prepare("UPDATE email_subscribers SET status='subscribed', unsubscribed_at=NULL WHERE id=?").run(s.id);
+    db.prepare(`UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?`)
+      .run(s.list_id, s.list_id);
+  }
+  db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, metadata)
+              VALUES (?, ?, 'hot_prospect_resubscribe', 'subscriber', ?, ?)`)
+    .run(
+      uuid(),
+      'portal:' + (req.portalUser?.id || 'unknown'),
+      prospect.prospect_email, JSON.stringify({
+        hot_prospect_id: id,
+        email_client_id: prospect.email_client_id,
+        linked_ids: linkedIds,
+        lists_affected: unsubRows.length,
+        source: 'portal',
+      })
+    );
+  res.json({ ok: true, lists_affected: unsubRows.length });
+});
+
 // POST /api/portal/hot-prospects/:id/mark-converted — mark as converted.
 // Tenant-scoped across the customer's linked set. Idempotent: calling on an
 // already-closed row preserves the original closed_at/closed_by.
@@ -2392,10 +2619,18 @@ router.get('/hot-prospects/:id/thread', (req, res) => {
     })),
   ].sort((a, b) => String(a.at).localeCompare(String(b.at)));
 
+  // contact_unsubscribed: drives the Re-subscribe button in the prospect
+  // detail modal. Single-address lookup uses the same helper as the list
+  // endpoint. Returns false if the prospect has no subscriber rows at all
+  // (i.e. came in via a website form) — in that case the button is
+  // correctly hidden.
+  const unsubAddrs = computePortalUnsubAddresses(linkedIds, [prospect.prospect_email]);
+
   const prospectWithSource = {
     ...prospect,
     source_inbox_name: inboxNames.get(String(prospect.email_client_id)) || null,
     has_linked_inboxes: linkedIds.length > 1,
+    contact_unsubscribed: unsubAddrs.has(String(prospect.prospect_email || '').toLowerCase()),
   };
 
   res.json({ prospect: prospectWithSource, thread: merged });

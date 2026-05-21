@@ -154,6 +154,45 @@ function resolveCrmCustomerId(emailClientId) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Look up which of a list of emails are currently unsubscribed under any of
+// a customer's linked email_client_ids. Returns a Set of LOWERCASE email
+// addresses so callers can do O(1) `unsub.has(email.toLowerCase())` checks.
+//
+// Used by the list endpoints to decorate each prospect with
+// `contact_unsubscribed`. Works with linked sets so prospects under a linked
+// customer (Cube6 anchor + mail.eng inbox row) get a correct answer
+// regardless of which row owns the mailing lists.
+//
+// Returns an empty Set if either input is empty — safe to call on a no-row
+// page.
+// ─────────────────────────────────────────────────────────────────────────────
+function computeUnsubscribedAddresses(linkedIds, emails) {
+  const out = new Set();
+  if (!linkedIds || linkedIds.length === 0) return out;
+  if (!emails || emails.length === 0) return out;
+  const addrsLc = Array.from(new Set(
+    emails.filter(Boolean).map(e => String(e).toLowerCase())
+  ));
+  if (addrsLc.length === 0) return out;
+  const idPlaceholders = linkedIds.map(() => '?').join(',');
+  const addrPlaceholders = addrsLc.map(() => '?').join(',');
+  try {
+    const rows = db.prepare(`
+      SELECT DISTINCT LOWER(s.email) AS addr
+      FROM email_subscribers s
+      JOIN email_lists l ON l.id = s.list_id
+      WHERE l.email_client_id IN (${idPlaceholders})
+        AND LOWER(s.email) IN (${addrPlaceholders})
+        AND (s.status = 'unsubscribed' OR s.unsubscribed_at IS NOT NULL)
+    `).all(...linkedIds, ...addrsLc);
+    for (const r of rows) out.add(r.addr);
+  } catch (e) {
+    console.warn('[hot-prospects] computeUnsubscribedAddresses failed (non-fatal):', e?.message || e);
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/email/hot-prospects?email_client_id=...
 //
 // List one customer's prospects, newest-first by added_at. Optional ?search
@@ -234,9 +273,20 @@ router.get('/', (req, res) => {
   // Also expose has_linked_inboxes so the frontend can decide whether to
   // show the column at all (decision: only when the set has > 1 row).
   const hasLinkedInboxes = linkedIds.length > 1;
+
+  // Attach contact_unsubscribed: true if this prospect's email matches any
+  // subscriber row under the customer's linked set with status='unsubscribed'
+  // (or unsubscribed_at populated). Drives the "Re-subscribe" button in the
+  // detail modal (only shown when this is true).
+  //
+  // Honest caveat: prospects who came in via website forms (Formspree leads,
+  // Mr Ian McCreery etc.) typically have NO subscriber row at all — neither
+  // subscribed nor unsubscribed. The button is correctly hidden for them.
+  const unsubAddrs = computeUnsubscribedAddresses(linkedIds, rows.map(r => r.prospect_email));
   const projected = rows.map(r => ({
     ...r,
     source_inbox_name: inboxNames.get(String(r.email_client_id)) || null,
+    contact_unsubscribed: unsubAddrs.has(String(r.prospect_email || '').toLowerCase()),
   }));
 
   res.json({
@@ -578,6 +628,79 @@ router.post('/:id/mark-viewed', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// POST /api/email/hot-prospects/:id/resubscribe
+//
+// Re-subscribe a Hot Prospect back to the mailing lists they were
+// unsubscribed from. Operator use case: prospect replied "we're busy now,
+// catch up later" — they're on the list, we unsubscribed them politely,
+// later we want to add them back. Flips every status='unsubscribed' row
+// under the customer's linked set back to status='subscribed' + clears
+// unsubscribed_at.
+//
+// Three response shapes (matches the per-reply endpoint shape):
+//   ok=true, lists_affected=N             — flipped N rows back
+//   ok=false, code='not_on_lists'         — no subscriber rows exist;
+//                                           this is for prospects who
+//                                           came in via website forms or
+//                                           similar — nothing to do here
+//                                           (use the Subscribers admin
+//                                           section to add them).
+//   ok=false, code='already_subscribed'   — every existing row is active.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/:id/resubscribe', (req, res) => {
+  const id = String(req.params.id || '');
+  const prospect = db.prepare('SELECT * FROM hot_prospects WHERE id = ?').get(id);
+  if (!prospect) {
+    return res.status(404).json({ error: 'prospect not found' });
+  }
+
+  const emailLc = String(prospect.prospect_email || '').toLowerCase();
+  const linkedIds = resolveLinkedSet(prospect.email_client_id);
+  const idPlaceholders = linkedIds.map(() => '?').join(',');
+
+  const allRows = db.prepare(`
+    SELECT s.* FROM email_subscribers s
+    JOIN email_lists l ON s.list_id = l.id
+    WHERE LOWER(s.email) = ? AND l.email_client_id IN (${idPlaceholders})
+  `).all(emailLc, ...linkedIds);
+
+  if (allRows.length === 0) {
+    return res.json({
+      ok: false,
+      code: 'not_on_lists',
+      message: 'This contact isn\'t on any of your mailing lists. To add them, use the Subscribers section.',
+    });
+  }
+
+  const unsubRows = allRows.filter(s => s.status === 'unsubscribed');
+  if (unsubRows.length === 0) {
+    return res.json({
+      ok: false,
+      code: 'already_subscribed',
+      message: 'This contact is already subscribed to all of your mailing lists.',
+    });
+  }
+
+  for (const s of unsubRows) {
+    db.prepare("UPDATE email_subscribers SET status='subscribed', unsubscribed_at=NULL WHERE id=?").run(s.id);
+    db.prepare(`UPDATE email_lists SET subscriber_count=(SELECT COUNT(*) FROM email_subscribers WHERE list_id=? AND status='subscribed') WHERE id=?`)
+      .run(s.list_id, s.list_id);
+  }
+  // Audit-log entry. No reply_id (this is a prospect-level action, not tied
+  // to a specific email). Metadata records the linked-set + scope so we can
+  // reconstruct what happened later.
+  db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, metadata)
+              VALUES (?, 'user', 'hot_prospect_resubscribe', 'subscriber', ?, ?)`)
+    .run(uuid(), prospect.prospect_email, JSON.stringify({
+      hot_prospect_id: id,
+      email_client_id: prospect.email_client_id,
+      linked_ids: linkedIds,
+      lists_affected: unsubRows.length,
+    }));
+  res.json({ ok: true, lists_affected: unsubRows.length });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/email/hot-prospects/:id/mark-converted
 //
 // Mark a prospect as converted (became a real customer). Stamps closed_at +
@@ -826,10 +949,17 @@ router.get('/:id/thread', (req, res) => {
   // Attach source_inbox_name + has_linked_inboxes to the prospect so the
   // detail modal can show a "From mail.engineering…" subtitle and decide
   // whether to render the Inbox column-related metadata at all.
+  //
+  // Also attach contact_unsubscribed (single-address lookup) — drives the
+  // Re-subscribe button in the detail modal. False when the prospect has no
+  // subscriber rows (e.g. came in via a website form), which correctly
+  // hides the button per Q3=(a).
+  const unsubAddrs = computeUnsubscribedAddresses(linkedIds, [prospect.prospect_email]);
   const prospectWithSource = {
     ...prospect,
     source_inbox_name: inboxNames.get(String(prospect.email_client_id)) || null,
     has_linked_inboxes: linkedIds.length > 1,
+    contact_unsubscribed: unsubAddrs.has(String(prospect.prospect_email || '').toLowerCase()),
   };
 
   res.json({ prospect: prospectWithSource, thread: merged });
