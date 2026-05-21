@@ -1825,7 +1825,8 @@ router.get('/hot-prospects', (req, res) => {
       .prepare(
         `SELECT id, email_client_id, prospect_email, prospect_name,
                 follow_up_date, notes, added_by, added_at, updated_at,
-                closed_at, closed_by
+                closed_at, closed_by,
+                status, tag_color, portal_first_viewed_at
            FROM hot_prospects
           WHERE ${inClient.sql}
             AND (LOWER(COALESCE(prospect_name,'')) LIKE ? OR LOWER(prospect_email) LIKE ?)
@@ -1837,7 +1838,8 @@ router.get('/hot-prospects', (req, res) => {
       .prepare(
         `SELECT id, email_client_id, prospect_email, prospect_name,
                 follow_up_date, notes, added_by, added_at, updated_at,
-                closed_at, closed_by
+                closed_at, closed_by,
+                status, tag_color, portal_first_viewed_at
            FROM hot_prospects
           WHERE ${inClient.sql}
           ORDER BY ${orderBy}`
@@ -1938,7 +1940,8 @@ router.post('/hot-prospects', (req, res) => {
       updated_at      = excluded.updated_at
     RETURNING id, email_client_id, prospect_email, prospect_name,
               follow_up_date, notes, added_by, added_at, updated_at,
-              closed_at, closed_by, source_reply_id
+              closed_at, closed_by, source_reply_id,
+              status, tag_color, portal_first_viewed_at
   `);
   const row = stmt.get(
     id, inboxOwningId, prospectEmail, resolvedName,
@@ -1987,6 +1990,28 @@ router.put('/hot-prospects/:id', (req, res) => {
       ? null
       : (String(raw).trim() || null);
   }
+  // Status — fixed-set enum, same shape as admin route.
+  if ('status' in (req.body || {})) {
+    const raw = req.body.status;
+    const VALID_STATUSES = ['new', 'contacted', 'no_response'];
+    if (!VALID_STATUSES.includes(raw)) {
+      return res.status(400).json({ error: `status must be one of: ${VALID_STATUSES.join(', ')}` });
+    }
+    updates.status = raw;
+  }
+  // tag_color — customer-chosen palette override, null clears.
+  if ('tag_color' in (req.body || {})) {
+    const raw = req.body.tag_color;
+    if (raw === null || raw === undefined || raw === '') {
+      updates.tag_color = null;
+    } else {
+      const VALID_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink', 'grey'];
+      if (!VALID_COLORS.includes(raw)) {
+        return res.status(400).json({ error: `tag_color must be one of: ${VALID_COLORS.join(', ')}, or null` });
+      }
+      updates.tag_color = raw;
+    }
+  }
   if (Object.keys(updates).length === 0) {
     return res.status(400).json({ error: 'no updatable fields supplied' });
   }
@@ -2001,11 +2026,60 @@ router.put('/hot-prospects/:id', (req, res) => {
     .prepare(
       `SELECT id, email_client_id, prospect_email, prospect_name,
               follow_up_date, notes, added_by, added_at, updated_at,
-              closed_at, closed_by
+              closed_at, closed_by, source_reply_id,
+              status, tag_color, portal_first_viewed_at
          FROM hot_prospects WHERE id = ?`
     )
     .get(id);
   res.json({ prospect: row });
+});
+
+// POST /api/portal/hot-prospects/:id/mark-viewed — stamp
+// portal_first_viewed_at on first open. Mirror of the admin endpoint but
+// tracks the portal audience separately. Tenant-scoped (404 for foreign ids).
+// Idempotent — safe to fire-and-forget on every modal open.
+router.post('/hot-prospects/:id/mark-viewed', (req, res) => {
+  const clientId = req.portalClient.id;
+  const id = String(req.params.id || '');
+  const linkedIds = _resolveProspectLinkedSet(clientId);
+  const inOwn = _inClause('email_client_id', linkedIds);
+  const existing = db
+    .prepare(`SELECT id, portal_first_viewed_at FROM hot_prospects WHERE id = ? AND ${inOwn.sql}`)
+    .get(id, ...inOwn.params);
+  if (!existing) {
+    return res.status(404).json({ error: 'prospect not found' });
+  }
+  if (existing.portal_first_viewed_at) {
+    return res.json({ prospect: { id, portal_first_viewed_at: existing.portal_first_viewed_at } });
+  }
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  db.prepare(
+    'UPDATE hot_prospects SET portal_first_viewed_at = ?, updated_at = ? WHERE id = ?'
+  ).run(now, now, id);
+  res.json({ prospect: { id, portal_first_viewed_at: now } });
+});
+
+// GET /api/portal/hot-prospects/unread-count — number of active prospects
+// the portal session hasn't viewed yet (portal_first_viewed_at IS NULL AND
+// closed_at IS NULL). Drives the customer-portal sidebar number badge on
+// the "Hot Prospects" row. Tenant-scoped across the customer's linked set.
+//
+// Returns { count: N } — keeps the contract loose so future additions
+// (e.g. unread-by-category breakdown) don't break consumers.
+router.get('/hot-prospects/unread-count', (req, res) => {
+  const clientId = req.portalClient.id;
+  const linkedIds = _resolveProspectLinkedSet(clientId);
+  const inClient = _inClause('email_client_id', linkedIds);
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS count
+         FROM hot_prospects
+        WHERE ${inClient.sql}
+          AND portal_first_viewed_at IS NULL
+          AND closed_at IS NULL`
+    )
+    .get(...inClient.params);
+  res.json({ count: row?.count || 0 });
 });
 
 // POST /api/portal/hot-prospects/:id/mark-converted — mark as converted.
@@ -2035,7 +2109,8 @@ router.post('/hot-prospects/:id/mark-converted', (req, res) => {
     .prepare(
       `SELECT id, email_client_id, prospect_email, prospect_name,
               follow_up_date, notes, added_by, added_at, updated_at,
-              closed_at, closed_by
+              closed_at, closed_by, source_reply_id,
+              status, tag_color, portal_first_viewed_at
          FROM hot_prospects WHERE id = ?`
     )
     .get(id);
@@ -2064,7 +2139,8 @@ router.post('/hot-prospects/:id/reopen', (req, res) => {
     .prepare(
       `SELECT id, email_client_id, prospect_email, prospect_name,
               follow_up_date, notes, added_by, added_at, updated_at,
-              closed_at, closed_by
+              closed_at, closed_by, source_reply_id,
+              status, tag_color, portal_first_viewed_at
          FROM hot_prospects WHERE id = ?`
     )
     .get(id);
@@ -2125,7 +2201,8 @@ router.get('/hot-prospects/:id/thread', (req, res) => {
     .prepare(
       `SELECT id, email_client_id, prospect_email, prospect_name,
               follow_up_date, notes, added_by, added_at, updated_at,
-              closed_at, closed_by, source_reply_id
+              closed_at, closed_by, source_reply_id,
+              status, tag_color, portal_first_viewed_at
          FROM hot_prospects WHERE id = ? AND ${inOwn.sql}`
     )
     .get(id, ...inOwn.params);

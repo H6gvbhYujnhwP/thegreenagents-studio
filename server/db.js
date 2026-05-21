@@ -1454,6 +1454,67 @@ try { db.exec(`ALTER TABLE hot_prospects ADD COLUMN closed_by TEXT`); } catch {}
 // ─────────────────────────────────────────────────────────────────────────────
 try { db.exec(`ALTER TABLE hot_prospects ADD COLUMN source_reply_id TEXT`); } catch {}
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Migration: hot_prospects status/tag/viewed-tracking
+//   (decision 2026-05-21 — pipeline status + per-side unread tracking).
+//
+// `status`         — fixed-set pipeline state: 'new' | 'contacted' |
+//                    'no_response'. NOT NULL with default 'new'. Drives
+//                    both the status pill in the list and the default row
+//                    tint when no custom tag_color is set. Existing rows
+//                    backfill to 'new'.
+//
+// `tag_color`      — optional customer-chosen tag colour overlaying the
+//                    status default. Stored as the colour NAME ('red',
+//                    'orange', 'yellow', 'green', 'blue', 'purple', 'pink',
+//                    'grey') rather than a hex — keeps the palette
+//                    centralised in the frontend so we can adjust hex codes
+//                    later without migrating data. NULL means "no override —
+//                    use status default". Bounded palette deliberate;
+//                    free-hex picker was considered and rejected because
+//                    nothing prevents an operator picking an unreadable
+//                    colour pair against the row background.
+//
+// `admin_first_viewed_at`  — ISO datetime the admin first opened this
+//                            prospect's detail modal. NULL = never viewed
+//                            on admin side. Drives the "NEW" pill on the
+//                            admin list. One-way write — never re-cleared.
+//
+// `portal_first_viewed_at` — same idea, portal side. NULL = never viewed
+//                            in the customer portal. Drives BOTH the per-row
+//                            "NEW" pill on the portal list AND the unread
+//                            count badge on the portal sidebar. Tracked
+//                            separately from admin because admin and
+//                            customer are different audiences — admin
+//                            opening a prospect should not silently clear
+//                            the customer's "you have something new" signal
+//                            (and vice versa).
+//
+// All four migrations use the idempotent ALTER pattern. Default-NOT-NULL
+// requires backfilling existing rows so old data doesn't violate the
+// constraint — SQLite can't add a NOT NULL column with no default in one
+// step, so we do (1) ADD nullable, (2) UPDATE to set the default for
+// existing rows, then optionally (3) leave the column as nullable since
+// SQLite's runtime is forgiving and our INSERT paths always specify a
+// value (no orphan rows possible).
+// ─────────────────────────────────────────────────────────────────────────────
+try { db.exec(`ALTER TABLE hot_prospects ADD COLUMN status TEXT NOT NULL DEFAULT 'new'`); } catch {}
+try { db.exec(`ALTER TABLE hot_prospects ADD COLUMN tag_color TEXT`); } catch {}
+try { db.exec(`ALTER TABLE hot_prospects ADD COLUMN admin_first_viewed_at TEXT`); } catch {}
+try { db.exec(`ALTER TABLE hot_prospects ADD COLUMN portal_first_viewed_at TEXT`); } catch {}
+// Backfill: any rows that pre-date the status migration where the default
+// didn't fire (shouldn't happen with the DEFAULT clause above, but defence
+// in depth — at worst this is a no-op).
+try { db.exec(`UPDATE hot_prospects SET status = 'new' WHERE status IS NULL OR status = ''`); } catch {}
+// Index for the unread-count query (portal sidebar). One row per prospect,
+// scoped by email_client_id, filtered by NULL portal_first_viewed_at +
+// active (closed_at IS NULL). Partial index keeps it tiny.
+try { db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_hot_prospects_portal_unread
+    ON hot_prospects(email_client_id)
+    WHERE portal_first_viewed_at IS NULL AND closed_at IS NULL
+`); } catch {}
+
 // Partial index for the badge/list "is this row converted?" filter.
 // WHERE closed_at IS NOT NULL means the index only stores rows that ARE
 // converted — fast lookups for "converted prospects" without bloating the

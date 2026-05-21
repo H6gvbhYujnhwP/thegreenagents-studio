@@ -37,6 +37,40 @@ const GREEN_BG      = '#E1F5EE';
 const AMBER         = '#854F0B';
 const AMBER_BG      = '#FAEEDA';
 
+// ── Status + tag-colour helpers (mirror of CrmHotProspects.jsx) ──────────────
+// Three fixed pipeline statuses + bounded 8-colour palette for the
+// customer-chosen override. Kept in step with the admin file — when one
+// changes, change the other.
+
+const PORTAL_STATUS_OPTIONS = [
+  { value: 'new',         label: 'New',         bg: '#E6F1FB', fg: '#0C447C' },
+  { value: 'contacted',   label: 'Contacted',   bg: '#E1F5EE', fg: '#0F6E56' },
+  { value: 'no_response', label: 'No response', bg: '#F1EFE8', fg: '#5F5E5A' },
+];
+
+const PORTAL_TAG_COLORS = [
+  { value: null,     label: 'Default',  bg: null,      fg: null      },
+  { value: 'red',    label: 'Red',      bg: '#FAECE7', fg: '#793F1F' },
+  { value: 'orange', label: 'Orange',   bg: '#FAEEDA', fg: '#854F0B' },
+  { value: 'yellow', label: 'Yellow',   bg: '#FFF7C2', fg: '#5C4A05' },
+  { value: 'green',  label: 'Green',    bg: '#E1F5EE', fg: '#0F6E56' },
+  { value: 'blue',   label: 'Blue',     bg: '#E6F1FB', fg: '#0C447C' },
+  { value: 'purple', label: 'Purple',   bg: '#EEEDFE', fg: '#3C3489' },
+  { value: 'pink',   label: 'Pink',     bg: '#FCE7F2', fg: '#83215E' },
+  { value: 'grey',   label: 'Grey',     bg: '#EAEAE6', fg: '#3a3a3a' },
+];
+
+function portalResolveProspectChrome(prospect) {
+  const statusEntry = PORTAL_STATUS_OPTIONS.find(s => s.value === (prospect?.status || 'new')) || PORTAL_STATUS_OPTIONS[0];
+  if (prospect?.tag_color) {
+    const colorEntry = PORTAL_TAG_COLORS.find(c => c.value === prospect.tag_color);
+    if (colorEntry && colorEntry.bg) {
+      return { bg: colorEntry.bg, fg: colorEntry.fg, statusLabel: statusEntry.label };
+    }
+  }
+  return { bg: statusEntry.bg, fg: statusEntry.fg, statusLabel: statusEntry.label };
+}
+
 // ── MOCK DATA ────────────────────────────────────────────────────────────────
 // These get replaced with fetch calls in the backend chat. The shapes here
 // are what the API will need to return.
@@ -467,6 +501,11 @@ function PortalChrome({ user, client, services, onLogout }) {
   // mutated, so the badge drops the instant the customer marks a prospect
   // converted (no waiting for the next tick).
   const [hotProspectsDue, setHotProspectsDue] = useState(0);
+  // Unread count — prospects this portal session hasn't opened yet. Drives
+  // the green badge on the Hot Prospects nav item. Separate state from the
+  // due-counts above because the two signals mean different things and a
+  // prospect can be both (overdue follow-up AND not yet viewed).
+  const [hotProspectsUnread, setHotProspectsUnread] = useState(0);
   useEffect(() => {
     let cancelled = false;
     async function fetchDue() {
@@ -477,9 +516,18 @@ function PortalChrome({ user, client, services, onLogout }) {
         if (!cancelled) setHotProspectsDue(Number(d.total || 0));
       } catch {} // backend not yet deployed — silently ignore
     }
+    async function fetchUnread() {
+      try {
+        const r = await fetch('/api/portal/hot-prospects/unread-count', { credentials:'include' });
+        if (!r.ok) return;
+        const d = await r.json();
+        if (!cancelled) setHotProspectsUnread(Number(d.count || 0));
+      } catch {} // backend not yet deployed — silently ignore
+    }
     fetchDue();
-    const t = setInterval(fetchDue, 30_000);
-    function onMutation() { fetchDue(); }
+    fetchUnread();
+    const t = setInterval(() => { fetchDue(); fetchUnread(); }, 30_000);
+    function onMutation() { fetchDue(); fetchUnread(); }
     window.addEventListener('studio:hot-prospects-changed', onMutation);
     return () => {
       cancelled = true;
@@ -590,6 +638,7 @@ function PortalChrome({ user, client, services, onLogout }) {
               active={page==='hot_prospects'}
               onClick={() => setPage('hot_prospects')}
               badge={hotProspectsDue}
+              unreadBadge={hotProspectsUnread}
             />
           </NavSection>
 
@@ -783,7 +832,7 @@ function NavSection({ heading, children }) {
   );
 }
 
-function NavItem({ label, active, onClick, dim, suffix, badge }) {
+function NavItem({ label, active, onClick, dim, suffix, badge, unreadBadge }) {
   const [hover, setHover] = useState(false);
   return (
     <button onClick={onClick}
@@ -801,6 +850,17 @@ function NavItem({ label, active, onClick, dim, suffix, badge }) {
         width:'100%',
       }}>
       <span style={{ flex:1 }}>{label}</span>
+      {/* Unread count badge — green pill, lower priority than urgent. Shows
+          when there are prospects the portal session hasn't viewed yet.
+          Separate from the urgent badge because they signal different things
+          (unread = "look at this", urgent = "act now") and a row can be both. */}
+      {unreadBadge > 0 && (
+        <span style={{
+          background:'#0F6E56', color:'#fff', fontSize:10, fontWeight:600,
+          padding:'1px 6px', borderRadius:8, minWidth:14, textAlign:'center',
+          lineHeight:1.4,
+        }}>{unreadBadge}</span>
+      )}
       {/* Urgent count badge — red pill (matches admin sidebar's urgent badge
           variant). Only renders when badge > 0. Used by Hot Prospects to
           surface overdue + due-today follow-ups. */}
@@ -2702,12 +2762,11 @@ function portalFollowUpFormat(value) {
 function PortalProspectList({ prospects, onOpen, showInboxColumn }) {
   if (!prospects || prospects.length === 0) return null;
   // Grid template: mirrors CrmHotProspects.jsx's ProspectList — adds the
-  // 1.3fr Inbox column between Email and Added when the customer has linked
-  // inboxes. Single-inbox customers (Manson, Tower, etc.) keep the original
-  // 4-column layout so the column doesn't display redundant "self" labels.
+  // Grid now always includes a Status column (between Email and Inbox/Added).
+  // Inbox column appears for linked-inbox customers only — adds 0.85fr there.
   const gridCols = showInboxColumn
-    ? '1.7fr 1.6fr 1.3fr 0.9fr 0.9fr 32px'
-    : '2fr 1.8fr 1.2fr 1.2fr 32px';
+    ? '1.5fr 1.5fr 0.9fr 1.1fr 0.85fr 0.85fr 32px'
+    : '1.8fr 1.7fr 1.0fr 1.1fr 1.1fr 32px';
   return (
     <div style={{
       background:CARD, border:`0.5px solid ${BORDER}`, borderRadius:8,
@@ -2722,6 +2781,7 @@ function PortalProspectList({ prospects, onOpen, showInboxColumn }) {
       }}>
         <div>Name</div>
         <div>Email</div>
+        <div>Status</div>
         {showInboxColumn && <div>Inbox</div>}
         <div>Added</div>
         <div>Follow up</div>
@@ -2767,6 +2827,11 @@ function PortalProspectRow({ prospect, isLast, onOpen, showInboxColumn, gridCols
   const av = portalAvatarColor(prospect.prospect_name || prospect.prospect_email);
   const fu = portalFollowUpFormat(prospect.follow_up_date);
   const isConverted = !!prospect.closed_at;
+  const chrome = portalResolveProspectChrome(prospect);
+  // NEW pill — shown until the customer opens this prospect on the portal
+  // side for the first time. Tracks separately from admin's view state by
+  // design (each audience has its own "have I seen this" signal).
+  const isUnviewed = !prospect.portal_first_viewed_at && !isConverted;
   return (
     <div onClick={onOpen} style={{
       display:'grid', gridTemplateColumns: gridCols,
@@ -2792,6 +2857,14 @@ function PortalProspectRow({ prospect, isLast, onOpen, showInboxColumn, gridCols
             overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
             minWidth:0, flex:'0 1 auto',
           }}>{prospect.prospect_name || <span style={{ color:MUTED, fontWeight:400 }}>(no name)</span>}</div>
+          {isUnviewed && (
+            <span style={{
+              background: '#DC2626', color: '#fff',
+              fontSize:10, padding:'1px 6px', borderRadius:4,
+              fontWeight:600, letterSpacing:'0.3px',
+              flexShrink:0,
+            }}>NEW</span>
+          )}
           {isConverted && (
             <span style={{
               background: GREEN_BG, color: GREEN,
@@ -2802,6 +2875,13 @@ function PortalProspectRow({ prospect, isLast, onOpen, showInboxColumn, gridCols
         </div>
       </div>
       <div style={{ fontSize:13, color:MUTED, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{prospect.prospect_email}</div>
+      <div>
+        <span style={{
+          background: chrome.bg, color: chrome.fg,
+          fontSize:11, padding:'2px 8px', borderRadius:999,
+          fontWeight:500, display:'inline-block', whiteSpace:'nowrap',
+        }}>{chrome.statusLabel}</span>
+      </div>
       {showInboxColumn && (
         <div style={{ minWidth:0 }}>
           {prospect.source_inbox_name && (
@@ -2825,6 +2905,10 @@ function PortalProspectDetailModal({ prospectId, onClose, onChange }) {
   const [data, setData] = useState(null);  // { prospect, thread } or { error }
   const [followUp, setFollowUp] = useState('');
   const [notes, setNotes] = useState('');
+  // Status + tag colour state — matches admin's modal pattern. Saved via
+  // the same debounced PUT pipeline as follow-up/notes.
+  const [status, setStatus] = useState('new');
+  const [tagColor, setTagColor] = useState(null);
   const [savingState, setSavingState] = useState(''); // '', 'saving', 'saved', 'error'
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState(null);
@@ -2846,14 +2930,29 @@ function PortalProspectDetailModal({ prospectId, onClose, onChange }) {
         setData(d);
         setFollowUp(d.prospect.follow_up_date || '');
         setNotes(d.prospect.notes || '');
+        setStatus(d.prospect.status || 'new');
+        setTagColor(d.prospect.tag_color || null);
+
+        // Fire-and-forget mark-viewed if not yet viewed on the portal side.
+        // Idempotent server-side. Notify parent so the sidebar unread badge
+        // + per-row NEW pill refresh.
+        if (!d.prospect.portal_first_viewed_at) {
+          try {
+            await fetch(`/api/portal/hot-prospects/${encodeURIComponent(prospectId)}/mark-viewed`, {
+              method:'POST', credentials:'include',
+            });
+            if (onChange) onChange();
+          } catch {}
+        }
       } catch (e) {
         if (!cancelled) setData({ error: String(e.message || e) });
       }
     })();
     return () => { cancelled = true; };
-  }, [prospectId]);
+  }, [prospectId, onChange]);
 
-  // Debounced auto-save (1s) for follow-up and notes, mirrors admin behaviour.
+  // Debounced auto-save (1s) for follow-up, notes, status, tag colour.
+  // Mirrors admin behaviour.
   const initialLoadRef = useRef(true);
   useEffect(() => {
     if (!data || data.error) return;
@@ -2864,16 +2963,22 @@ function PortalProspectDetailModal({ prospectId, onClose, onChange }) {
     const original = data.prospect;
     const nextFollowUp = followUp || null;
     const nextNotes    = notes    || null;
-    const fuChanged    = (original.follow_up_date || null) !== nextFollowUp;
-    const noteChanged  = (original.notes          || null) !== nextNotes;
-    if (!fuChanged && !noteChanged) return;
+    const nextStatus   = status   || 'new';
+    const nextTagColor = tagColor || null;
+    const fuChanged     = (original.follow_up_date || null) !== nextFollowUp;
+    const noteChanged   = (original.notes          || null) !== nextNotes;
+    const statusChanged = (original.status         || 'new') !== nextStatus;
+    const colorChanged  = (original.tag_color      || null)  !== nextTagColor;
+    if (!fuChanged && !noteChanged && !statusChanged && !colorChanged) return;
 
     setSavingState('saving');
     const t = setTimeout(async () => {
       try {
         const body = {};
-        if (fuChanged)   body.follow_up_date = nextFollowUp;
-        if (noteChanged) body.notes          = nextNotes;
+        if (fuChanged)     body.follow_up_date = nextFollowUp;
+        if (noteChanged)   body.notes          = nextNotes;
+        if (statusChanged) body.status         = nextStatus;
+        if (colorChanged)  body.tag_color      = nextTagColor;
         const r = await fetch(`/api/portal/hot-prospects/${encodeURIComponent(prospectId)}`, {
           method:'PUT', credentials:'include',
           headers:{ 'Content-Type':'application/json' },
@@ -2890,7 +2995,7 @@ function PortalProspectDetailModal({ prospectId, onClose, onChange }) {
       }
     }, 1000);
     return () => clearTimeout(t);
-  }, [followUp, notes, prospectId, data, onChange]);
+  }, [followUp, notes, status, tagColor, prospectId, data, onChange]);
 
   async function markAsConverted() {
     if (markBusy) return;
@@ -2973,6 +3078,8 @@ function PortalProspectDetailModal({ prospectId, onClose, onChange }) {
           data={data}
           followUp={followUp} setFollowUp={setFollowUp}
           notes={notes} setNotes={setNotes}
+          status={status} setStatus={setStatus}
+          tagColor={tagColor} setTagColor={setTagColor}
           savingState={savingState}
           onRemove={removeFromList}
           removeBusy={removeBusy}
@@ -2987,7 +3094,7 @@ function PortalProspectDetailModal({ prospectId, onClose, onChange }) {
   );
 }
 
-function PortalProspectDetailBody({ data, followUp, setFollowUp, notes, setNotes, savingState, onRemove, removeBusy, removeError, onMarkConverted, onReopen, markBusy, markError }) {
+function PortalProspectDetailBody({ data, followUp, setFollowUp, notes, setNotes, status, setStatus, tagColor, setTagColor, savingState, onRemove, removeBusy, removeError, onMarkConverted, onReopen, markBusy, markError }) {
   const p = data.prospect;
   const av = portalAvatarColor(p.prospect_name || p.prospect_email);
   const isConverted = !!p.closed_at;
@@ -3139,6 +3246,58 @@ function PortalProspectDetailBody({ data, followUp, setFollowUp, notes, setNotes
                 }}
               >Clear</button>
             )}
+          </div>
+        </div>
+      </div>
+
+      {/* Status + Tag colour pickers — same debounced PUT pipeline. */}
+      <div style={{ display:'flex', gap:24, marginBottom:18, flexWrap:'wrap' }}>
+        <div>
+          <div style={{ fontSize:11, color:'#999', marginBottom:6, textTransform:'uppercase', letterSpacing:'0.5px' }}>Status</div>
+          <select
+            value={status}
+            onChange={e => setStatus(e.target.value)}
+            disabled={isConverted}
+            style={{
+              fontSize:13, padding:'6px 28px 6px 10px',
+              border:`0.5px solid ${BORDER}`, borderRadius:6,
+              color:TEXT, background:CARD, outline:'none',
+              fontFamily:'inherit', cursor: isConverted ? 'not-allowed' : 'pointer',
+              opacity: isConverted ? 0.55 : 1,
+              appearance:'auto',
+            }}
+          >
+            {PORTAL_STATUS_OPTIONS.map(s => (
+              <option key={s.value} value={s.value}>{s.label}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize:11, color:'#999', marginBottom:6, textTransform:'uppercase', letterSpacing:'0.5px' }}>Tag colour</div>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:6, alignItems:'center' }}>
+            {PORTAL_TAG_COLORS.map(c => {
+              const isSelected = (tagColor || null) === (c.value || null);
+              const isDefault = c.value === null;
+              return (
+                <button
+                  key={String(c.value)}
+                  onClick={() => !isConverted && setTagColor(c.value)}
+                  disabled={isConverted}
+                  title={c.label}
+                  style={{
+                    width:24, height:24, borderRadius:'50%',
+                    background: isDefault ? CARD : c.bg,
+                    border: isSelected ? `2px solid ${TEXT}` : `0.5px solid ${BORDER}`,
+                    cursor: isConverted ? 'not-allowed' : 'pointer',
+                    padding:0,
+                    fontSize:11, color: isDefault ? MUTED : c.fg,
+                    fontFamily:'inherit',
+                    display:'flex', alignItems:'center', justifyContent:'center',
+                    opacity: isConverted ? 0.55 : 1,
+                  }}
+                >{isDefault ? '∅' : (isSelected ? '✓' : '')}</button>
+              );
+            })}
           </div>
         </div>
       </div>

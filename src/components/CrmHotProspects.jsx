@@ -52,6 +52,49 @@ const LAST_CUSTOMER_KEY = 'studio.crm.hot_prospects.last_customer_id';
 // subsequent visits to the CRM screen don't repeatedly auto-open it.
 const OPEN_PROSPECT_KEY = 'studio.crm.hot_prospects.open_prospect_id';
 
+// ── Status + tag-colour helpers ──────────────────────────────────────────────
+// Shared with the customer portal — see PortalApp.jsx for the mirror.
+// Three fixed pipeline statuses; bounded palette of 8 colours for the
+// customer-chosen override. Free hex was considered and rejected because
+// nothing prevents an operator picking an unreadable colour pair.
+
+const STATUS_OPTIONS = [
+  { value: 'new',         label: 'New',         bg: '#E6F1FB', fg: '#0C447C' },
+  { value: 'contacted',   label: 'Contacted',   bg: '#E1F5EE', fg: '#0F6E56' },
+  { value: 'no_response', label: 'No response', bg: '#F1EFE8', fg: '#5F5E5A' },
+];
+
+// Bounded palette. The empty 'value: null' entry is the "no override" option
+// in the colour picker — the row falls back to its status colour. All bg/fg
+// pairs are tested for readability (4.5+ contrast).
+const TAG_COLORS = [
+  { value: null,     label: 'Default',  bg: null,      fg: null      },
+  { value: 'red',    label: 'Red',      bg: '#FAECE7', fg: '#793F1F' },
+  { value: 'orange', label: 'Orange',   bg: '#FAEEDA', fg: '#854F0B' },
+  { value: 'yellow', label: 'Yellow',   bg: '#FFF7C2', fg: '#5C4A05' },
+  { value: 'green',  label: 'Green',    bg: '#E1F5EE', fg: '#0F6E56' },
+  { value: 'blue',   label: 'Blue',     bg: '#E6F1FB', fg: '#0C447C' },
+  { value: 'purple', label: 'Purple',   bg: '#EEEDFE', fg: '#3C3489' },
+  { value: 'pink',   label: 'Pink',     bg: '#FCE7F2', fg: '#83215E' },
+  { value: 'grey',   label: 'Grey',     bg: '#EAEAE6', fg: '#3a3a3a' },
+];
+
+// Resolve the colour pair to use for a prospect's row tint / status pill.
+// Custom tag_color wins when set; otherwise fall back to the status default.
+// Returns { bg, fg, statusLabel } — bg/fg are the colours to paint the pill
+// (or row tint), statusLabel is always the status label so the pill text is
+// stable regardless of which colour palette we picked.
+function resolveProspectChrome(prospect) {
+  const statusEntry = STATUS_OPTIONS.find(s => s.value === (prospect?.status || 'new')) || STATUS_OPTIONS[0];
+  if (prospect?.tag_color) {
+    const colorEntry = TAG_COLORS.find(c => c.value === prospect.tag_color);
+    if (colorEntry && colorEntry.bg) {
+      return { bg: colorEntry.bg, fg: colorEntry.fg, statusLabel: statusEntry.label };
+    }
+  }
+  return { bg: statusEntry.bg, fg: statusEntry.fg, statusLabel: statusEntry.label };
+}
+
 // ── Small visual helpers ─────────────────────────────────────────────────────
 
 function initials(name) {
@@ -403,12 +446,11 @@ function ProspectList({ prospects, onOpen, empty, showInboxColumn }) {
   if (prospects.length === 0) {
     return <div style={{ fontSize:13, color:MUTED, padding:'20px 0' }}>No matches.</div>;
   }
-  // Grid template: when the Inbox column is visible we add a 1.2fr column
-  // between Email and Added, and trim Name/Email slightly so the row still
-  // fits at the standard CRM screen width.
+  // Grid template: a Status column is always shown (after Email). When the
+  // Inbox column is also visible we squeeze the proportions a little.
   const gridCols = showInboxColumn
-    ? '1.7fr 1.6fr 1.3fr 0.9fr 0.9fr 32px'
-    : '2fr 1.8fr 1.2fr 1.2fr 32px';
+    ? '1.5fr 1.5fr 0.9fr 1.1fr 0.85fr 0.85fr 32px'
+    : '1.8fr 1.7fr 1.0fr 1.1fr 1.1fr 32px';
   return (
     <div style={{
       background:CARD, border:`0.5px solid ${BORDER}`, borderRadius:8,
@@ -425,6 +467,7 @@ function ProspectList({ prospects, onOpen, empty, showInboxColumn }) {
       }}>
         <div>Name</div>
         <div>Email</div>
+        <div>Status</div>
         {showInboxColumn && <div>Inbox</div>}
         <div>Added</div>
         <div>Follow up</div>
@@ -473,6 +516,12 @@ function ProspectRow({ prospect, isLast, onOpen, showInboxColumn, gridCols }) {
   const av = avatarColor(prospect.prospect_name || prospect.prospect_email);
   const fu = formatFollowUp(prospect.follow_up_date);
   const isConverted = !!prospect.closed_at;
+  const chrome = resolveProspectChrome(prospect);
+  // NEW pill — shown until the admin opens this prospect's modal for the
+  // first time. Suppressed on converted rows (they're terminal — "NEW
+  // Converted" reads weird) and on follow-up-overdue rows where the urgency
+  // signal is already in the Follow-up column.
+  const isUnviewed = !prospect.admin_first_viewed_at && !isConverted;
   return (
     <div
       onClick={onOpen}
@@ -502,6 +551,14 @@ function ProspectRow({ prospect, isLast, onOpen, showInboxColumn, gridCols }) {
             overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
             minWidth:0, flex:'0 1 auto',
           }}>{prospect.prospect_name || <span style={{ color:MUTED, fontWeight:400 }}>(no name)</span>}</div>
+          {isUnviewed && (
+            <span style={{
+              background: '#DC2626', color: '#fff',
+              fontSize:10, padding:'1px 6px', borderRadius:4,
+              fontWeight:600, letterSpacing:'0.3px',
+              flexShrink:0,
+            }}>NEW</span>
+          )}
           {isConverted && (
             <span style={{
               background: GREEN_BG, color: GREEN_HI,
@@ -515,6 +572,13 @@ function ProspectRow({ prospect, isLast, onOpen, showInboxColumn, gridCols }) {
         fontSize:13, color:MUTED,
         overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap',
       }}>{prospect.prospect_email}</div>
+      <div>
+        <span style={{
+          background: chrome.bg, color: chrome.fg,
+          fontSize:11, padding:'2px 8px', borderRadius:999,
+          fontWeight:500, display:'inline-block', whiteSpace:'nowrap',
+        }}>{chrome.statusLabel}</span>
+      </div>
       {showInboxColumn && (
         <div style={{ minWidth:0 }}>
           {prospect.source_inbox_name && (
@@ -570,6 +634,9 @@ function ProspectDetailModal({ prospectId, onClose, onChange }) {
   const [busy, setBusy] = useState(false);
   const [followUp, setFollowUp] = useState('');
   const [notes, setNotes] = useState('');
+  // Status + tag colour — same debounced-save pipeline as follow-up/notes.
+  const [status, setStatus] = useState('new');
+  const [tagColor, setTagColor] = useState(null);
   const [savingState, setSavingState] = useState(''); // '', 'saving', 'saved'
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState(null);
@@ -591,12 +658,27 @@ function ProspectDetailModal({ prospectId, onClose, onChange }) {
         setData(d);
         setFollowUp(d.prospect.follow_up_date || '');
         setNotes(d.prospect.notes || '');
+        setStatus(d.prospect.status || 'new');
+        setTagColor(d.prospect.tag_color || null);
+
+        // Fire-and-forget mark-viewed. Only meaningful on the FIRST open of
+        // a prospect that's never been viewed on the admin side — but it's
+        // idempotent so we don't need to gate. After it stamps, the row's
+        // NEW pill disappears on the next list refresh. Notify the parent
+        // so the underlying list re-fetches if the prospect was previously
+        // unviewed (silent no-op if already viewed).
+        if (!d.prospect.admin_first_viewed_at) {
+          try {
+            await fetch(`/api/email/hot-prospects/${encodeURIComponent(prospectId)}/mark-viewed`, { method: 'POST' });
+            onChange();
+          } catch {}
+        }
       } catch (e) {
         if (!cancelled) setData({ error: String(e.message || e) });
       }
     })();
     return () => { cancelled = true; };
-  }, [prospectId]);
+  }, [prospectId, onChange]);
 
   // Debounced auto-save for follow-up date and notes. 1-second window —
   // generous enough that the operator can finish typing a date or sentence
@@ -613,16 +695,22 @@ function ProspectDetailModal({ prospectId, onClose, onChange }) {
     const original = data.prospect;
     const nextFollowUp = followUp || null;
     const nextNotes    = notes    || null;
-    const fuChanged    = (original.follow_up_date || null) !== nextFollowUp;
-    const noteChanged  = (original.notes          || null) !== nextNotes;
-    if (!fuChanged && !noteChanged) return;
+    const nextStatus   = status   || 'new';
+    const nextTagColor = tagColor || null;
+    const fuChanged     = (original.follow_up_date || null) !== nextFollowUp;
+    const noteChanged   = (original.notes          || null) !== nextNotes;
+    const statusChanged = (original.status         || 'new') !== nextStatus;
+    const colorChanged  = (original.tag_color      || null)  !== nextTagColor;
+    if (!fuChanged && !noteChanged && !statusChanged && !colorChanged) return;
 
     setSavingState('saving');
     const t = setTimeout(async () => {
       try {
         const body = {};
-        if (fuChanged)   body.follow_up_date = nextFollowUp;
-        if (noteChanged) body.notes          = nextNotes;
+        if (fuChanged)     body.follow_up_date = nextFollowUp;
+        if (noteChanged)   body.notes          = nextNotes;
+        if (statusChanged) body.status         = nextStatus;
+        if (colorChanged)  body.tag_color      = nextTagColor;
         const r = await fetch(`/api/email/hot-prospects/${encodeURIComponent(prospectId)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
@@ -645,7 +733,7 @@ function ProspectDetailModal({ prospectId, onClose, onChange }) {
       }
     }, 1000);
     return () => clearTimeout(t);
-  }, [followUp, notes, prospectId, data, onChange]);
+  }, [followUp, notes, status, tagColor, prospectId, data, onChange]);
 
   async function markAsConverted() {
     if (markBusy) return;
@@ -724,6 +812,8 @@ function ProspectDetailModal({ prospectId, onClose, onChange }) {
           data={data}
           followUp={followUp} setFollowUp={setFollowUp}
           notes={notes} setNotes={setNotes}
+          status={status} setStatus={setStatus}
+          tagColor={tagColor} setTagColor={setTagColor}
           savingState={savingState}
           onRemove={removeFromList}
           removeBusy={removeBusy}
@@ -738,7 +828,7 @@ function ProspectDetailModal({ prospectId, onClose, onChange }) {
   );
 }
 
-function DetailBody({ data, followUp, setFollowUp, notes, setNotes, savingState, onRemove, removeBusy, removeError, onMarkConverted, onReopen, markBusy, markError }) {
+function DetailBody({ data, followUp, setFollowUp, notes, setNotes, status, setStatus, tagColor, setTagColor, savingState, onRemove, removeBusy, removeError, onMarkConverted, onReopen, markBusy, markError }) {
   const p = data.prospect;
   const av = avatarColor(p.prospect_name || p.prospect_email);
   const isConverted = !!p.closed_at;
@@ -902,6 +992,60 @@ function DetailBody({ data, followUp, setFollowUp, notes, setNotes, savingState,
                 }}
               >Clear</button>
             )}
+          </div>
+        </div>
+      </div>
+
+      {/* Status + Tag colour — both editable, saved via the same
+          debounced PUT pipeline as follow-up/notes (one save state
+          indicator covers all four fields). */}
+      <div style={{ display:'flex', gap:24, marginBottom:18, flexWrap:'wrap' }}>
+        <div>
+          <div style={{ fontSize:11, color:TERTIARY, marginBottom:6, textTransform:'uppercase', letterSpacing:'0.5px' }}>Status</div>
+          <select
+            value={status}
+            onChange={e => setStatus(e.target.value)}
+            disabled={isConverted}
+            style={{
+              fontSize:13, padding:'6px 28px 6px 10px',
+              border:`0.5px solid ${BORDER}`, borderRadius:6,
+              color:TEXT, background:CARD, outline:'none',
+              fontFamily:'inherit', cursor: isConverted ? 'not-allowed' : 'pointer',
+              opacity: isConverted ? 0.55 : 1,
+              appearance:'auto',
+            }}
+          >
+            {STATUS_OPTIONS.map(s => (
+              <option key={s.value} value={s.value}>{s.label}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize:11, color:TERTIARY, marginBottom:6, textTransform:'uppercase', letterSpacing:'0.5px' }}>Tag colour</div>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:6, alignItems:'center' }}>
+            {TAG_COLORS.map(c => {
+              const isSelected = (tagColor || null) === (c.value || null);
+              const isDefault = c.value === null;
+              return (
+                <button
+                  key={String(c.value)}
+                  onClick={() => !isConverted && setTagColor(c.value)}
+                  disabled={isConverted}
+                  title={c.label}
+                  style={{
+                    width:24, height:24, borderRadius:'50%',
+                    background: isDefault ? CARD : c.bg,
+                    border: isSelected ? `2px solid ${TEXT}` : `0.5px solid ${BORDER}`,
+                    cursor: isConverted ? 'not-allowed' : 'pointer',
+                    padding:0,
+                    fontSize:11, color: isDefault ? MUTED : c.fg,
+                    fontFamily:'inherit',
+                    display:'flex', alignItems:'center', justifyContent:'center',
+                    opacity: isConverted ? 0.55 : 1,
+                  }}
+                >{isDefault ? '∅' : (isSelected ? '✓' : '')}</button>
+              );
+            })}
           </div>
         </div>
       </div>
