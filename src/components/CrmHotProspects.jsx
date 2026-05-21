@@ -837,6 +837,48 @@ function ProspectDetailModal({ prospectId, onClose, onChange }) {
     }
   }
 
+  // Unsubscribe handler — opposite direction. Only invoked from a button
+  // that's only shown when contact_on_list && !contact_unsubscribed. Same
+  // three-shape response handling; on success flips contact_unsubscribed
+  // locally so the banner swaps from "Unsubscribe" to "Re-subscribe" in
+  // place without a refetch.
+  const [unsubBusy, setUnsubBusy] = useState(false);
+  const [unsubStatus, setUnsubStatus] = useState(null);
+  async function unsubscribeProspect() {
+    if (unsubBusy || !data?.prospect) return;
+    if (!confirm(`Unsubscribe ${data.prospect.prospect_email} from all of your mailing lists?`)) return;
+    setUnsubBusy(true);
+    setUnsubStatus(null);
+    try {
+      const r = await fetch(`/api/email/hot-prospects/${encodeURIComponent(prospectId)}/unsubscribe`, {
+        method: 'POST',
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok && !d.code) {
+        setUnsubStatus({ kind:'error', text: d.error || `Unsubscribe failed (HTTP ${r.status})` });
+        setUnsubBusy(false);
+        return;
+      }
+      if (d.ok) {
+        setUnsubStatus({ kind:'success', text: `✓ Unsubscribed from ${d.lists_affected} list${d.lists_affected===1?'':'s'}` });
+        setData(prev => prev ? { ...prev, prospect: { ...prev.prospect, contact_unsubscribed: true } } : prev);
+      } else if (d.code) {
+        setUnsubStatus({ kind:'info', text: d.message });
+        // If server says already_unsubscribed, sync local state so the
+        // Unsubscribe banner disappears (and Re-subscribe appears).
+        if (d.code === 'already_unsubscribed') {
+          setData(prev => prev ? { ...prev, prospect: { ...prev.prospect, contact_unsubscribed: true } } : prev);
+        } else if (d.code === 'not_on_lists') {
+          setData(prev => prev ? { ...prev, prospect: { ...prev.prospect, contact_on_list: false } } : prev);
+        }
+      }
+    } catch (e) {
+      setUnsubStatus({ kind:'error', text: `Unsubscribe failed: ${e.message || e}` });
+    } finally {
+      setUnsubBusy(false);
+    }
+  }
+
   return (
     <ModalShell onClose={onClose} wide>
       {!data ? (
@@ -863,13 +905,16 @@ function ProspectDetailModal({ prospectId, onClose, onChange }) {
           onResubscribe={resubscribeProspect}
           resubBusy={resubBusy}
           resubStatus={resubStatus}
+          onUnsubscribe={unsubscribeProspect}
+          unsubBusy={unsubBusy}
+          unsubStatus={unsubStatus}
         />
       )}
     </ModalShell>
   );
 }
 
-function DetailBody({ data, followUp, setFollowUp, notes, setNotes, status, setStatus, tagColor, setTagColor, savingState, onRemove, removeBusy, removeError, onMarkConverted, onReopen, markBusy, markError, onResubscribe, resubBusy, resubStatus }) {
+function DetailBody({ data, followUp, setFollowUp, notes, setNotes, status, setStatus, tagColor, setTagColor, savingState, onRemove, removeBusy, removeError, onMarkConverted, onReopen, markBusy, markError, onResubscribe, resubBusy, resubStatus, onUnsubscribe, unsubBusy, unsubStatus }) {
   const p = data.prospect;
   const av = avatarColor(p.prospect_name || p.prospect_email);
   const isConverted = !!p.closed_at;
@@ -1035,6 +1080,49 @@ function DetailBody({ data, followUp, setFollowUp, notes, setNotes, status, setS
                : '#5F5E5A',
           fontStyle: resubStatus.kind === 'info' ? 'italic' : 'normal',
         }}>{resubStatus.text}</div>
+      )}
+
+      {/* Unsubscribe banner — opposite direction. Only shown when the
+          prospect IS on at least one of the customer's mailing lists AND
+          currently subscribed (contact_on_list && !contact_unsubscribed).
+          Mutually exclusive with the Re-subscribe banner above. Hidden for
+          prospects not on any list (Formspree leads etc.) so they don't
+          see a button that would refuse on click. */}
+      {p.contact_on_list && !p.contact_unsubscribed && (
+        <div style={{
+          marginBottom:12,
+          padding:'10px 14px',
+          background: DANGER_BG,
+          borderLeft: `3px solid ${DANGER}`,
+          borderRadius:6,
+          display:'flex', alignItems:'center', justifyContent:'space-between', gap:12,
+          flexWrap:'wrap',
+        }}>
+          <div style={{ fontSize:12, color:'#5F5E5A', lineHeight:1.5 }}>
+            <b style={{fontWeight:500, color:TEXT}}>📬 On your mailing list.</b>{' '}
+            Unsubscribe them if they've asked not to be emailed.
+          </div>
+          <button
+            onClick={onUnsubscribe}
+            disabled={unsubBusy}
+            style={{
+              background: DANGER, color:'#fff', border:'none',
+              borderRadius:7, padding:'7px 12px', fontSize:13, fontWeight:500,
+              cursor: unsubBusy ? 'not-allowed' : 'pointer',
+              opacity: unsubBusy ? 0.6 : 1,
+              fontFamily:'inherit', whiteSpace:'nowrap',
+            }}
+          >{unsubBusy ? 'Unsubscribing…' : 'Unsubscribe'}</button>
+        </div>
+      )}
+      {unsubStatus && (
+        <div style={{
+          marginBottom:12, fontSize:12,
+          color: unsubStatus.kind === 'success' ? '#085041'
+               : unsubStatus.kind === 'error'   ? DANGER
+               : '#5F5E5A',
+          fontStyle: unsubStatus.kind === 'info' ? 'italic' : 'normal',
+        }}>{unsubStatus.text}</div>
       )}
 
       {/* Meta row: added / follow-up */}
