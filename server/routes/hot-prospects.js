@@ -411,21 +411,28 @@ router.post('/', (req, res) => {
   // fields. We only overwrite name/notes/follow_up if a value was actually
   // supplied in the request body, so calling POST with just an email doesn't
   // wipe out existing notes.
+  //
+  // source_reply_id is COALESCEd on the update path so the first reply to
+  // ever flag this prospect "wins" — re-adding the same prospect from a
+  // different (newer) reply won't change the source pin. Matches the
+  // formspree-flagger's pattern.
   const stmt = db.prepare(`
     INSERT INTO hot_prospects (
       id, email_client_id, prospect_email, prospect_name,
-      follow_up_date, notes, added_by, added_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      follow_up_date, notes, added_by, added_at, updated_at,
+      source_reply_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(email_client_id, prospect_email) DO UPDATE SET
-      prospect_name  = COALESCE(excluded.prospect_name, hot_prospects.prospect_name),
-      follow_up_date = CASE WHEN excluded.follow_up_date IS NOT NULL
-                            THEN excluded.follow_up_date
-                            ELSE hot_prospects.follow_up_date END,
-      notes          = COALESCE(excluded.notes, hot_prospects.notes),
-      updated_at     = excluded.updated_at
+      prospect_name   = COALESCE(excluded.prospect_name, hot_prospects.prospect_name),
+      follow_up_date  = CASE WHEN excluded.follow_up_date IS NOT NULL
+                             THEN excluded.follow_up_date
+                             ELSE hot_prospects.follow_up_date END,
+      notes           = COALESCE(excluded.notes, hot_prospects.notes),
+      source_reply_id = COALESCE(hot_prospects.source_reply_id, excluded.source_reply_id),
+      updated_at      = excluded.updated_at
     RETURNING id, email_client_id, prospect_email, prospect_name,
               follow_up_date, notes, added_by, added_at, updated_at,
-              closed_at, closed_by
+              closed_at, closed_by, source_reply_id
   `);
 
   const row = stmt.get(
@@ -437,7 +444,8 @@ router.post('/', (req, res) => {
     cleanNotes,
     addedBy,
     now,
-    now
+    now,
+    source_reply_id || null
   );
 
   // Tell the caller which switcher card this prospect will live under. For
@@ -645,7 +653,7 @@ router.get('/:id/thread', (req, res) => {
     .prepare(
       `SELECT id, email_client_id, prospect_email, prospect_name,
               follow_up_date, notes, added_by, added_at, updated_at,
-              closed_at, closed_by
+              closed_at, closed_by, source_reply_id
          FROM hot_prospects WHERE id = ?`
     )
     .get(id);
@@ -675,6 +683,32 @@ router.get('/:id/thread', (req, res) => {
         ORDER BY received_at ASC`
     )
     .all(...inboundClause.params, prospect.prospect_email);
+
+  // Source-reply pin (Formspree leads + any future auto-flag where the
+  // hot_prospects row references a specific email_replies row whose
+  // from_address does NOT equal the prospect's email — e.g. Formspree
+  // submissions, where from_address is noreply@formspree.io but the actual
+  // prospect's email lives in the body). If the pinned reply isn't already
+  // in the address-matched inbound list, fetch it and merge it in. We pull
+  // it without any address filter — the source_reply_id IS the trust signal.
+  // Linked-set filter still applies so a stale id can't leak in a foreign
+  // customer's reply.
+  if (prospect.source_reply_id) {
+    const alreadyIncluded = inbound.some(r => r.id === prospect.source_reply_id);
+    if (!alreadyIncluded) {
+      const sourceClause = inClause('email_client_id', linkedIds);
+      const sourceRow = db
+        .prepare(
+          `SELECT id, email_client_id, from_address, from_name, subject,
+                  body_text, body_html, received_at, matched_campaign_id
+             FROM email_replies
+            WHERE id = ?
+              AND ${sourceClause.sql}`
+        )
+        .get(prospect.source_reply_id, ...sourceClause.params);
+      if (sourceRow) inbound.push(sourceRow);
+    }
+  }
 
   // Outbound: every message we sent to this address from any inbox in the
   // linked set. Matches against to_address; CC chains are intentionally not

@@ -293,6 +293,7 @@ async function pollOneInbox(inbox) {
         }
 
         const fromValue = parsed.from?.value?.[0] || {};
+        const replyId = uuid();
         db.prepare(`
           INSERT INTO email_replies (
             id, inbox_id, email_client_id, message_id, in_reply_to, references_header,
@@ -300,7 +301,7 @@ async function pollOneInbox(inbox) {
             matched_subscriber_id, matched_campaign_id
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
-          uuid(),
+          replyId,
           inbox.id,
           inbox.email_client_id,
           messageId,
@@ -321,7 +322,12 @@ async function pollOneInbox(inbox) {
         // email up. Failures here are non-fatal — processFormspreeLead
         // never throws, and even if it did the outer try-catch would log
         // it without breaking the poller.
-        processFormspreeLead(parsed, inbox.email_client_id);
+        //
+        // We pass the just-inserted reply's id as `sourceReplyId` so the
+        // hot_prospects row can pin to it — the thread merger pulls the
+        // source row in even though its from_address is noreply@formspree.io
+        // (doesn't match the prospect's actual email address).
+        processFormspreeLead(parsed, inbox.email_client_id, replyId);
 
         stored++;
         highestUid = Math.max(highestUid, uid);

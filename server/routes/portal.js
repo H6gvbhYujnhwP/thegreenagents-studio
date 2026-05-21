@@ -1925,22 +1925,25 @@ router.post('/hot-prospects', (req, res) => {
   const stmt = db.prepare(`
     INSERT INTO hot_prospects (
       id, email_client_id, prospect_email, prospect_name,
-      follow_up_date, notes, added_by, added_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      follow_up_date, notes, added_by, added_at, updated_at,
+      source_reply_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(email_client_id, prospect_email) DO UPDATE SET
-      prospect_name  = COALESCE(excluded.prospect_name, hot_prospects.prospect_name),
-      follow_up_date = CASE WHEN excluded.follow_up_date IS NOT NULL
-                            THEN excluded.follow_up_date
-                            ELSE hot_prospects.follow_up_date END,
-      notes          = COALESCE(excluded.notes, hot_prospects.notes),
-      updated_at     = excluded.updated_at
+      prospect_name   = COALESCE(excluded.prospect_name, hot_prospects.prospect_name),
+      follow_up_date  = CASE WHEN excluded.follow_up_date IS NOT NULL
+                             THEN excluded.follow_up_date
+                             ELSE hot_prospects.follow_up_date END,
+      notes           = COALESCE(excluded.notes, hot_prospects.notes),
+      source_reply_id = COALESCE(hot_prospects.source_reply_id, excluded.source_reply_id),
+      updated_at      = excluded.updated_at
     RETURNING id, email_client_id, prospect_email, prospect_name,
               follow_up_date, notes, added_by, added_at, updated_at,
-              closed_at, closed_by
+              closed_at, closed_by, source_reply_id
   `);
   const row = stmt.get(
     id, inboxOwningId, prospectEmail, resolvedName,
-    followUp, cleanNotes, addedBy, now, now
+    followUp, cleanNotes, addedBy, now, now,
+    source_reply_id || null
   );
   res.json({ prospect: row, was_new: wasNew });
 });
@@ -2122,7 +2125,7 @@ router.get('/hot-prospects/:id/thread', (req, res) => {
     .prepare(
       `SELECT id, email_client_id, prospect_email, prospect_name,
               follow_up_date, notes, added_by, added_at, updated_at,
-              closed_at, closed_by
+              closed_at, closed_by, source_reply_id
          FROM hot_prospects WHERE id = ? AND ${inOwn.sql}`
     )
     .get(id, ...inOwn.params);
@@ -2143,6 +2146,28 @@ router.get('/hot-prospects/:id/thread', (req, res) => {
         ORDER BY received_at ASC`
     )
     .all(...inboundClause.params, prospect.prospect_email);
+
+  // Source-reply pin — mirror of the admin endpoint in routes/hot-prospects.js.
+  // For Formspree-flagged prospects the from_address is noreply@formspree.io
+  // so the address-match query above never returns the source row; we pull it
+  // in here by id and merge as if it were any other inbound row. Tenant-scoped
+  // by linkedIds so a stale id can't leak in another customer's reply.
+  if (prospect.source_reply_id) {
+    const alreadyIncluded = inbound.some(r => r.id === prospect.source_reply_id);
+    if (!alreadyIncluded) {
+      const sourceClause = _inClause('email_client_id', linkedIds);
+      const sourceRow = db
+        .prepare(
+          `SELECT id, email_client_id, from_address, from_name, subject,
+                  body_text, body_html, received_at, matched_campaign_id
+             FROM email_replies
+            WHERE id = ?
+              AND ${sourceClause.sql}`
+        )
+        .get(prospect.source_reply_id, ...sourceClause.params);
+      if (sourceRow) inbound.push(sourceRow);
+    }
+  }
 
   const outbound = db
     .prepare(

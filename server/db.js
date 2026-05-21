@@ -1438,6 +1438,22 @@ db.exec(`
 try { db.exec(`ALTER TABLE hot_prospects ADD COLUMN closed_at TEXT`); } catch {}
 try { db.exec(`ALTER TABLE hot_prospects ADD COLUMN closed_by TEXT`); } catch {}
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Migration: hot_prospects.source_reply_id  (decision 2026-05-21 — Formspree
+// source-email pinning so the thread renders the original inbound row even
+// when the prospect's email address doesn't match its from_address).
+//
+// `source_reply_id` — FK to email_replies.id. NULL for manual-add prospects
+// whose source IS already in the thread by address match; populated for
+// auto-flagged Formspree leads where the source row's from_address is
+// noreply@formspree.io but the actual prospect address lives in the body.
+//
+// Nullable; idempotent ALTER pattern like closed_at/closed_by above. Existing
+// rows stay NULL by default (and the GET .../thread endpoints will simply
+// fall through to the address-match path for them).
+// ─────────────────────────────────────────────────────────────────────────────
+try { db.exec(`ALTER TABLE hot_prospects ADD COLUMN source_reply_id TEXT`); } catch {}
+
 // Partial index for the badge/list "is this row converted?" filter.
 // WHERE closed_at IS NOT NULL means the index only stores rows that ARE
 // converted — fast lookups for "converted prospects" without bloating the

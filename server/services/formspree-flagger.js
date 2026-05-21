@@ -323,7 +323,7 @@ export function isOwnAddress(emailClientId, prospectEmail) {
  * Returns { id, was_new } so the caller can log nicely.
  * Never throws — DB errors are caught and logged.
  */
-export function upsertProspectAuto({ emailClientId, prospectEmail, prospectName }) {
+export function upsertProspectAuto({ emailClientId, prospectEmail, prospectName, sourceReplyId }) {
   if (!emailClientId || !prospectEmail) return null;
   try {
     const existing = db
@@ -333,14 +333,22 @@ export function upsertProspectAuto({ emailClientId, prospectEmail, prospectName 
     const id = existing?.id || uuid();
     const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
+    // source_reply_id is updated ONLY when it's currently NULL on the row —
+    // we never overwrite an earlier link. If the same prospect was already
+    // flagged via a previous Formspree submission, that earlier submission's
+    // id stays as the source. The thread merger picks up the linked row
+    // regardless of which submission is "the" source — so this is purely
+    // about not thrashing a value that was already correct.
     db.prepare(`
       INSERT INTO hot_prospects (
         id, email_client_id, prospect_email, prospect_name,
-        follow_up_date, notes, added_by, added_at, updated_at
-      ) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+        follow_up_date, notes, added_by, added_at, updated_at,
+        source_reply_id
+      ) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)
       ON CONFLICT(email_client_id, prospect_email) DO UPDATE SET
-        prospect_name = COALESCE(hot_prospects.prospect_name, excluded.prospect_name),
-        updated_at    = excluded.updated_at
+        prospect_name   = COALESCE(hot_prospects.prospect_name, excluded.prospect_name),
+        source_reply_id = COALESCE(hot_prospects.source_reply_id, excluded.source_reply_id),
+        updated_at      = excluded.updated_at
     `).run(
       id,
       emailClientId,
@@ -349,6 +357,7 @@ export function upsertProspectAuto({ emailClientId, prospectEmail, prospectName 
       'auto:formspree',
       now,
       now,
+      sourceReplyId || null,
     );
 
     return { id, was_new: wasNew };
@@ -367,6 +376,14 @@ export function upsertProspectAuto({ emailClientId, prospectEmail, prospectName 
  * Arguments:
  *   - parsed: the result of mailparser.simpleParser()
  *   - emailClientId: inbox.email_client_id from the poller
+ *   - sourceReplyId: the id of the email_replies row we just inserted for
+ *     this message. Stored on the hot_prospects row so the thread merger
+ *     can pull this row in even though its from_address (Formspree's
+ *     noreply@) doesn't match the prospect's actual email address. Optional
+ *     — older deploys that haven't been updated to pass this argument will
+ *     simply create a hot_prospects row with NULL source_reply_id (the
+ *     thread will fall back to the address-match path, which for Formspree
+ *     leads will be empty).
  *
  * Returns one of:
  *   - { action: 'skipped', reason: '...' }   not a Formspree lead, or product newsletter,
@@ -376,7 +393,7 @@ export function upsertProspectAuto({ emailClientId, prospectEmail, prospectName 
  *
  * Never throws.
  */
-export function processFormspreeLead(parsed, emailClientId) {
+export function processFormspreeLead(parsed, emailClientId, sourceReplyId) {
   if (!isFormspreeLead(parsed)) {
     return { action: 'skipped', reason: 'not_formspree_lead' };
   }
@@ -407,6 +424,7 @@ export function processFormspreeLead(parsed, emailClientId) {
     emailClientId,
     prospectEmail: email,
     prospectName: resolvedName,
+    sourceReplyId: sourceReplyId || null,
   });
 
   if (!result) return { action: 'no_email' };  // upsert failed; already logged
