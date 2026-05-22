@@ -3436,6 +3436,16 @@ function ReplyDetailModal({replyId, onClose, onAction}){
             </div>
           )}
 
+          {/* Campaign subscriptions panel — per-campaign tickboxes so the
+              operator can stop a specific campaign from continuing its drip
+              to this contact, OR tick "Unsubscribe from ALL" as a master
+              switch. Identical UI in the Hot Prospect detail modal. */}
+          <CampaignSubscriptionsPanel
+            source="reply"
+            sourceId={replyId}
+            onMasterToggle={() => { refetchReply(); }}
+          />
+
           {/* Body — plain text only on the admin side (HTML rendering lives
               on the customer-portal version). Email-client-style quote bar. */}
           <div style={{borderLeft:`2px solid ${BORDER}`,padding:'4px 0 4px 14px',fontSize:13,color:TEXT,lineHeight:1.6,whiteSpace:'pre-wrap'}}>
@@ -3444,6 +3454,230 @@ function ReplyDetailModal({replyId, onClose, onAction}){
 
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Campaign subscriptions panel ─────────────────────────────────────────────
+// Per-campaign opt-out widget. Renders in the inbox open-email modal AND in
+// the CRM Hot Prospect detail modal — same component, same behaviour, same
+// look. Decision 2026-05-22 (operator wanted these surfaces identical).
+//
+// Props:
+//   source      — 'reply' | 'hot_prospect' (chooses the endpoint base)
+//   sourceId    — the reply ID or hot prospect ID
+//   onMasterToggle — optional callback when the master "Unsubscribe from
+//                    ALL" flag changes (so the parent can refresh other
+//                    badges that depend on contact state).
+//
+// Endpoints used:
+//   GET  /api/email/{replies|hot-prospects}/:id/subscriptions
+//   PUT  /api/email/{replies|hot-prospects}/:id/subscriptions
+//
+// Optimistic updates: ticks/unticks reflect immediately in the UI, with the
+// PUT firing in the background. If the server response diverges (very rare),
+// snap to it. This makes the panel feel instant for a customer scrolling
+// through their contacts.
+//
+// Disabled-while-master-on: when the master switch is on, per-campaign rows
+// render checked-and-disabled with a small explainer line. Clicks are inert
+// until the master is unticked.
+function CampaignSubscriptionsPanel({ source, sourceId, onMasterToggle }) {
+  const [state, setState]   = useState(null);   // panel JSON
+  const [loading, setLoading] = useState(true);
+  const [error, setError]   = useState(null);
+  const [savingKey, setSavingKey] = useState(null);
+
+  const basePath = source === 'hot_prospect'
+    ? `/api/email/hot-prospects/${sourceId}/subscriptions`
+    : `/api/email/replies/${sourceId}/subscriptions`;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetch(basePath)
+      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+      .then(d => { if (!cancelled) { setState(d); setLoading(false); } })
+      .catch(e => { if (!cancelled) { setError(String(e)); setLoading(false); } });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceId, source]);
+
+  // Helper — apply a partial update and replace local state with the server
+  // response. savingKey tracks which row is mid-flight so we can render a
+  // tiny spinner on it. Errors revert by re-fetching the canonical state.
+  async function applyChange(body, rowKey) {
+    if (!state) return;
+    setSavingKey(rowKey);
+    try {
+      const r = await fetch(basePath, {
+        method:'PUT',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const fresh = await r.json();
+      setState(fresh);
+      if ('unsubscribed_from_all' in body && typeof onMasterToggle === 'function') {
+        onMasterToggle(fresh.unsubscribed_from_all);
+      }
+    } catch (e) {
+      // Roll back to canonical state by re-fetching
+      try {
+        const rr = await fetch(basePath);
+        if (rr.ok) setState(await rr.json());
+      } catch {}
+      alert(`Could not save change: ${e.message || e}`);
+    } finally {
+      setSavingKey(null);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div style={{
+        background: BG, border: `0.5px solid ${BORDER}`, borderRadius: 6,
+        padding: '10px 14px', marginBottom: 12, fontSize: 12, color: MUTED,
+      }}>Loading campaign subscriptions…</div>
+    );
+  }
+  if (error) {
+    return (
+      <div style={{
+        background: '#fff3cd', borderLeft: `3px solid ${AMBER}`, borderRadius: 6,
+        padding: '8px 12px', marginBottom: 12, fontSize: 12, color: AMBER,
+      }}>Could not load campaign subscriptions: {error}</div>
+    );
+  }
+  if (!state) return null;
+
+  const masterOn = !!state.unsubscribed_from_all;
+  const campaigns = state.campaigns || [];
+
+  return (
+    <div style={{
+      background: BG, border: `0.5px solid ${BORDER}`, borderRadius: 6,
+      padding: '12px 14px', marginBottom: 12,
+    }}>
+      {/* Heading */}
+      <div style={{
+        display:'flex', justifyContent:'space-between', alignItems:'center',
+        marginBottom: 8,
+      }}>
+        <div style={{fontSize: 12, fontWeight: 500, color: TEXT}}>
+          📭 Campaign subscriptions
+        </div>
+        <div style={{fontSize: 10, color: MUTED}}>Synced admin ↔ portal</div>
+      </div>
+
+      {/* Master "Unsubscribe from ALL" tick */}
+      <label style={{
+        display:'flex', alignItems:'center', gap: 8,
+        padding: '6px 10px', borderRadius: 6,
+        background: CARD, border: `0.5px solid ${BORDER}`,
+        marginBottom: campaigns.length > 0 ? 8 : 0,
+        cursor: savingKey === '__master__' ? 'wait' : 'pointer',
+        opacity: savingKey === '__master__' ? 0.6 : 1,
+      }}>
+        <input
+          type="checkbox"
+          checked={masterOn}
+          disabled={savingKey === '__master__'}
+          onChange={e => applyChange({ unsubscribed_from_all: e.target.checked }, '__master__')}
+          style={{width: 14, height: 14, flexShrink: 0, cursor: 'inherit'}}
+        />
+        <div style={{flex: 1, fontSize: 12, fontWeight: 500, color: TEXT}}>
+          Unsubscribe from ALL campaigns
+        </div>
+        <div style={{fontSize: 10, color: MUTED}}>includes future</div>
+      </label>
+
+      {/* Empty state */}
+      {campaigns.length === 0 && !masterOn && (
+        <div style={{
+          fontSize: 11, color: MUTED, padding: '8px 4px 2px',
+          fontStyle: 'italic',
+        }}>No campaigns at this customer yet.</div>
+      )}
+
+      {/* Per-campaign rows */}
+      {campaigns.map(c => {
+        const isAuto = c.unsub_source === 'hot_prospect_auto';
+        const isArchived = c.status === 'archived';
+        // Effective checked: master overrides per-campaign for visual state
+        const checked = masterOn || c.unsubscribed;
+        const disabled = masterOn || savingKey === c.campaign_id;
+
+        // Build the sub-label describing this contact's relationship to
+        // this campaign. Three pieces of info: archived flag, audience-list
+        // status, send progress + auto-stop note.
+        const parts = [];
+        if (isArchived) parts.push('Archived');
+        if (!c.on_audience_list) parts.push('not on audience list');
+        if (c.sends_to_contact > 0) {
+          parts.push(`${c.sends_to_contact} of ${c.total_steps} sent`);
+        } else if (c.on_audience_list && !isArchived) {
+          parts.push(`${c.total_steps} step${c.total_steps===1?'':'s'} planned`);
+        }
+        if (isAuto) parts.push('auto-stopped when added to Hot Prospects');
+        const subLabel = parts.join(' · ') || 'Subscribed';
+
+        return (
+          <label
+            key={c.campaign_id}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '6px 10px', borderRadius: 6,
+              border: `0.5px solid ${isAuto ? '#E8C896' : BORDER}`,
+              background: isAuto ? '#FAEEDA' : CARD,
+              marginBottom: 4, cursor: disabled ? 'not-allowed' : 'pointer',
+              opacity: disabled && !masterOn ? 0.6 : 1,
+              filter: isArchived ? 'opacity(0.65)' : 'none',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={checked}
+              disabled={disabled}
+              onChange={e => applyChange({
+                campaigns: [{ campaign_id: c.campaign_id, unsubscribed: e.target.checked }],
+              }, c.campaign_id)}
+              style={{width: 14, height: 14, flexShrink: 0, cursor: 'inherit'}}
+            />
+            <div style={{flex: 1, minWidth: 0}}>
+              <div style={{
+                fontSize: 12,
+                fontWeight: isAuto ? 500 : 400,
+                color: isAuto ? '#412402' : TEXT,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>
+                {c.title || '(untitled campaign)'}
+                {c.list_name && <span style={{color: isAuto ? '#633806' : MUTED, fontWeight: 400}}> · {c.list_name}</span>}
+              </div>
+              <div style={{fontSize: 10, color: isAuto ? '#633806' : MUTED}}>
+                {subLabel}
+              </div>
+            </div>
+            {isAuto && (
+              <span style={{
+                fontSize: 9, padding: '1px 6px', borderRadius: 8,
+                background: '#BA7517', color: '#fff', flexShrink: 0,
+                fontWeight: 500,
+              }}>Auto</span>
+            )}
+          </label>
+        );
+      })}
+
+      {/* Hint when master is on */}
+      {masterOn && campaigns.length > 0 && (
+        <div style={{
+          fontSize: 10, color: MUTED, marginTop: 6, fontStyle: 'italic',
+        }}>
+          All campaigns blocked via master switch — untick "Unsubscribe from ALL" to control campaigns individually.
+        </div>
+      )}
     </div>
   );
 }
