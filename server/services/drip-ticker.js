@@ -34,6 +34,42 @@ const TICK_INTERVAL_MS = 60 * 1000;   // every minute
 let tickerHandle = null;
 let isTicking = false;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Linked-set resolver for the unsubscribe gate.
+//
+// Per decision 2026-05-20 (linked customers), a single "real" customer can
+// own two email_clients rows — a portal anchor and a separate inbox-owning
+// row — joined through customer_services with service_key='email'. The
+// campaign-level unsubscribe tables are denormalised, so a write can land
+// under either id. To make the drip-ticker gate find an unsubscribe written
+// from either side, we resolve the linked set once per campaign tick and
+// inline the resulting IN clause into each NOT EXISTS check.
+//
+// Duplicated here (rather than imported from routes/hot-prospects.js) on
+// purpose — the service layer shouldn't depend on the routes layer. The
+// query body is byte-identical so any future change should be applied to
+// both copies.
+// ─────────────────────────────────────────────────────────────────────────────
+function resolveLinkedSet(emailClientId) {
+  if (!emailClientId) return [];
+  const id = String(emailClientId);
+  const set = new Set([id]);
+  const outward = db.prepare(`
+    SELECT linked_external_id FROM customer_services
+    WHERE email_client_id = ? AND service_key = 'email'
+      AND linked_external_id IS NOT NULL
+      AND linked_external_id != email_client_id
+  `).get(id);
+  if (outward?.linked_external_id) set.add(String(outward.linked_external_id));
+  const inward = db.prepare(`
+    SELECT email_client_id FROM customer_services
+    WHERE linked_external_id = ? AND service_key = 'email'
+      AND linked_external_id != email_client_id
+  `).get(id);
+  if (inward?.email_client_id) set.add(String(inward.email_client_id));
+  return Array.from(set);
+}
+
 // In-memory map of activeBurst handles per campaign id, so we can cancel
 // pending setTimeouts if the campaign is paused/cancelled mid-burst.
 const activeBursts = new Map();
@@ -148,6 +184,37 @@ async function tickOneCampaign(campaign) {
   // their last send AND not halted by a positive reply).
   const order = campaign.send_order === 'random' ? 'RANDOM()' : 's.created_at ASC';
 
+  // ─── Unsubscribe gate (decision 2026-05-22) ──────────────────────────────
+  // Two NOT EXISTS clauses, applied to every candidate query below:
+  //   1. campaign_unsubscribes  → per-campaign opt-out from the panel tickbox
+  //                               OR from the auto-tick on Hot Prospect add.
+  //                               Keyed on (campaign_id, contact_email).
+  //   2. contact_unsubscribed_all → master "Unsubscribe from ALL" tickbox.
+  //                                 Keyed on (email_client_id, contact_email),
+  //                                 resolved across the linked set so a master
+  //                                 unsub written under either side of a linked
+  //                                 customer (Cube6 anchor / mail.eng inbox row)
+  //                                 still blocks campaigns owned by either id.
+  //
+  // The linked set IS needed for (2) because contact_unsubscribed_all is keyed
+  // on email_client_id rather than campaign_id. The campaign_unsubscribes
+  // gate (1) doesn't need the linked set because the unique key includes
+  // campaign_id directly — writes always land under the campaign's owning
+  // email_client_id by convention (see hot-prospects.js auto-tick).
+  const linkedIds = resolveLinkedSet(campaign.email_client_id);
+  const linkedPlaceholders = linkedIds.map(() => '?').join(',');
+  const unsubFragment = `
+        AND NOT EXISTS (
+          SELECT 1 FROM campaign_unsubscribes cu
+          WHERE cu.campaign_id = ?
+            AND lower(cu.contact_email) = lower(s.email)
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM contact_unsubscribed_all ca
+          WHERE ca.email_client_id IN (${linkedPlaceholders})
+            AND lower(ca.contact_email) = lower(s.email)
+        )`;
+
   // Step 1 candidates: subscribed list members who have no email_sends row at all
   // for this campaign. Same logic as pre-Phase-4.
   const step1Subs = db.prepare(`
@@ -157,8 +224,9 @@ async function tickOneCampaign(campaign) {
       AND NOT EXISTS (
         SELECT 1 FROM email_sends es WHERE es.campaign_id = ? AND es.subscriber_id = s.id
       )
+      ${unsubFragment}
     ORDER BY ${order}
-  `).all(campaign.list_id, campaign.id).map(s => ({ ...s, _stepNumber: 1 }));
+  `).all(campaign.list_id, campaign.id, campaign.id, ...linkedIds).map(s => ({ ...s, _stepNumber: 1 }));
 
   // Follow-up candidates: for each step N (where N >= 2), find subscribers whose
   // latest email_sends.step_number for this campaign is N-1, where the time since
@@ -201,12 +269,14 @@ async function tickOneCampaign(campaign) {
             AND lower(r.from_address) = lower(s.email)
             AND r.classification = 'positive'
         )
+        ${unsubFragment}
       ORDER BY ${order}
     `).all(
       campaign.list_id,
       campaign.id, prevStep, `-${delayDays} days`,
       campaign.id, n,
       campaign.email_client_id,
+      campaign.id, ...linkedIds,
     );
     for (const sub of dueRows) followUpCandidates.push({ ...sub, _stepNumber: n });
   }
@@ -217,10 +287,18 @@ async function tickOneCampaign(campaign) {
 
   if (allCandidates.length === 0) {
     // Anyone left to ever receive a follow-up? (i.e. sent step N where N < lastStep)
+    //
+    // Decision 2026-05-22: also gate on unsubscribe state here. Without the
+    // gate, a contact who's unsubscribed from this campaign (per-campaign or
+    // master "all") would still count as "pending" — which means the
+    // campaign never flips to 'sent' and the ticker keeps re-checking it
+    // forever. With the gate, an unsubscribed contact is treated the same
+    // as one who's fully completed: no further action needed.
     const lastStep = steps[steps.length - 1].step_number;
     const stillPending = db.prepare(`
       SELECT COUNT(*) as c FROM email_subscribers s
       WHERE s.list_id = ? AND s.status = 'subscribed'
+        ${unsubFragment}
         AND (
           NOT EXISTS (SELECT 1 FROM email_sends es WHERE es.campaign_id = ? AND es.subscriber_id = s.id)
           OR EXISTS (
@@ -235,7 +313,13 @@ async function tickOneCampaign(campaign) {
               )
           )
         )
-    `).get(campaign.list_id, campaign.id, campaign.id, lastStep, campaign.email_client_id);
+    `).get(
+      campaign.list_id,
+      campaign.id, ...linkedIds,
+      campaign.id,
+      campaign.id, lastStep,
+      campaign.email_client_id,
+    );
 
     if (!stillPending || stillPending.c === 0) {
       // Truly done — nobody left to receive any further step.
