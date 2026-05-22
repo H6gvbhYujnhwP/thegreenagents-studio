@@ -1524,3 +1524,92 @@ db.exec(`
     ON hot_prospects(email_client_id, closed_at)
     WHERE closed_at IS NOT NULL;
 `);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-contact, per-campaign unsubscribe state (decision 2026-05-22).
+//
+// Two tables — `campaign_unsubscribes` for per-campaign opt-outs, and
+// `contact_unsubscribed_all` for the master "Unsubscribe from ALL campaigns
+// (including future)" tick. Both are linked-set scoped at read time the same
+// way hot_prospects is (resolveLinkedSet → IN clause), so a Cube6-style
+// linked customer's anchor and inbox row share state.
+//
+// Why two tables instead of one with a nullable campaign_id:
+//   • The per-campaign rows have a real foreign-key relationship to
+//     email_campaigns; the "all campaigns" flag is a property of the
+//     (customer, contact) pair with no campaign at all. Mixing them in one
+//     table means every read has to special-case the NULL campaign_id, which
+//     is the kind of overload-with-two-meanings the #97 work was specifically
+//     trying to avoid (lesson from `contact_on_list` vs `contact_unsubscribed`).
+//   • The drip-ticker check becomes two clean NOT EXISTS clauses, one per
+//     table — easy to read, easy to index.
+//
+// Why store contact_email and email_client_id directly instead of joining
+// through hot_prospects:
+//   • Not every relevant contact is a hot prospect. The panel is also shown
+//     in the inbox open-email modal where the sender may never have been
+//     flagged as a prospect. We need to store opt-outs against the raw
+//     (customer, email) pair, independent of CRM state.
+//   • email_client_id is denormalised here for the same reason hot_prospects
+//     stores it directly — fast IN-clause lookups across the linked set
+//     without an extra join through email_campaigns.
+//
+// Why store under the campaign's email_client_id (not the prospect's
+// email_client_id when they differ for linked customers):
+//   • The owning row is the canonical one — campaigns live under the portal
+//     anchor (Cube6), not the inbox row (mail.eng). When the auto-tick on
+//     Hot Prospect add fires from the inbox row, it still writes under the
+//     anchor's id so subsequent reads under either side of the linked set
+//     find it via the same IN-clause filter.
+//   • Smoke-tested 2026-05-22 against the Cube6 + Manson realistic shapes
+//     before this migration was written (lesson #77).
+//
+// source values used:
+//   'manual'              — operator/customer ticked the box themselves
+//   'hot_prospect_auto'   — auto-applied when contact was added to Hot
+//                           Prospects; the source reply's matched_campaign_id
+//                           is what gets ticked.
+//   'list_unsubscribe'    — reserved for future bridge from the existing
+//                           list-level Unsubscribe button to also tick every
+//                           campaign on that list. Not used yet — kept here
+//                           so audit reads make sense if we add it later.
+// ─────────────────────────────────────────────────────────────────────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS campaign_unsubscribes (
+    id TEXT PRIMARY KEY,
+    email_client_id TEXT NOT NULL,
+    contact_email TEXT NOT NULL,
+    campaign_id TEXT NOT NULL,
+    unsubscribed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    source TEXT,
+    UNIQUE(email_client_id, contact_email, campaign_id)
+  );
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS contact_unsubscribed_all (
+    email_client_id TEXT NOT NULL,
+    contact_email TEXT NOT NULL,
+    unsubscribed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    source TEXT,
+    PRIMARY KEY(email_client_id, contact_email)
+  );
+`);
+
+// Indexes for the panel-state read (look up everything for one contact under
+// the customer's linked set) and the drip-ticker gate (look up rows for a
+// specific (campaign, email)). The drip-ticker gate is the hot path — runs
+// per-candidate on every tick — so an index keyed on campaign_id + email is
+// the right shape for it.
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_campaign_unsubscribes_client_email
+    ON campaign_unsubscribes(email_client_id, contact_email);
+`);
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_campaign_unsubscribes_campaign_email
+    ON campaign_unsubscribes(campaign_id, contact_email);
+`);
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_contact_unsubscribed_all_lookup
+    ON contact_unsubscribed_all(email_client_id, contact_email);
+`);
