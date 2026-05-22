@@ -10,7 +10,7 @@ import { encrypt, selfTest as cryptoSelfTest } from '../services/crypto-vault.js
 import { testImapCredentials, pollSingleInbox } from '../services/imap-poller.js';
 import { parseFirstName, parseAndCacheList, templateUsesFirstName, renderTemplate } from '../services/name-parser.js';
 import { classifyPendingOnce, classifyOneReply } from '../services/classify-replies.js';
-import { resolveLinkedSet, resolveCrmCustomerId } from './hot-prospects.js';
+import { resolveLinkedSet, resolveCrmCustomerId, buildSubscriptionsPanel, applySubscriptionsUpdate } from './hot-prospects.js';
 import dns from 'dns';
 import { promisify } from 'util';
 
@@ -2337,6 +2337,64 @@ router.post('/replies/:id/manual-resubscribe', (req, res) => {
       lists_affected: unsubRows.length,
     }));
   res.json({ ok: true, lists_affected: unsubRows.length });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/email/replies/:id/subscriptions
+//
+// Build the campaign-subscription panel for the contact who sent this reply.
+// Used by the inbox open-email modal — the starting point is a reply row,
+// so we resolve the contact via from_address + email_client_id and pass
+// those to the shared helper in hot-prospects.js.
+//
+// Same panel shape as the Hot Prospect endpoint. The frontend renders the
+// same component regardless of which surface invoked it; that's the whole
+// point of the panel design (decision 2026-05-22, "identical UX on inbox
+// emails and Hot Prospect list").
+//
+// extras.reply_id lets the frontend cross-reference the source modal.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/replies/:id/subscriptions', (req, res) => {
+  const reply = db
+    .prepare('SELECT id, email_client_id, from_address FROM email_replies WHERE id = ?')
+    .get(String(req.params.id || ''));
+  if (!reply) return res.status(404).json({ error: 'reply not found' });
+  const panel = buildSubscriptionsPanel(
+    reply.email_client_id,
+    reply.from_address,
+    { extras: { reply_id: reply.id } }
+  );
+  if (!panel) return res.status(404).json({ error: 'contact not resolvable from reply' });
+  res.json(panel);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/email/replies/:id/subscriptions
+//
+// Apply a partial subscription update from the inbox modal. Same body shape
+// as the Hot Prospect PUT — both call into applySubscriptionsUpdate. Returns
+// the fresh panel state for re-render.
+//
+// audit.extras records reply_id so the audit trail tells you which surface
+// the change came from (vs hot_prospect_id from the Hot Prospect side).
+// ─────────────────────────────────────────────────────────────────────────────
+router.put('/replies/:id/subscriptions', (req, res) => {
+  const reply = db
+    .prepare('SELECT id, email_client_id, from_address FROM email_replies WHERE id = ?')
+    .get(String(req.params.id || ''));
+  if (!reply) return res.status(404).json({ error: 'reply not found' });
+  applySubscriptionsUpdate(
+    reply.email_client_id,
+    reply.from_address,
+    req.body || {},
+    { actor: 'user', extras: { reply_id: reply.id } }
+  );
+  const panel = buildSubscriptionsPanel(
+    reply.email_client_id,
+    reply.from_address,
+    { extras: { reply_id: reply.id } }
+  );
+  res.json(panel);
 });
 
 // POST /api/email/replies/:id/send — admin reply to an inbound message.
