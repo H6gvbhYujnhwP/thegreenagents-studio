@@ -29,7 +29,7 @@ import { generateImage, recompositeLogoFromUrl } from '../services/gemini.js';
 import { uploadImageToR2 } from '../services/r2.js';
 import { queuePost } from '../services/supergrow.js';
 import { sendEmail } from '../services/ses.js';
-import { resolveLinkedSet, resolveCrmCustomerId } from './hot-prospects.js';
+import { resolveLinkedSet, resolveCrmCustomerId, buildSubscriptionsPanel, applySubscriptionsUpdate } from './hot-prospects.js';
 import { v4 as uuid } from 'uuid';
 
 const router = Router();
@@ -1461,6 +1461,72 @@ router.post('/replies/:id/manual-resubscribe', (req, res) => {
   res.json({ ok: true, lists_affected: unsubRows.length });
 });
 
+// ─── GET /api/portal/replies/:id/subscriptions ─────────────────────────────────
+// Customer-portal mirror of the admin endpoint in routes/email.js. Builds
+// the campaign-subscription panel for the contact who sent this reply.
+//
+// Tenant-scoped: the reply must belong to this customer's linked email_client.
+// 404 (not 403) on cross-tenant lookups, consistent with the rest of the portal
+// API (don't leak existence of other customers' replies).
+//
+// Shape is identical to the admin endpoint — same UI component renders both.
+router.get('/replies/:id/subscriptions', (req, res) => {
+  const linkedEmailClientId = resolveEmailClientId(req.portalClient.id);
+  if (!linkedEmailClientId) return res.status(404).json({ error: 'Not found' });
+
+  const r = db
+    .prepare('SELECT id, email_client_id, from_address FROM email_replies WHERE id = ?')
+    .get(String(req.params.id || ''));
+  if (!r || r.email_client_id !== linkedEmailClientId) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  const panel = buildSubscriptionsPanel(
+    r.email_client_id,
+    r.from_address,
+    { extras: { reply_id: r.id } }
+  );
+  if (!panel) return res.status(404).json({ error: 'contact not resolvable from reply' });
+  res.json(panel);
+});
+
+// ─── PUT /api/portal/replies/:id/subscriptions ─────────────────────────────────
+// Customer-side panel updates. Same body shape and behaviour as the admin
+// endpoint. actor in audit log is 'portal:<user_id>' so we can tell who
+// changed what forever.
+//
+// The applySubscriptionsUpdate helper itself enforces that any campaign_id
+// in the body belongs to the prospect's linked set — so even a portal user
+// can't accidentally (or maliciously) tick a campaign owned by a different
+// customer. Belt-and-braces with the tenant scope on the reply lookup above.
+router.put('/replies/:id/subscriptions', (req, res) => {
+  const linkedEmailClientId = resolveEmailClientId(req.portalClient.id);
+  if (!linkedEmailClientId) return res.status(404).json({ error: 'Not found' });
+
+  const r = db
+    .prepare('SELECT id, email_client_id, from_address FROM email_replies WHERE id = ?')
+    .get(String(req.params.id || ''));
+  if (!r || r.email_client_id !== linkedEmailClientId) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  applySubscriptionsUpdate(
+    r.email_client_id,
+    r.from_address,
+    req.body || {},
+    {
+      actor: 'portal:' + (req.portalUser?.id || 'unknown'),
+      extras: { reply_id: r.id, source: 'portal' },
+    }
+  );
+  const panel = buildSubscriptionsPanel(
+    r.email_client_id,
+    r.from_address,
+    { extras: { reply_id: r.id } }
+  );
+  res.json(panel);
+});
+
 // ─── 3b-iii: Campaigns view ───────────────────────────────────────────────────
 // Read-only list of email campaigns the customer has had sent on their behalf.
 // Filtered by the email-service-linked email_client (same join as inbox).
@@ -2513,6 +2579,59 @@ router.post('/hot-prospects/:id/unsubscribe', (req, res) => {
       })
     );
   res.json({ ok: true, lists_affected: subscribedRows.length });
+});
+
+// ─── GET /api/portal/hot-prospects/:id/subscriptions ───────────────────────────
+// Customer-portal mirror of the admin Hot Prospect panel endpoint in
+// routes/hot-prospects.js. Same shape, same renderer on the frontend.
+//
+// Tenant-scoped via _resolveProspectLinkedSet + _inClause — the prospect
+// MUST belong to this customer's linked set. 404 (not 403) on mismatch.
+router.get('/hot-prospects/:id/subscriptions', (req, res) => {
+  const clientId = req.portalClient.id;
+  const id = String(req.params.id || '');
+  const linkedIds = _resolveProspectLinkedSet(clientId);
+  const inOwn = _inClause('email_client_id', linkedIds);
+  const prospect = db
+    .prepare(`SELECT id, email_client_id, prospect_email FROM hot_prospects WHERE id = ? AND ${inOwn.sql}`)
+    .get(id, ...inOwn.params);
+  if (!prospect) return res.status(404).json({ error: 'prospect not found' });
+  const panel = buildSubscriptionsPanel(
+    prospect.email_client_id,
+    prospect.prospect_email,
+    { extras: { prospect_id: prospect.id } }
+  );
+  if (!panel) return res.status(404).json({ error: 'prospect not found' });
+  res.json(panel);
+});
+
+// ─── PUT /api/portal/hot-prospects/:id/subscriptions ───────────────────────────
+// Customer-side panel updates. Same body shape and behaviour as the admin
+// endpoint. Audit actor records who made the change from where.
+router.put('/hot-prospects/:id/subscriptions', (req, res) => {
+  const clientId = req.portalClient.id;
+  const id = String(req.params.id || '');
+  const linkedIds = _resolveProspectLinkedSet(clientId);
+  const inOwn = _inClause('email_client_id', linkedIds);
+  const prospect = db
+    .prepare(`SELECT id, email_client_id, prospect_email FROM hot_prospects WHERE id = ? AND ${inOwn.sql}`)
+    .get(id, ...inOwn.params);
+  if (!prospect) return res.status(404).json({ error: 'prospect not found' });
+  applySubscriptionsUpdate(
+    prospect.email_client_id,
+    prospect.prospect_email,
+    req.body || {},
+    {
+      actor: 'portal:' + (req.portalUser?.id || 'unknown'),
+      extras: { hot_prospect_id: prospect.id, source: 'portal' },
+    }
+  );
+  const panel = buildSubscriptionsPanel(
+    prospect.email_client_id,
+    prospect.prospect_email,
+    { extras: { prospect_id: prospect.id } }
+  );
+  res.json(panel);
 });
 
 // POST /api/portal/hot-prospects/:id/mark-converted — mark as converted.
