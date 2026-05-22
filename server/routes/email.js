@@ -536,13 +536,20 @@ router.get('/clients', (req, res) => {
   // but a fresh deploy and the loadAll AWS-sync race could in theory produce
   // one) are still shown so the operator can fix them. New inserts always set
   // source explicitly via the POST route below.
+  //
+  // Soft-hide filter: rows with hidden_at populated (set by the "Remove from
+  // list" button in the Edit Client modal) are excluded. The row + all its
+  // data still exists in the DB — it just doesn't show in the customer list.
+  // Re-verifying the domain in AWS triggers the POST route to clear hidden_at
+  // automatically so the row reappears.
   const rows = db.prepare(`
     SELECT ec.*,
       (SELECT COUNT(*) FROM email_lists WHERE email_client_id=ec.id) as list_count,
       (SELECT COALESCE(SUM(s.cnt),0) FROM (SELECT COUNT(*) as cnt FROM email_subscribers es JOIN email_lists el ON es.list_id=el.id WHERE el.email_client_id=ec.id AND es.status='subscribed') s) as subscriber_count,
       (SELECT COUNT(*) FROM email_campaigns WHERE email_client_id=ec.id) as campaign_count
     FROM email_clients ec
-    WHERE ec.source IS NULL OR ec.source IN ('aws_domain', 'manual')
+    WHERE (ec.source IS NULL OR ec.source IN ('aws_domain', 'manual'))
+      AND ec.hidden_at IS NULL
     ORDER BY ec.name ASC
   `).all();
   res.json(rows);
@@ -551,13 +558,32 @@ router.get('/clients', (req, res) => {
 router.post('/clients', async (req, res) => {
   const { name, color } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
+
+  // Auto-unhide path: if a row with this name already exists but is hidden
+  // (hidden_at IS NOT NULL), the operator has re-verified the domain in AWS
+  // and loadAll's name-matching couldn't see the hidden row in /clients —
+  // so it tried to "create" it. Instead of inserting a duplicate, clear
+  // hidden_at on the existing row and return it. All historical data (lists,
+  // subs, campaigns, replies, hot prospects, audit log) is preserved so the
+  // customer carries on where they left off.
+  const trimmedName = name.trim();
+  const existingHidden = db.prepare(
+    `SELECT * FROM email_clients WHERE LOWER(name) = LOWER(?) AND hidden_at IS NOT NULL LIMIT 1`
+  ).get(trimmedName);
+  if (existingHidden) {
+    db.prepare(`UPDATE email_clients SET hidden_at = NULL WHERE id = ?`).run(existingHidden.id);
+    const refreshed = db.prepare('SELECT * FROM email_clients WHERE id=?').get(existingHidden.id);
+    console.log(`[email/clients POST] un-hid existing email_client id=${existingHidden.id} name=${refreshed.name} (AWS re-verification)`);
+    return res.json(refreshed);
+  }
+
   const id = uuid();
   // Auto-generate a URL-safe slug for the customer portal at /c/<slug>.
   // The helper (db._portalUniqueSlug) lives in db.js so the same algorithm
   // is used for backfill of existing rows AND for new inserts here.
   const slug = db._portalUniqueSlug
-    ? db._portalUniqueSlug(name.trim(), id)
-    : name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    ? db._portalUniqueSlug(trimmedName, id)
+    : trimmedName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
   // Classify the new row's source. The auto-sync in EmailSection.jsx (loadAll)
   // calls this endpoint with names that match AWS verified domains; the
@@ -567,9 +593,9 @@ router.post('/clients', async (req, res) => {
   // hiding a row from the very list the operator was trying to add it to.
   let source = 'manual';
   try {
-    const trimmed = name.trim().toLowerCase();
+    const lower = trimmedName.toLowerCase();
     const verified = await getVerifiedDomains();
-    if (Array.isArray(verified) && verified.some(d => String(d).toLowerCase() === trimmed)) {
+    if (Array.isArray(verified) && verified.some(d => String(d).toLowerCase() === lower)) {
       source = 'aws_domain';
     }
   } catch (err) {
@@ -577,7 +603,7 @@ router.post('/clients', async (req, res) => {
   }
 
   db.prepare('INSERT INTO email_clients (id,name,color,slug,source) VALUES (?,?,?,?,?)')
-    .run(id, name.trim(), color || '#1D9E75', slug, source);
+    .run(id, trimmedName, color || '#1D9E75', slug, source);
   res.json(db.prepare('SELECT * FROM email_clients WHERE id=?').get(id));
 });
 
@@ -595,18 +621,34 @@ router.put('/clients/:id', (req, res) => {
   res.json(db.prepare('SELECT * FROM email_clients WHERE id=?').get(req.params.id));
 });
 
+// ── Soft-hide a customer (Remove from list) ──────────────────────────────────
+//
+// Operator-triggered from the "Remove from list" button in the Edit Client
+// modal. Sets hidden_at = now() on the email_clients row. The row + ALL its
+// data (lists, subscribers, campaigns, drip steps, sends, brands, mailboxes,
+// replies, outbound, hot prospects, audit log, customer_services link,
+// unsubscribe tables from #98) are deliberately preserved.
+//
+// Why soft, not hard: operator's call (2026-05-22 ninth session). If a
+// customer comes back months later and the operator re-verifies the domain
+// in AWS, the row auto-unhides via the POST /clients route (which sees a
+// matching name on a hidden row and clears hidden_at instead of inserting
+// a duplicate). The customer carries on from their last campaign with all
+// reply history intact.
+//
+// The DELETE verb keeps URL compatibility with the previous endpoint at this
+// path. The route's BEHAVIOUR is a soft-hide — name preserved so the
+// auto-unhide round-trip works.
+//
+// Returns 404 if the row doesn't exist. Idempotent: hiding an already-hidden
+// row is fine, it just re-stamps the timestamp.
 router.delete('/clients/:id', (req, res) => {
-  const lists    = db.prepare('SELECT id FROM email_lists WHERE email_client_id=?').all(req.params.id);
-  const campaigns = db.prepare('SELECT id FROM email_campaigns WHERE email_client_id=?').all(req.params.id);
-  db.transaction(() => {
-    for (const l of lists) db.prepare('DELETE FROM email_subscribers WHERE list_id=?').run(l.id);
-    for (const c of campaigns) db.prepare('DELETE FROM email_sends WHERE campaign_id=?').run(c.id);
-    db.prepare('DELETE FROM email_lists WHERE email_client_id=?').run(req.params.id);
-    db.prepare('DELETE FROM email_campaigns WHERE email_client_id=?').run(req.params.id);
-    db.prepare('DELETE FROM email_brands WHERE email_client_id=?').run(req.params.id);
-    db.prepare('DELETE FROM email_clients WHERE id=?').run(req.params.id);
-  })();
-  res.json({ ok: true });
+  const id = req.params.id;
+  const exists = db.prepare('SELECT id, name FROM email_clients WHERE id=?').get(id);
+  if (!exists) return res.status(404).json({ error: 'not_found' });
+  db.prepare(`UPDATE email_clients SET hidden_at = datetime('now') WHERE id = ?`).run(id);
+  console.log(`[email/clients DELETE] soft-hid email_client id=${id} name=${exists.name} (data preserved)`);
+  res.json({ ok: true, hidden: true });
 });
 
 // ── BRANDS ────────────────────────────────────────────────────────────────────
