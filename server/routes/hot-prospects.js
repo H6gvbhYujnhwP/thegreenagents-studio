@@ -548,6 +548,64 @@ router.post('/', (req, res) => {
     source_reply_id || null
   );
 
+  // ── Auto-tick the source campaign (decision 2026-05-22) ──────────────────
+  // When the prospect was added FROM a specific reply, that reply is almost
+  // always a response to one of our drip campaigns — and continuing to send
+  // the rest of that campaign's steps to someone who's now in real
+  // conversation with us looks ridiculous. So we auto-unsubscribe them from
+  // just that campaign.
+  //
+  // Implementation:
+  //   1. Lift matched_campaign_id from the source reply.
+  //   2. Look up that campaign's email_client_id (which may differ from the
+  //      prospect's email_client_id for linked customers — campaigns live
+  //      under the portal anchor, hot prospects can be flagged from either
+  //      side). Storing under the campaign's owning id is the convention
+  //      drip-ticker.js relies on for its gate query.
+  //   3. INSERT OR IGNORE into campaign_unsubscribes. Idempotent — re-adding
+  //      the same prospect doesn't error out, doesn't change the source
+  //      stamp (existing 'manual' tick wins over a later 'hot_prospect_auto').
+  //
+  // Only fires when `was_new` would be true, to avoid spamming the auto-tick
+  // every time the operator re-clicks Send to Hot Prospects. (The INSERT OR
+  // IGNORE makes this safe anyway, but skipping the lookup query on re-adds
+  // is the polite thing to do.)
+  //
+  // Best-effort — wrapped in try/catch so a failed lookup never blocks the
+  // prospect-add itself. Audit log records what happened either way.
+  if (wasNew && source_reply_id) {
+    try {
+      const reply = db
+        .prepare('SELECT matched_campaign_id FROM email_replies WHERE id = ?')
+        .get(String(source_reply_id));
+      const matchedCampaignId = reply && reply.matched_campaign_id;
+      if (matchedCampaignId) {
+        const camp = db
+          .prepare('SELECT email_client_id FROM email_campaigns WHERE id = ?')
+          .get(matchedCampaignId);
+        if (camp && camp.email_client_id) {
+          const result = db.prepare(`
+            INSERT OR IGNORE INTO campaign_unsubscribes
+              (id, email_client_id, contact_email, campaign_id, source)
+            VALUES (?, ?, ?, ?, 'hot_prospect_auto')
+          `).run(uuid(), camp.email_client_id, prospectEmail, matchedCampaignId);
+          if (result.changes > 0) {
+            db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, reply_id, metadata)
+                        VALUES (?, 'system', 'hot_prospect_auto_unsub_campaign', 'campaign', ?, ?, ?)`)
+              .run(uuid(), matchedCampaignId, String(source_reply_id), JSON.stringify({
+                hot_prospect_id: row.id,
+                contact_email: prospectEmail,
+                campaign_email_client_id: camp.email_client_id,
+                prospect_email_client_id: emailClientId,
+              }));
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[hot-prospects] auto-unsub-source-campaign failed (non-fatal):', e?.message || e);
+    }
+  }
+
   // Tell the caller which switcher card this prospect will live under. For
   // a linked customer (e.g. mail.engineeringsolutions.co.uk written here but
   // appearing under Cube 6's card), that's the portal anchor's id. For an
@@ -812,6 +870,314 @@ router.post('/:id/unsubscribe', (req, res) => {
       lists_affected: subscribedRows.length,
     }));
   res.json({ ok: true, lists_affected: subscribedRows.length });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: build the panel state payload for a contact at a customer.
+//
+// Takes the customer's email_client_id (any id in the linked set will do —
+// the function resolves the full set internally) and the contact's email.
+// Used by:
+//   - GET /:id/subscriptions here (where the starting point is a hot prospect)
+//   - The inbox-modal endpoint in routes/email.js (starting point: a reply)
+//   - The portal-mirror endpoint in routes/portal.js
+//
+// Returns the JSON shape the frontend expects, OR null if email is empty.
+// ─────────────────────────────────────────────────────────────────────────────
+function buildSubscriptionsPanel(emailClientId, contactEmail, options = {}) {
+  const emailLc = String(contactEmail || '').toLowerCase().trim();
+  if (!emailLc) return null;
+  const linkedIds = resolveLinkedSet(emailClientId);
+  if (linkedIds.length === 0) return null;
+  const idPlaceholders = linkedIds.map(() => '?').join(',');
+
+  // Master flag: present if ANY row in the linked set has this contact
+  // marked as unsubscribed-from-all. Source recorded for the UI tooltip.
+  const masterRow = db.prepare(`
+    SELECT email_client_id, unsubscribed_at, source
+    FROM contact_unsubscribed_all
+    WHERE email_client_id IN (${idPlaceholders})
+      AND lower(contact_email) = ?
+    LIMIT 1
+  `).get(...linkedIds, emailLc);
+
+  // Every campaign at the customer's linked set. Pull the list name so the
+  // frontend can disambiguate "Architects Q2" from "Architects Q3" by
+  // listing the list name underneath.
+  const campaigns = db.prepare(`
+    SELECT c.id, c.email_client_id, c.list_id, c.title, c.status,
+           c.created_at, c.sent_at,
+           l.name AS list_name
+    FROM email_campaigns c
+    LEFT JOIN email_lists l ON l.id = c.list_id
+    WHERE c.email_client_id IN (${idPlaceholders})
+    ORDER BY
+      CASE WHEN c.status = 'archived' THEN 1 ELSE 0 END ASC,
+      c.created_at DESC
+  `).all(...linkedIds);
+
+  // Per-campaign unsub rows for this contact, also under the linked set.
+  const unsubRows = db.prepare(`
+    SELECT campaign_id, unsubscribed_at, source
+    FROM campaign_unsubscribes
+    WHERE email_client_id IN (${idPlaceholders})
+      AND lower(contact_email) = ?
+  `).all(...linkedIds, emailLc);
+  const unsubByCamp = new Map(unsubRows.map(r => [r.campaign_id, r]));
+
+  // Step count per campaign — one COUNT(*) per campaign would be N+1, so
+  // aggregate in one query.
+  let stepsByCamp = new Map();
+  if (campaigns.length > 0) {
+    const campPlaceholders = campaigns.map(() => '?').join(',');
+    const stepRows = db.prepare(`
+      SELECT campaign_id, COUNT(*) AS total_steps
+      FROM email_campaign_steps
+      WHERE campaign_id IN (${campPlaceholders})
+      GROUP BY campaign_id
+    `).all(...campaigns.map(c => c.id));
+    stepsByCamp = new Map(stepRows.map(r => [r.campaign_id, r.total_steps]));
+  }
+
+  // Sends count for this contact per campaign — same N+1 avoidance.
+  let sendsByCamp = new Map();
+  if (campaigns.length > 0) {
+    const campPlaceholders = campaigns.map(() => '?').join(',');
+    const sendRows = db.prepare(`
+      SELECT es.campaign_id, COUNT(*) AS sends
+      FROM email_sends es
+      JOIN email_subscribers s ON s.id = es.subscriber_id
+      WHERE es.campaign_id IN (${campPlaceholders})
+        AND lower(s.email) = ?
+      GROUP BY es.campaign_id
+    `).all(...campaigns.map(c => c.id), emailLc);
+    sendsByCamp = new Map(sendRows.map(r => [r.campaign_id, r.sends]));
+  }
+
+  // On-audience-list flag per campaign — the contact's email is on the
+  // campaign's mailing list (regardless of subscribed/unsubscribed status
+  // — that's a separate signal handled by the existing #96 grey pill).
+  let onListByCamp = new Map();
+  if (campaigns.length > 0) {
+    const listIds = Array.from(new Set(campaigns.map(c => c.list_id).filter(Boolean)));
+    if (listIds.length > 0) {
+      const listPlaceholders = listIds.map(() => '?').join(',');
+      const onListRows = db.prepare(`
+        SELECT list_id FROM email_subscribers
+        WHERE list_id IN (${listPlaceholders})
+          AND lower(email) = ?
+      `).all(...listIds, emailLc);
+      const onListLists = new Set(onListRows.map(r => r.list_id));
+      for (const c of campaigns) {
+        onListByCamp.set(c.id, onListLists.has(c.list_id));
+      }
+    }
+  }
+
+  const projected = campaigns.map(c => {
+    const unsub = unsubByCamp.get(c.id);
+    return {
+      campaign_id: c.id,
+      title: c.title,
+      status: c.status || 'draft',
+      list_id: c.list_id,
+      list_name: c.list_name || null,
+      created_at: c.created_at,
+      sent_at: c.sent_at,
+      unsubscribed: !!unsub,
+      unsub_source: unsub ? unsub.source : null,
+      unsubscribed_at: unsub ? unsub.unsubscribed_at : null,
+      on_audience_list: !!onListByCamp.get(c.id),
+      sends_to_contact: sendsByCamp.get(c.id) || 0,
+      total_steps: stepsByCamp.get(c.id) || 1,
+    };
+  });
+
+  return {
+    contact_email: contactEmail,
+    unsubscribed_from_all: !!masterRow,
+    unsubscribed_from_all_source: masterRow ? masterRow.source : null,
+    unsubscribed_from_all_at: masterRow ? masterRow.unsubscribed_at : null,
+    campaigns: projected,
+    ...(options.extras || {}),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: apply a partial PUT payload to the subscription tables for a
+// (customer, contact) pair. Mirrors what the PUT endpoint accepts in its
+// body, so the same code can be reused by the portal mirror and the
+// inbox-modal endpoint in routes/email.js.
+//
+// Returns nothing; caller follows up with buildSubscriptionsPanel to get
+// the fresh state.
+// ─────────────────────────────────────────────────────────────────────────────
+function applySubscriptionsUpdate(emailClientId, contactEmail, body, audit = {}) {
+  const emailLc = String(contactEmail || '').toLowerCase().trim();
+  if (!emailLc) return;
+  const linkedIds = resolveLinkedSet(emailClientId);
+  if (linkedIds.length === 0) return;
+  const idPlaceholders = linkedIds.map(() => '?').join(',');
+  const actor = audit.actor || 'user';
+  const auditExtras = audit.extras || {};
+
+  // Master flag — set or clear if explicitly present in body
+  if ('unsubscribed_from_all' in body) {
+    if (body.unsubscribed_from_all) {
+      db.prepare(`
+        INSERT OR IGNORE INTO contact_unsubscribed_all
+          (email_client_id, contact_email, source)
+        VALUES (?, ?, 'manual')
+      `).run(emailClientId, emailLc);
+      db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, metadata)
+                  VALUES (?, ?, 'unsubscribe_all_campaigns', 'contact', ?, ?)`)
+        .run(uuid(), actor, emailLc, JSON.stringify({
+          email_client_id: emailClientId,
+          ...auditExtras,
+        }));
+    } else {
+      const result = db.prepare(`
+        DELETE FROM contact_unsubscribed_all
+        WHERE email_client_id IN (${idPlaceholders})
+          AND lower(contact_email) = ?
+      `).run(...linkedIds, emailLc);
+      if (result.changes > 0) {
+        db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, metadata)
+                    VALUES (?, ?, 'resubscribe_all_campaigns', 'contact', ?, ?)`)
+          .run(uuid(), actor, emailLc, JSON.stringify({
+            email_client_id: emailClientId,
+            rows_cleared: result.changes,
+            ...auditExtras,
+          }));
+      }
+    }
+  }
+
+  // Per-campaign rows
+  if (Array.isArray(body.campaigns)) {
+    for (const entry of body.campaigns) {
+      if (!entry || !entry.campaign_id) continue;
+      const campaignId = String(entry.campaign_id);
+      const camp = db
+        .prepare('SELECT id, email_client_id FROM email_campaigns WHERE id = ?')
+        .get(campaignId);
+      if (!camp) continue;
+      // Reject attempts to tick campaigns that don't belong to this customer.
+      if (!linkedIds.includes(String(camp.email_client_id))) continue;
+      if (entry.unsubscribed) {
+        db.prepare(`
+          INSERT OR IGNORE INTO campaign_unsubscribes
+            (id, email_client_id, contact_email, campaign_id, source)
+          VALUES (?, ?, ?, ?, 'manual')
+        `).run(uuid(), camp.email_client_id, emailLc, campaignId);
+        db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, metadata)
+                    VALUES (?, ?, 'unsubscribe_campaign', 'campaign', ?, ?)`)
+          .run(uuid(), actor, campaignId, JSON.stringify({
+            contact_email: emailLc,
+            campaign_email_client_id: camp.email_client_id,
+            ...auditExtras,
+          }));
+      } else {
+        const result = db.prepare(`
+          DELETE FROM campaign_unsubscribes
+          WHERE email_client_id IN (${idPlaceholders})
+            AND lower(contact_email) = ?
+            AND campaign_id = ?
+        `).run(...linkedIds, emailLc, campaignId);
+        if (result.changes > 0) {
+          db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id, metadata)
+                      VALUES (?, ?, 'resubscribe_campaign', 'campaign', ?, ?)`)
+            .run(uuid(), actor, campaignId, JSON.stringify({
+              contact_email: emailLc,
+              rows_cleared: result.changes,
+              ...auditExtras,
+            }));
+        }
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/email/hot-prospects/:id/subscriptions
+//
+// Build the panel state for a hot prospect: every campaign at the customer
+// (across the linked set), the contact's per-campaign unsubscribe state, the
+// master "unsubscribed from all" flag, and the per-campaign metadata the
+// frontend needs to render its sub-labels (send count for this contact,
+// total steps, whether the contact is on the campaign's audience list).
+//
+// Why list EVERY campaign rather than just the ones the contact's email is
+// on the list for: operator decision 2026-05-22. The panel becomes the
+// permanent place where future opt-outs are recorded too — so if the
+// contact's email ever lands on a new list, the unsubscribe is already in
+// place. The frontend can still visually de-emphasise rows where the
+// contact isn't currently in the audience (sub-label "not on audience
+// list") — that's a UX choice, not a backend filter.
+//
+// Sort order: archived campaigns to the bottom, then by created_at DESC
+// inside each bucket so the most recent campaign appears at the top of the
+// active section.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/:id/subscriptions', (req, res) => {
+  const id = String(req.params.id || '');
+  const prospect = db
+    .prepare('SELECT id, email_client_id, prospect_email FROM hot_prospects WHERE id = ?')
+    .get(id);
+  if (!prospect) return res.status(404).json({ error: 'prospect not found' });
+  const panel = buildSubscriptionsPanel(
+    prospect.email_client_id,
+    prospect.prospect_email,
+    { extras: { prospect_id: prospect.id } }
+  );
+  if (!panel) return res.status(404).json({ error: 'prospect not found' });
+  res.json(panel);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/email/hot-prospects/:id/subscriptions
+//
+// Apply a partial subscription update. Body shape:
+//   {
+//     unsubscribed_from_all?: boolean,
+//     campaigns?: [ { campaign_id, unsubscribed: boolean }, ... ]
+//   }
+//
+// Both keys optional and independent — a request can flip just the master
+// flag, just per-campaign rows, or both. Per-campaign entries that aren't
+// listed are left alone (no implicit clear).
+//
+// Storage convention (matches drip-ticker's gate query expectation):
+//   - Per-campaign rows are stored under the CAMPAIGN'S email_client_id,
+//     not the prospect's. For linked customers (Cube6 anchor + mail.eng
+//     inbox), this is always the anchor (where campaigns live).
+//   - Master flag is stored under the PROSPECT'S email_client_id (whichever
+//     side of the linked set the prospect happens to live on). Reads use
+//     the linked set so either side finds it.
+//
+// Three-shape response idiom not applicable here — every PUT either
+// changes state or no-ops by intent (ticking a box that's already ticked
+// is fine, no error). Returns the full new panel state so the frontend
+// can re-render without a follow-up GET.
+// ─────────────────────────────────────────────────────────────────────────────
+router.put('/:id/subscriptions', (req, res) => {
+  const id = String(req.params.id || '');
+  const prospect = db
+    .prepare('SELECT id, email_client_id, prospect_email FROM hot_prospects WHERE id = ?')
+    .get(id);
+  if (!prospect) return res.status(404).json({ error: 'prospect not found' });
+  applySubscriptionsUpdate(
+    prospect.email_client_id,
+    prospect.prospect_email,
+    req.body || {},
+    { actor: 'user', extras: { hot_prospect_id: id } }
+  );
+  const panel = buildSubscriptionsPanel(
+    prospect.email_client_id,
+    prospect.prospect_email,
+    { extras: { prospect_id: prospect.id } }
+  );
+  res.json(panel);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1097,6 +1463,6 @@ router.get('/:id/thread', (req, res) => {
 //                                badges to inbox rows
 //   - server/routes/portal.js  — same, for the customer-portal inbox
 // ─────────────────────────────────────────────────────────────────────────────
-export { resolveLinkedSet, resolveCrmCustomerId };
+export { resolveLinkedSet, resolveCrmCustomerId, buildSubscriptionsPanel, applySubscriptionsUpdate };
 
 export default router;
