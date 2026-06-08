@@ -114,9 +114,15 @@ router.get('/track/click/:campaignId/:subscriberId/:hash', (req, res) => {
   if (!url) return res.status(404).send('Link not found');
 
   try {
-    // Record the click
-    db.prepare(`INSERT INTO email_link_clicks (id, campaign_id, subscriber_id, url, clicked_at)
-                VALUES (?, ?, ?, ?, datetime('now'))`).run(uuid(), campaignId, subscriberId, url);
+    // Record the click — capture source IP + browser-agent so scanner pre-fetches
+    // can be told apart from real human clicks (#101b). X-Forwarded-For first
+    // (Render sits behind a proxy), falling back to the socket address. Works
+    // regardless of trust-proxy config.
+    const ipAddress = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '')
+      .toString().split(',')[0].trim() || null;
+    const userAgent = req.get('user-agent') || null;
+    db.prepare(`INSERT INTO email_link_clicks (id, campaign_id, subscriber_id, url, clicked_at, ip_address, user_agent)
+                VALUES (?, ?, ?, ?, datetime('now'), ?, ?)`).run(uuid(), campaignId, subscriberId, url, ipAddress, userAgent);
 
     // Update the send row — first click marks it; subsequent clicks bump count
     const send = db.prepare(`SELECT id, clicked_at FROM email_sends
@@ -1560,7 +1566,29 @@ router.get('/campaigns/:id/recipients', (req, res) => {
       es.open_count,
       es.click_count,
       COALESCE(es.step_number, 0) as last_step,
-      (SELECT COUNT(*) FROM email_link_clicks lc WHERE lc.campaign_id = ? AND lc.subscriber_id = s.id) as link_click_count
+      (
+        -- Burst-collapsed click count (#101b): a click counts only if the same
+        -- person hasn't already clicked the same link within the prior 10 seconds.
+        -- Corporate mail scanners fire many hits in the SAME second (identical
+        -- stored timestamp), so ties are broken by id to keep exactly one of them;
+        -- the gap uses integer epoch-seconds to avoid float boundary fuzz.
+        -- Genuine re-engagement (a real re-click seconds-plus later) still counts.
+        -- Works on historic rows too, since it reads stored timestamps.
+        SELECT COUNT(*) FROM email_link_clicks lc
+        WHERE lc.campaign_id = ? AND lc.subscriber_id = s.id
+          AND NOT EXISTS (
+            SELECT 1 FROM email_link_clicks lc2
+            WHERE lc2.campaign_id = lc.campaign_id
+              AND lc2.subscriber_id = lc.subscriber_id
+              AND lc2.url = lc.url
+              AND (
+                    lc2.clicked_at < lc.clicked_at
+                    OR (lc2.clicked_at = lc.clicked_at AND lc2.id < lc.id)
+                  )
+              AND (CAST(strftime('%s', lc.clicked_at) AS INTEGER)
+                   - CAST(strftime('%s', lc2.clicked_at) AS INTEGER)) <= 10
+          )
+      ) as link_click_count
     FROM email_subscribers s
     LEFT JOIN email_sends es ON es.subscriber_id = s.id AND es.campaign_id = ?
       AND es.step_number = (
@@ -1606,6 +1634,9 @@ router.get('/campaigns/:id/recipients', (req, res) => {
   // Per-step reply counts — count subscribers on this campaign's list who replied
   // (any classification) AFTER receiving a given step. The "after" check uses
   // the email_sends.sent_at vs email_replies.received_at timestamps.
+  // The matched_campaign_id gate ensures we only count replies that actually
+  // belong to THIS campaign (mailbox-view source of truth) — without it, any
+  // reply from a contact who's also on another campaign's list was over-counted.
   const stepReplyRows = db.prepare(`
     SELECT es.step_number, COUNT(DISTINCT r.id) as reply_count
     FROM email_sends es
@@ -1613,6 +1644,7 @@ router.get('/campaigns/:id/recipients', (req, res) => {
     JOIN email_replies r ON r.email_client_id = ?
       AND lower(r.from_address) = lower(s.email)
       AND datetime(r.received_at) >= datetime(es.sent_at)
+      AND r.matched_campaign_id = es.campaign_id
     WHERE es.campaign_id = ?
     GROUP BY es.step_number
     ORDER BY es.step_number ASC

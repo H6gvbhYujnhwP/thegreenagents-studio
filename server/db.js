@@ -332,6 +332,21 @@ db.exec(`
     FOREIGN KEY (subscriber_id) REFERENCES email_subscribers(id)
   );
 `);
+// Click-source capture (#101b) — record WHO/WHAT clicked so corporate mail
+// security scanners (Mimecast/Proofpoint/Defender etc.) can be distinguished
+// from real human clicks. We keep recording every hit raw; these columns let
+// us tell scanner from human. Additive, NULL on all historic rows.
+{
+  const clickCols = db.prepare('PRAGMA table_info(email_link_clicks)').all().map(r => r.name);
+  if (!clickCols.includes('ip_address')) {
+    db.exec(`ALTER TABLE email_link_clicks ADD COLUMN ip_address TEXT`);
+    console.log('[db] migration: added ip_address to email_link_clicks');
+  }
+  if (!clickCols.includes('user_agent')) {
+    db.exec(`ALTER TABLE email_link_clicks ADD COLUMN user_agent TEXT`);
+    console.log('[db] migration: added user_agent to email_link_clicks');
+  }
+}
 {
   const subCols = db.prepare('PRAGMA table_info(email_subscribers)').all().map(r => r.name);
   if (!subCols.includes('spam_at')) {
