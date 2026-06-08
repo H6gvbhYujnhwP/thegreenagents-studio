@@ -12,6 +12,7 @@ import portalAdminRoutes from './routes/portal-admin.js';
 import portalRoutes from './routes/portal.js';
 import idyqBridgeRoutes from './routes/idyq-bridge.js';
 import hotProspectsRoutes from './routes/hot-prospects.js';
+import facebookPixelsRoutes from './routes/facebook-pixels.js';
 import { startPoller } from './services/imap-poller.js';
 import { startClassifier } from './services/classify-replies.js';
 import { startDripTicker } from './services/drip-ticker.js';
@@ -47,6 +48,7 @@ app.use('/api/clients',     clientRoutes);
 app.use('/api/campaigns',   campaignRoutes);
 app.use('/api/email/hot-prospects', hotProspectsRoutes); // CRM — admin-side Hot Prospects list (requireAuth). Mounted BEFORE /api/email so the more specific path matches first.
 app.use('/api/email',       emailRoutes);
+app.use('/api/facebook-pixels', facebookPixelsRoutes); // Facebook Pixels — admin-side pixel-customer management (requireAuth)
 app.use('/api/algorithm',   algorithmRoutes);
 app.use('/api/portal',      portalAuthRoutes);   // customer-portal auth (login/logout/check/reset)
 app.use('/api/portal',      portalRoutes);       // customer-portal data (posts, inbox, campaigns)

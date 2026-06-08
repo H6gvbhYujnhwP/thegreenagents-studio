@@ -1095,6 +1095,37 @@ db.exec(`
   `).run();
 }
 
+// 14l-fp. Facebook Pixels — per-customer Meta Pixel setup record (#facebook-pixels).
+// One row per customer (keyed by email_client_id, same customer identity the
+// rest of the portal uses). Stores the Meta details we hold for them plus a
+// setup status + checklist. The actual Meta work happens in Business Manager;
+// this is Studio's management record. Live campaign numbers (Phase B) are NOT
+// stored here — they'll be pulled from Meta when that's wired. Additive table,
+// nothing else touched.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS facebook_pixels (
+    id               TEXT PRIMARY KEY,
+    email_client_id  TEXT NOT NULL,
+    business_id      TEXT,
+    ad_account_id    TEXT,
+    pixel_id         TEXT,
+    pixel_name       TEXT,
+    domain           TEXT,
+    domain_verified  INTEGER NOT NULL DEFAULT 0,
+    facebook_page    TEXT,
+    goal             TEXT NOT NULL DEFAULT 'leads',        /* 'leads' | 'sales' */
+    conversion_event TEXT,
+    status           TEXT NOT NULL DEFAULT 'not_started',  /* 'not_started' | 'in_setup' | 'active' */
+    checklist_json   TEXT,                                 /* JSON map of setup-step -> 0/1 */
+    notes            TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (email_client_id) REFERENCES email_clients(id)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_facebook_pixels_customer
+    ON facebook_pixels(email_client_id);
+`);
+
 // 14m. Backfill customer_services from the legacy columns. Idempotent — uses
 // INSERT OR IGNORE on the unique (email_client_id, service_key) index, so
 // re-running on every boot doesn't double-up existing subscriptions.
