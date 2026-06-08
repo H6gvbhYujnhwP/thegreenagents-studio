@@ -81,6 +81,10 @@ router.get('/available-customers', (req, res) => {
     FROM email_clients
     WHERE (hidden_at IS NULL)
       AND id NOT IN (SELECT email_client_id FROM facebook_pixels)
+      AND id NOT IN (
+        SELECT linked_external_id FROM customer_services
+        WHERE linked_external_id IS NOT NULL AND email_client_id != linked_external_id
+      )
     ORDER BY name COLLATE NOCASE ASC
   `).all();
   res.json(rows);

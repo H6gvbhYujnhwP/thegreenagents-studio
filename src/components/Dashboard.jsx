@@ -7,6 +7,7 @@ import EmailSection from './EmailSection.jsx';
 import PortalAdmin from './PortalAdmin.jsx';
 import IDYQAdmin from './apps/IDYQAdmin.jsx';
 import CrmHotProspects from './CrmHotProspects.jsx';
+import FacebookPixels from './FacebookPixels.jsx';
 
 // Which section the operator is on is remembered across a browser refresh.
 // We store the current top-level view and read it back on first load, so a
@@ -174,6 +175,16 @@ export default function Dashboard({ onLogout }) {
     );
   }
 
+  // ── Facebook Pixels (admin) ────────────────────────────────────────────────
+  if (view === 'facebook-pixels') {
+    return (
+      <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+        <FacebookPixels />
+      </div>
+    );
+  }
+
   // ── Coming-soon placeholder views ─────────────────────────────────────────
   // Four sidebar items for services not yet built on the admin side. Each one
   // points to this same screen with the title varying. When a real admin
@@ -183,7 +194,6 @@ export default function Dashboard({ onLogout }) {
     'facebook-posts':  'Facebook Posts',
     'instagram':       'Instagram',
     'tiktok':          'TikTok',
-    'facebook-pixels': 'Facebook Pixels',
   };
   if (COMING_SOON_TITLES[view]) {
     return (
