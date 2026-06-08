@@ -8,9 +8,33 @@ import PortalAdmin from './PortalAdmin.jsx';
 import IDYQAdmin from './apps/IDYQAdmin.jsx';
 import CrmHotProspects from './CrmHotProspects.jsx';
 
+// Which section the operator is on is remembered across a browser refresh.
+// We store the current top-level view and read it back on first load, so a
+// refresh keeps you on the section you were viewing instead of snapping back
+// to the default (LinkedIn Posts). VALID_VIEWS guards against a stale or
+// garbage stored value ever rendering a broken screen — anything not on the
+// list falls back to 'clients'.
+const VALID_VIEWS = [
+  'clients',
+  'email-customers', 'email-domain-health', 'email-mailboxes',
+  'portal-customers',
+  'crm-hot-prospects',
+  'apps-idyq',
+  'facebook-posts', 'instagram', 'tiktok', 'facebook-pixels',
+];
+const LAST_VIEW_KEY = 'studio.admin.last_view';
+
+function readInitialView() {
+  try {
+    const v = localStorage.getItem(LAST_VIEW_KEY);
+    if (v && VALID_VIEWS.includes(v)) return v;
+  } catch (e) { /* private browsing / storage disabled — fall through to default */ }
+  return 'clients';
+}
+
 export default function Dashboard({ onLogout }) {
   const [clients, setClients]           = useState([]);
-  const [view, setView]                 = useState('clients');
+  const [view, setView]                 = useState(readInitialView);
   const [selectedClient, setSelectedClient] = useState(null);
   const [showNewClient, setShowNewClient]   = useState(false);
   const [loading, setLoading]           = useState(true);
@@ -93,6 +117,7 @@ export default function Dashboard({ onLogout }) {
   function handleNavigate(v) {
     setView(v);
     setSelectedClient(null);
+    try { localStorage.setItem(LAST_VIEW_KEY, v); } catch (e) { /* storage disabled — non-fatal */ }
   }
 
   // ── Email Campaigns views ──────────────────────────────────────────────────
