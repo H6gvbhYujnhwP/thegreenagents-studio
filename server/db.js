@@ -1368,22 +1368,6 @@ db.prepare("UPDATE linkedin_settings SET brief_running = 0 WHERE id = 1").run();
     db.exec(`ALTER TABLE email_clients ADD COLUMN logo_processed_at TEXT`);
     console.log('[db] migration: added logo_processed_at to email_clients');
   }
-  // ── hidden_at — soft-hide for the Email Campaigns customer list ──────────
-  // Operator-set timestamp via "Remove from list" button in the Edit Client
-  // modal. NULL = visible; populated = hidden from the customer list AND from
-  // the AWS-sync's existence check. The row + ALL its data (lists, subs,
-  // campaigns, replies, hot prospects, audit log) are deliberately preserved
-  // so that if the customer ever comes back and the operator re-verifies the
-  // domain in AWS, the row auto-unhides on the next page open (the POST
-  // /clients route clears hidden_at when the AWS sync tries to "create" a row
-  // whose name matches an already-hidden row — see email.js).
-  //
-  // Symmetric with #57's "AWS is the source of truth for what's visible" —
-  // remove from AWS → hide in Studio; re-verify in AWS → unhide in Studio.
-  if (!eCols.includes('hidden_at')) {
-    db.exec(`ALTER TABLE email_clients ADD COLUMN hidden_at TEXT`);
-    console.log('[db] migration: added hidden_at to email_clients');
-  }
 }
 
 export default db;

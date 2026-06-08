@@ -462,7 +462,7 @@ const TH=({children,w})=><th style={{textAlign:'left',padding:'8px 14px',fontSiz
 const TD=({children,muted,center})=><td style={{padding:'9px 14px',fontSize:12,color:muted?MUTED:TEXT,textAlign:center?'center':'left',borderBottom:`0.5px solid ${BORDER}`,verticalAlign:'middle'}}>{children}</td>;
 
 // ── Client modal ──────────────────────────────────────────────────────────────
-function ClientModal({initial,onClose,onSaved,onDeleted}){
+function ClientModal({initial,onClose,onSaved}){
   const editing=!!initial?.id;
   const [name,setName]=useState(initial?.name||'');
   const [color,setColor]=useState(initial?.color||'#1D9E75');
@@ -470,7 +470,6 @@ function ClientModal({initial,onClose,onSaved,onDeleted}){
   const [defaultFromEmail,setDefaultFromEmail]=useState(initial?.default_from_email||'');
   const [defaultFromName,setDefaultFromName]=useState(initial?.default_from_name||'');
   const [saving,setSaving]=useState(false);
-  const [removing,setRemoving]=useState(false);
   const [err,setErr]=useState('');
   async function save(){
     if(!name.trim()){setErr('Name required');return;}
@@ -488,34 +487,6 @@ function ClientModal({initial,onClose,onSaved,onDeleted}){
     if(d.error){setErr(d.error);setSaving(false);return;}
     onSaved();onClose();
   }
-  // ── Remove from list ───────────────────────────────────────────────────────
-  // Soft-hide via DELETE /api/email/clients/:id. The endpoint stamps
-  // hidden_at on the row and preserves ALL data (lists, subscribers,
-  // campaigns, replies, hot prospects, audit log). If the operator
-  // re-verifies the domain in AWS later, the row auto-unhides on next
-  // page open and the customer carries on from their last campaign.
-  // Confirm wording reflects the soft nature — no "permanently delete"
-  // language because nothing is actually being deleted.
-  async function removeFromList(){
-    if(!editing) return;
-    const ok = window.confirm(
-      `Remove "${initial.name}" from the customer list?\n\n` +
-      `Lists, subscribers, campaigns, and reply history are kept. ` +
-      `If you re-verify the domain in AWS later, this customer will ` +
-      `reappear here automatically with all their history intact.`
-    );
-    if(!ok) return;
-    setRemoving(true);
-    const r = await fetch(`/api/email/clients/${initial.id}`,{method:'DELETE'});
-    const d = await r.json().catch(()=>({}));
-    if(!r.ok || d.error){
-      setErr(d.message || d.error || 'Remove failed');
-      setRemoving(false);
-      return;
-    }
-    if(typeof onDeleted === 'function') onDeleted();
-    onClose();
-  }
   return(<Modal title={editing?'Edit client':'New client'} onClose={onClose}>
     <Input label="Client name *" value={name} onChange={setName} placeholder="e.g. Sweetbyte" required/>
     <div style={{marginBottom:14}}>
@@ -532,17 +503,7 @@ function ClientModal({initial,onClose,onSaved,onDeleted}){
       </div>
     </div>
     {err&&<div style={{color:DANGER,fontSize:13,marginTop:14,marginBottom:10}}>{err}</div>}
-    {/* Action row. Remove sits on the left, separated from Save/Cancel on the
-        right so it can't be mis-clicked. Only shown in edit mode (not for new). */}
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:18,gap:8}}>
-      <div>
-        {editing && <Btn variant="danger" onClick={removeFromList} disabled={removing||saving}>{removing?'Removing…':'Remove from list'}</Btn>}
-      </div>
-      <div style={{display:'flex',gap:8}}>
-        <Btn onClick={onClose} disabled={removing}>Cancel</Btn>
-        <Btn variant="primary" onClick={save} disabled={saving||removing}>{saving?'Saving…':editing?'Save changes':'Create client'}</Btn>
-      </div>
-    </div>
+    <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:18}}><Btn onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={save} disabled={saving}>{saving?'Saving…':editing?'Save changes':'Create client'}</Btn></div>
   </Modal>);
 }
 
@@ -2605,7 +2566,7 @@ export default function EmailSection({initialTab='customers'}){
       )}
 
       {modal==='new-client'&&<ClientModal onClose={()=>setModal(null)} onSaved={loadAll}/>}
-      {modal==='edit-client'&&<ClientModal initial={modalData} onClose={()=>setModal(null)} onSaved={loadAll} onDeleted={()=>{setSelected(null);loadAll();}}/>}
+      {modal==='edit-client'&&<ClientModal initial={modalData} onClose={()=>setModal(null)} onSaved={loadAll}/>}
     </div>
   );
 }
