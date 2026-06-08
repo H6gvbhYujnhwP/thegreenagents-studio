@@ -1567,27 +1567,15 @@ router.get('/campaigns/:id/recipients', (req, res) => {
       es.click_count,
       COALESCE(es.step_number, 0) as last_step,
       (
-        -- Burst-collapsed click count (#101b): a click counts only if the same
-        -- person hasn't already clicked the same link within the prior 10 seconds.
-        -- Corporate mail scanners fire many hits in the SAME second (identical
-        -- stored timestamp), so ties are broken by id to keep exactly one of them;
-        -- the gap uses integer epoch-seconds to avoid float boundary fuzz.
-        -- Genuine re-engagement (a real re-click seconds-plus later) still counts.
-        -- Works on historic rows too, since it reads stored timestamps.
-        SELECT COUNT(*) FROM email_link_clicks lc
+        -- Per-recipient click count = number of DISTINCT links the person opened
+        -- (#101b). Corporate mail scanners re-fetch the same links many times over
+        -- hours, which inflated a raw-hit count wildly (one recipient showed 67 on
+        -- just 2 links). Counting distinct URLs answers the useful question — "how
+        -- many of your links did they engage with" — and is immune to repeat-fetch
+        -- storms. Works on historic rows too. Telling scanner from human entirely
+        -- is a later layer, built on the ip_address/user_agent now captured below.
+        SELECT COUNT(DISTINCT lc.url) FROM email_link_clicks lc
         WHERE lc.campaign_id = ? AND lc.subscriber_id = s.id
-          AND NOT EXISTS (
-            SELECT 1 FROM email_link_clicks lc2
-            WHERE lc2.campaign_id = lc.campaign_id
-              AND lc2.subscriber_id = lc.subscriber_id
-              AND lc2.url = lc.url
-              AND (
-                    lc2.clicked_at < lc.clicked_at
-                    OR (lc2.clicked_at = lc.clicked_at AND lc2.id < lc.id)
-                  )
-              AND (CAST(strftime('%s', lc.clicked_at) AS INTEGER)
-                   - CAST(strftime('%s', lc2.clicked_at) AS INTEGER)) <= 10
-          )
       ) as link_click_count
     FROM email_subscribers s
     LEFT JOIN email_sends es ON es.subscriber_id = s.id AND es.campaign_id = ?
