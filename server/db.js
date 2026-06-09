@@ -1183,6 +1183,15 @@ db.exec(`
 try { db.exec("ALTER TABLE facebook_ads ADD COLUMN rag_filename TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE facebook_ads ADD COLUMN rag_content TEXT"); } catch (_) {}
 
+// Brand logo + panel defaults per customer (decision #64 parity for Facebook).
+// logo_url is the FB-side brand logo (falls back to email_clients.logo_url at
+// generation if unset). position/panel/size mirror the LinkedIn Brand Panel and
+// default to the exact pre-existing LinkedIn behaviour.
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN logo_url TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN logo_position TEXT DEFAULT 'bottom-right'"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN logo_panel TEXT DEFAULT 'white'"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN logo_size TEXT DEFAULT 'small'"); } catch (_) {}
+
 // 14l-fa-creatives. Generated Facebook ad creatives (decision #106, stage 2).
 // One row per generated variation, keyed by email_client_id, grouped by
 // batch_id (one generation run). Studio GENERATES these (copy via Claude in the
@@ -1212,6 +1221,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_fb_ad_creatives_batch
     ON facebook_ad_creatives(batch_id);
 `);
+// Per-creative logo overrides (decision #65/#73 parity). NULL = fall back to the
+// customer default on facebook_ads, then to the hardcoded default.
+try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN logo_position TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN logo_panel TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN logo_size TEXT"); } catch (_) {}
 
 // 14m. Backfill customer_services from the legacy columns. Idempotent — uses
 // INSERT OR IGNORE on the unique (email_client_id, service_key) index, so

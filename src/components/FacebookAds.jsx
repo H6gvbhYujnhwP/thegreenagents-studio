@@ -24,6 +24,9 @@ const CTA_LABELS = {
   LEARN_MORE:'Learn more', SIGN_UP:'Sign up', GET_QUOTE:'Get quote', CONTACT_US:'Contact us',
   SUBSCRIBE:'Subscribe', DOWNLOAD:'Download', BOOK_NOW:'Book now', GET_OFFER:'Get offer', SEND_MESSAGE:'Send message',
 };
+const POSITION_LABELS = { 'top-left':'Top left', 'top-right':'Top right', 'bottom-left':'Bottom left', 'bottom-right':'Bottom right' };
+const PANEL_LABELS = { white:'White panel', none:'No panel' };
+const SIZE_LABELS = { small:'Small', medium:'Medium', large:'Large' };
 
 const cardStyle = { background:CARD, border:`1px solid ${BORDER}`, borderRadius:10, padding:'14px 16px' };
 const btn = (bg, fg, extra={}) => ({ background:bg, color:fg, border:'none', borderRadius:6, padding:'6px 12px', fontSize:12, fontWeight:500, cursor:'pointer', ...extra });
@@ -216,6 +219,41 @@ function CreativesTab() {
     finally { setUploading(false); }
   }
 
+  async function onUploadLogo(file) {
+    if (!file || !selId) return;
+    setUploading(true); setError(null);
+    try {
+      const fd = new FormData(); fd.append('logo', file);
+      const r = await fetch(`/api/facebook-ads/${selId}/logo`, { method:'POST', body: fd });
+      const j = await r.json().catch(()=>({}));
+      if (!r.ok) throw new Error(j.error || 'Logo upload failed');
+      await loadCustomers();
+    } catch (e) { setError(e.message); }
+    finally { setUploading(false); }
+  }
+
+  async function onSaveBrand(patch) {
+    if (!selId) return;
+    setError(null);
+    // optimistic: reflect in the local customers list immediately
+    setCustomers(list => list.map(c => c.id===selId ? { ...c, ...patch } : c));
+    try {
+      const r = await fetch(`/api/facebook-ads/${selId}/brand`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(patch) });
+      if (!r.ok) { const j = await r.json().catch(()=>({})); throw new Error(j.error || 'Save failed'); }
+    } catch (e) { setError(e.message); loadCustomers(); }
+  }
+
+  async function onRecompositeLogo(id, patch) {
+    setBusy(b => ({ ...b, [id]: 'image' })); setError(null);
+    try {
+      const r = await fetch(`/api/facebook-ads/creatives/${id}/recomposite-logo`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(patch) });
+      const j = await r.json().catch(()=>({}));
+      if (!r.ok) throw new Error(j.error || 'Could not move the logo');
+      replaceCreative(j);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(b => ({ ...b, [id]: null })); }
+  }
+
   async function onGenerate() {
     if (!selId) return;
     setGenerating(true); setError(null);
@@ -313,6 +351,27 @@ function CreativesTab() {
             </div>
           </div>
           <div style={{ fontSize:11, color:TERTIARY, marginTop:8 }}>Nothing is sent to Facebook here. Generated ads are drafts you review below.</div>
+
+          <div style={{ marginTop:12, paddingTop:12, borderTop:`1px solid ${BORDER}`, display:'flex', alignItems:'center', gap:14, flexWrap:'wrap' }}>
+            <div style={{ width:44, height:44, flex:'none', borderRadius:6, background:GREY_BG, overflow:'hidden', display:'flex', alignItems:'center', justifyContent:'center' }}>
+              {selected.logo_url ? <img src={selected.logo_url} alt="" style={{ width:'100%', height:'100%', objectFit:'contain' }} /> : <span style={{ fontSize:9, color:TERTIARY }}>logo</span>}
+            </div>
+            <label style={{ color:BLUE, cursor:'pointer', fontSize:13 }}>
+              {selected.has_logo ? 'Replace logo' : 'Upload logo'}
+              <input type="file" accept=".png,.jpg,.jpeg,.svg,.webp" style={{ display:'none' }} onChange={e=>{ const f=e.target.files[0]; if(f) onUploadLogo(f); e.target.value=''; }} />
+            </label>
+            <span style={{ fontSize:11, color:TERTIARY }}>Default placement:</span>
+            <select value={selected.logo_position||'bottom-right'} onChange={e=>onSaveBrand({ logo_position:e.target.value })} style={{ padding:'5px 7px', border:`1px solid ${BORDER}`, borderRadius:6, fontSize:12, background:'#fff' }}>
+              {Object.entries(POSITION_LABELS).map(([k,v])=> <option key={k} value={k}>{v}</option>)}
+            </select>
+            <select value={selected.logo_panel||'white'} onChange={e=>onSaveBrand({ logo_panel:e.target.value })} style={{ padding:'5px 7px', border:`1px solid ${BORDER}`, borderRadius:6, fontSize:12, background:'#fff' }}>
+              {Object.entries(PANEL_LABELS).map(([k,v])=> <option key={k} value={k}>{v}</option>)}
+            </select>
+            <select value={selected.logo_size||'small'} onChange={e=>onSaveBrand({ logo_size:e.target.value })} style={{ padding:'5px 7px', border:`1px solid ${BORDER}`, borderRadius:6, fontSize:12, background:'#fff' }}>
+              {Object.entries(SIZE_LABELS).map(([k,v])=> <option key={k} value={k}>{v}</option>)}
+            </select>
+          </div>
+          <div style={{ fontSize:11, color:TERTIARY, marginTop:6 }}>Logo defaults apply to newly generated ads. You can override position/size/background per ad below.</div>
         </div>
       )}
 
@@ -335,7 +394,7 @@ function CreativesTab() {
           const ed = editing[c.id];
           return (
             <div key={c.id} style={{ ...cardStyle, display:'flex', gap:14, border:`1px solid ${isApproved?GREEN:BORDER}` }}>
-              <div style={{ width:120, height:120, flex:'none', borderRadius:8, background:GREY_BG, overflow:'hidden', display:'flex', alignItems:'center', justifyContent:'center', position:'relative' }}>
+              <div style={{ width:240, height:240, flex:'none', borderRadius:8, background:GREY_BG, overflow:'hidden', display:'flex', alignItems:'center', justifyContent:'center', position:'relative' }}>
                 {c.image_url ? <img src={c.image_url} alt="" style={{ width:'100%', height:'100%', objectFit:'cover' }} onError={(e)=>{e.target.style.display='none';}} /> : <span style={{ color:TERTIARY, fontSize:11 }}>No image</span>}
                 {b==='image' && <div style={{ position:'absolute', inset:0, background:'rgba(255,255,255,0.8)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, color:MUTED, textAlign:'center', padding:6 }}>Generating image…</div>}
               </div>
@@ -362,6 +421,24 @@ function CreativesTab() {
                     <div style={{ fontSize:13, color:TEXT, lineHeight:1.5, marginBottom:6, whiteSpace:'pre-wrap' }}>{c.primary_text}</div>
                     {c.headline && <div style={{ fontSize:13, fontWeight:500, color:TEXT }}>{c.headline}</div>}
                     <div style={{ fontSize:11, color:TERTIARY, margin:'6px 0 10px' }}>Button: {CTA_LABELS[c.cta] || c.cta}</div>
+                    {selected && selected.has_logo && c.pre_logo_image_url && (
+                      <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap', marginBottom:10 }}>
+                        <span style={{ fontSize:11, color:TERTIARY }}>Logo:</span>
+                        <select disabled={!!b} value={c.logo_position || selected.logo_position || 'bottom-right'} onChange={e=>onRecompositeLogo(c.id,{logo_position:e.target.value})} style={{ padding:'4px 6px', border:`1px solid ${BORDER}`, borderRadius:6, fontSize:11, background:'#fff' }}>
+                          {Object.entries(POSITION_LABELS).map(([k,v])=> <option key={k} value={k}>{v}</option>)}
+                        </select>
+                        <select disabled={!!b} value={c.logo_size || selected.logo_size || 'small'} onChange={e=>onRecompositeLogo(c.id,{logo_size:e.target.value})} style={{ padding:'4px 6px', border:`1px solid ${BORDER}`, borderRadius:6, fontSize:11, background:'#fff' }}>
+                          {Object.entries(SIZE_LABELS).map(([k,v])=> <option key={k} value={k}>{v}</option>)}
+                        </select>
+                        <select disabled={!!b} value={c.logo_panel || selected.logo_panel || 'white'} onChange={e=>onRecompositeLogo(c.id,{logo_panel:e.target.value})} style={{ padding:'4px 6px', border:`1px solid ${BORDER}`, borderRadius:6, fontSize:11, background:'#fff' }}>
+                          {Object.entries(PANEL_LABELS).map(([k,v])=> <option key={k} value={k}>{v}</option>)}
+                        </select>
+                        <span style={{ fontSize:10, color:TERTIARY }}>(instant — no charge)</span>
+                      </div>
+                    )}
+                    {selected && !selected.has_logo && (
+                      <div style={{ fontSize:11, color:TERTIARY, marginBottom:10 }}>Upload a brand logo above to place it on your ads.</div>
+                    )}
                     {b==='text' && <div style={{ position:'absolute', inset:0, background:'rgba(255,255,255,0.8)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, color:MUTED }}>Rewriting copy…</div>}
                     <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
                       <button disabled={!!b} onClick={()=>startEdit(c)} style={btn(GREY_BG, GREY, b?{opacity:0.5}:{})}>Edit text</button>

@@ -50,18 +50,19 @@ async function callClaude(prompt, jsonOnly = false) {
     .trim();
 }
 
-// Build the client-shaped object the Gemini pipeline expects. Logo defaults to
-// bottom-right / white / small (operator-chosen for Facebook). If the customer
-// has no logo_url, generateImage simply skips compositing.
+// Build the client-shaped object the Gemini pipeline expects. Reads the
+// customer's saved Brand Panel defaults (position/panel/size) — falling back to
+// bottom-right / white / small (the LinkedIn defaults). If the customer has no
+// logo_url, generateImage simply skips compositing.
 function clientObjFor(customer) {
   return {
     id:            customer.id,
     name:          customer.name || 'Brand',
     brand:         customer.name || 'Brand',
     logo_url:      customer.logo_url || null,
-    logo_position: 'bottom-right',
-    logo_panel:    'white',
-    logo_size:     'small',
+    logo_position: customer.logo_position || 'bottom-right',
+    logo_panel:    customer.logo_panel    || 'white',
+    logo_size:     customer.logo_size     || 'small',
   };
 }
 
