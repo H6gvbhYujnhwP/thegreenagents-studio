@@ -1175,6 +1175,44 @@ db.exec(`
     ON facebook_ads(email_client_id);
 `);
 
+// 14l-fa-rag. Per-customer RAG for Facebook Ads (decision #106). Mirrors the
+// LinkedIn-side per-client RAG upload (clients.rag_filename / rag_content):
+// the operator uploads a doc per customer, the text is extracted and stored
+// here, and the ad-copy + image generation reads it. Additive ALTERs wrapped
+// in try/catch so they're no-ops once the columns exist.
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN rag_filename TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN rag_content TEXT"); } catch (_) {}
+
+// 14l-fa-creatives. Generated Facebook ad creatives (decision #106, stage 2).
+// One row per generated variation, keyed by email_client_id, grouped by
+// batch_id (one generation run). Studio GENERATES these (copy via Claude in the
+// customer's RAG voice, image via Gemini + logo composite) — nothing is sent to
+// Facebook here; that's stage 3. status: 'draft' until the operator approves.
+// image_url is the final composited image; pre_logo_image_url is Gemini's raw
+// output (kept so the logo can be re-placed later without re-calling Gemini,
+// same convention as LinkedIn posts). cta holds a Meta call-to-action enum.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS facebook_ad_creatives (
+    id                 TEXT PRIMARY KEY,
+    email_client_id    TEXT NOT NULL,
+    batch_id           TEXT,
+    hook_label         TEXT,
+    primary_text       TEXT,
+    headline           TEXT,
+    cta                TEXT NOT NULL DEFAULT 'LEARN_MORE',
+    image_url          TEXT,
+    pre_logo_image_url TEXT,
+    status             TEXT NOT NULL DEFAULT 'draft',   /* 'draft' | 'approved' */
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (email_client_id) REFERENCES email_clients(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_fb_ad_creatives_customer
+    ON facebook_ad_creatives(email_client_id);
+  CREATE INDEX IF NOT EXISTS idx_fb_ad_creatives_batch
+    ON facebook_ad_creatives(batch_id);
+`);
+
 // 14m. Backfill customer_services from the legacy columns. Idempotent — uses
 // INSERT OR IGNORE on the unique (email_client_id, service_key) index, so
 // re-running on every boot doesn't double-up existing subscriptions.
