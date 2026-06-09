@@ -1059,9 +1059,12 @@ db.exec(`
     ['tiktok', 'TikTok',
       'Coming soon — short-form video scripts and content for TikTok.',
       'coming_soon', null, null, 28],
-    ['facebook_pixels', 'Facebook Pixels',
+    ['facebook_pixels', 'Meta Pixels',
       'Coming soon — Facebook Pixel + Conversions API installation and management.',
       'coming_soon', null, null, 29],
+    ['facebook_ads', 'Facebook Ads',
+      'Manage each customer\'s Facebook ad campaigns from Studio — budget, creatives, and performance — via the Meta Marketing API. Built in stages; this is the catalogue entry the Facebook Ads feature hangs off.',
+      'coming_soon', null, null, 31],
     ['email', 'Email (Inbox + Campaigns)',
       'Inbox replies and email-campaign stats. Pick the underlying email system record — usually the domain you send their cold email from (e.g. mail.engineersolutions.co.uk for the "Cube6" portal customer).',
       'live', 'email_clients', 'Email system record', 30],
@@ -1078,7 +1081,8 @@ db.exec(`
     ['facebook', 'Reach the buyers who scroll Facebook every day. We write, design, and schedule Facebook posts in your brand voice — same approval flow as your LinkedIn posts. One review screen, posts go straight into your scheduled queue.'],
     ['instagram', 'Showcase your work where decisions get made visually. We turn your projects, products, and team moments into scroll-stopping Instagram posts — captions and images crafted in your brand voice, delivered for review every week.'],
     ['tiktok', 'Where the next generation of buyers lives. We write TikTok-native scripts and produce short-form video content that gets watched, not skipped — designed to build awareness with audiences traditional channels miss.'],
-    ['facebook_pixels', 'Stop guessing who\'s converting. We install and manage your Facebook Pixel and Conversions API so every form submission, sale, or sign-up flows back to Meta — making your ad spend smarter and your reporting clearer.'],
+    ['facebook_pixels', 'Stop guessing who\'s converting. We install and manage your Meta Pixel and Conversions API so every form submission, sale, or sign-up flows back to Meta — making your ad spend smarter and your reporting clearer.'],
+    ['facebook_ads', 'Put your offer in front of the right buyers on Facebook and Instagram. We design, launch, and manage your ad campaigns — you set your daily budget and monthly cap, approve the creative, and watch the leads come in. Everything else is handled for you.'],
     ['email', 'Turn cold contacts into warm conversations. We run targeted outbound email campaigns from a properly-warmed mailbox, route every reply into your portal inbox, and keep deliverability rock-solid so the right buyers actually see your message.'],
   ];
   const updatePitch = db.prepare(`UPDATE services SET customer_pitch = ? WHERE service_key = ?`);
@@ -1092,6 +1096,16 @@ db.exec(`
     SET link_table = 'email_clients',
         link_label = 'Email system record'
     WHERE service_key = 'email' AND link_table IS NULL
+  `).run();
+
+  // Idempotent rename (decision #104): the facebook_pixels service was seeded
+  // on earlier deploys with display_name 'Facebook Pixels'. INSERT OR IGNORE
+  // above won't touch an existing row, so force the customer-facing label to
+  // 'Meta Pixels' here. The service_key stays 'facebook_pixels' everywhere —
+  // only the label the customer sees changes.
+  db.prepare(`
+    UPDATE services SET display_name = 'Meta Pixels'
+    WHERE service_key = 'facebook_pixels'
   `).run();
 }
 
@@ -1124,6 +1138,41 @@ db.exec(`
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_facebook_pixels_customer
     ON facebook_pixels(email_client_id);
+`);
+
+// 14l-fa. Facebook Ads — per-customer ad-account + budget record (decision #104).
+// One row per customer (keyed by email_client_id, same identity the rest of the
+// portal uses). Stage 1 just creates the table; Stage 2 wires the CRUD + UI.
+//
+// Money is stored in MINOR units (pence for GBP) to match the Meta Marketing
+// API and avoid floating-point rounding — daily_budget_pence and
+// max_budget_pence are whole integers. The customer screen converts to £ for
+// display and back to pence on save (decision: customer always sees £).
+//
+//   ad_account_id      — the customer's OWN ad account inside the Green Agents
+//                        business (Architecture Option A — true isolation).
+//                        Stored WITHOUT the 'act_' prefix; code adds it.
+//   daily_budget_pence — what the customer set as their daily spend (writes
+//                        straight to the live campaign in Stage 2, no approval).
+//   max_budget_pence   — the customer's own monthly cap (maps to a Meta spending
+//                        limit in the write stage).
+//   status             — 'not_connected' (no account yet) | 'paused' | 'active'.
+// Additive table, nothing else touched.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS facebook_ads (
+    id                 TEXT PRIMARY KEY,
+    email_client_id    TEXT NOT NULL,
+    ad_account_id      TEXT,
+    daily_budget_pence INTEGER,
+    max_budget_pence   INTEGER,
+    status             TEXT NOT NULL DEFAULT 'not_connected',  /* 'not_connected' | 'paused' | 'active' */
+    notes              TEXT,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (email_client_id) REFERENCES email_clients(id)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_facebook_ads_customer
+    ON facebook_ads(email_client_id);
 `);
 
 // 14m. Backfill customer_services from the legacy columns. Idempotent — uses

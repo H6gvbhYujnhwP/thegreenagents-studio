@@ -121,7 +121,7 @@ export default function FacebookPixels() {
   return (
     <div style={{ flex:1, overflow:'auto', padding:28, background:BG }}>
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:20 }}>
-        <h1 style={{ fontSize:20, fontWeight:500, color:TEXT, margin:0 }}>Facebook pixels</h1>
+        <h1 style={{ fontSize:20, fontWeight:500, color:TEXT, margin:0 }}>Meta Pixels</h1>
         <div style={{ display:'flex', alignItems:'center', gap:12 }}>
           {saving && <span style={{ fontSize:12, color:TERTIARY }}>Saving…</span>}
           <button onClick={()=>setShowAdd(true)} style={{ background:GREEN_HI, color:'#fff', border:'none', borderRadius:6, padding:'8px 14px', fontSize:13, fontWeight:500, cursor:'pointer' }}>

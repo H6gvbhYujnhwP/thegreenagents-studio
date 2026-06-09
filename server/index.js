@@ -13,6 +13,8 @@ import portalRoutes from './routes/portal.js';
 import idyqBridgeRoutes from './routes/idyq-bridge.js';
 import hotProspectsRoutes from './routes/hot-prospects.js';
 import facebookPixelsRoutes from './routes/facebook-pixels.js';
+import facebookAdsRoutes from './routes/facebook-ads.js';
+import { metaConfigured, testConnection, META } from './services/meta-api.js';
 import { startPoller } from './services/imap-poller.js';
 import { startClassifier } from './services/classify-replies.js';
 import { startDripTicker } from './services/drip-ticker.js';
@@ -49,6 +51,7 @@ app.use('/api/campaigns',   campaignRoutes);
 app.use('/api/email/hot-prospects', hotProspectsRoutes); // CRM — admin-side Hot Prospects list (requireAuth). Mounted BEFORE /api/email so the more specific path matches first.
 app.use('/api/email',       emailRoutes);
 app.use('/api/facebook-pixels', facebookPixelsRoutes); // Facebook Pixels — admin-side pixel-customer management (requireAuth)
+app.use('/api/facebook-ads', facebookAdsRoutes);       // Facebook Ads — Meta Marketing API foundation (requireAuth). Stage 1: connection-status only.
 app.use('/api/algorithm',   algorithmRoutes);
 app.use('/api/portal',      portalAuthRoutes);   // customer-portal auth (login/logout/check/reset)
 app.use('/api/portal',      portalRoutes);       // customer-portal data (posts, inbox, campaigns)
@@ -71,6 +74,11 @@ app.listen(PORT, () => {
   console.log(`[env] SES_CONFIGURATION_SET: ${process.env.SES_CONFIGURATION_SET || 'NOT SET (account default config set will apply)'}`);
   console.log(`[env] IDYQ_BRIDGE_SECRET:    ${process.env.IDYQ_BRIDGE_SECRET                            ? 'SET ✓' : 'MISSING ✗ (IDYQ admin embed will not work)'}`);
   console.log(`[env] IDYQ_BASE_URL:         ${process.env.IDYQ_BASE_URL || 'https://idoyourquotes.com (default)'}`);
+  console.log(`[env] META_ACCESS_TOKEN:     ${process.env.META_ACCESS_TOKEN ? 'SET ✓' : 'MISSING ✗ (Facebook Ads disabled)'}`);
+  console.log(`[env] META_APP_SECRET:       ${process.env.META_APP_SECRET   ? 'SET ✓' : 'MISSING ✗ (calls unsigned)'}`);
+  console.log(`[env] META_APP_ID:           ${process.env.META_APP_ID       ? 'SET ✓' : 'MISSING ✗'}`);
+  console.log(`[env] META_BUSINESS_ID:      ${process.env.META_BUSINESS_ID  ? 'SET ✓' : 'MISSING ✗'}`);
+  console.log(`[env] META_API_VERSION:      ${process.env.META_API_VERSION || 'v25.0 (default)'}`);
   const ct = cryptoSelfTest();
   console.log(`[env] MAILBOX_ENCRYPTION_KEY: ${ct.ok ? 'SET ✓ (verified)' : `MISSING/INVALID — ${ct.reason}`}`);
   console.log(`[env] DB_PATH:               ${process.env.DB_PATH || '(default)'}`);
@@ -95,4 +103,26 @@ app.listen(PORT, () => {
   backfillLogos().catch(err => {
     console.error('[logo-backfill] Top-level failure:', err && err.stack ? err.stack : err);
   });
+
+  // Meta Marketing API connection check — non-fatal, fire-and-forget.
+  // Proves Studio can reach Facebook with the saved credentials and that the
+  // token can see the ad account we'll run ads in. This is the operator's
+  // verification line: look for "[meta] connected ✓" in the Render log.
+  // A failure logs a clear error and Studio carries on exactly as normal —
+  // nothing else depends on this, and no ads are touched.
+  if (metaConfigured()) {
+    testConnection()
+      .then(r => {
+        if (r.ok) {
+          console.log(`[meta] connected ✓ — ad account "${r.account.name}" (${r.account.id}, ${r.account.currency || '?'}, status ${r.account.account_status}) via Graph ${META.apiVersion}`);
+        } else {
+          console.error(`[meta] connection FAILED — ${r.error}`);
+        }
+      })
+      .catch(err => {
+        console.error('[meta] connection check threw:', err && err.message ? err.message : err);
+      });
+  } else {
+    console.log('[meta] not checked — META_ACCESS_TOKEN is not set');
+  }
 });
