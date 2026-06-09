@@ -141,6 +141,135 @@ export async function listAdAccounts() {
   });
 }
 
+// ── Reading ads + stats (Stage 2: read) ──────────────────────────────────────
+
+// The date windows the admin screen offers, mapped to Meta's date_preset values.
+const WINDOW_PRESETS = { '7d': 'last_7d', '30d': 'last_30d', 'lifetime': 'maximum' };
+
+// Meta reports conversions as an `actions` array of { action_type, value }.
+// A "lead" can be reported under a few different action_type names depending
+// on how the event is wired, so we sum across all the lead-shaped ones.
+const LEAD_ACTION_TYPES = new Set([
+  'lead',
+  'offsite_conversion.fb_pixel_lead',
+  'onsite_conversion.lead_grouped',
+  'leadgen.other',
+  'offsite_conversion.lead',
+]);
+
+function sumLeadActions(actions) {
+  if (!Array.isArray(actions)) return 0;
+  let n = 0;
+  for (const a of actions) {
+    if (a && LEAD_ACTION_TYPES.has(a.action_type)) n += Number(a.value) || 0;
+  }
+  return n;
+}
+
+// Normalise one insights row into the four numbers the screen shows. `spend`
+// from insights is a decimal string in the account's MAJOR units (pounds), so
+// it's used as-is. Cost-per-lead is computed (spend ÷ leads) rather than read
+// from Meta's cost_per_action_type, which is more robust across event wiring.
+function statsFromInsightRow(row) {
+  const spend = row ? (Number(row.spend) || 0) : 0;
+  const reach = row ? (Number(row.reach) || 0) : 0;
+  const leads = row ? sumLeadActions(row.actions) : 0;
+  return {
+    spend,
+    reach,
+    leads,
+    cost_per_lead: leads > 0 ? spend / leads : null,
+  };
+}
+
+// List the ads in an account, with enough creative detail for a simple
+// image + text preview card. One page (limit 200) — the test account has a
+// handful of ads; paging across more is a later concern when accounts grow.
+export async function listAds(adAccountId = cfg().adAccountId) {
+  const id = String(adAccountId).replace(/^act_/, '');
+  const json = await metaRequest(`act_${id}/ads`, {
+    params: {
+      fields: 'id,name,status,effective_status,' +
+              'creative{id,name,title,body,image_url,thumbnail_url},' +
+              'adset{name},campaign{name,objective}',
+      limit: 200,
+    },
+  });
+  return Array.isArray(json.data) ? json.data : [];
+}
+
+// Pull insights (stats) for an account at a given level ('ad' or 'account')
+// over one of the WINDOW_PRESETS. Returns the raw data rows; callers map them.
+// An account with no delivery in the window returns an empty array — handled
+// cleanly upstream as zeros rather than an error.
+export async function getInsights(adAccountId = cfg().adAccountId, { level = 'ad', window = '30d' } = {}) {
+  const id = String(adAccountId).replace(/^act_/, '');
+  const datePreset = WINDOW_PRESETS[window] || WINDOW_PRESETS['30d'];
+  const fields = level === 'ad'
+    ? 'ad_id,spend,reach,actions'
+    : 'spend,reach,actions';
+  const json = await metaRequest(`act_${id}/insights`, {
+    params: { level, fields, date_preset: datePreset, limit: 500 },
+  });
+  return Array.isArray(json.data) ? json.data : [];
+}
+
+// One-call overview the admin read screen uses: the account, account-level
+// totals for the window, and a card per ad with its own stats. All Meta
+// response-shape handling lives here so the route stays thin. Never throws —
+// failures come back as { ok:false, error } so the UI renders a clean message.
+export async function getAdsOverview({ window = '30d' } = {}) {
+  const win = WINDOW_PRESETS[window] ? window : '30d';
+  try {
+    const accountId = cfg().adAccountId;
+    const [acct, ads, adRows, acctRows] = await Promise.all([
+      getAdAccount(accountId),
+      listAds(accountId),
+      getInsights(accountId, { level: 'ad', window: win }),
+      getInsights(accountId, { level: 'account', window: win }),
+    ]);
+
+    // Map per-ad stats by ad_id for quick lookup. Ads with no delivery in the
+    // window simply won't have a row → they show zeros.
+    const byAdId = new Map();
+    for (const r of adRows) byAdId.set(String(r.ad_id), r);
+
+    const cards = ads.map(ad => {
+      const cr = ad.creative || {};
+      const stats = statsFromInsightRow(byAdId.get(String(ad.id)));
+      return {
+        id: ad.id,
+        name: ad.name || '(unnamed ad)',
+        status: ad.status || null,
+        effective_status: ad.effective_status || null,
+        title: cr.title || cr.name || null,
+        body: cr.body || null,
+        image_url: cr.image_url || cr.thumbnail_url || null,
+        campaign_name: ad.campaign ? ad.campaign.name : null,
+        adset_name: ad.adset ? ad.adset.name : null,
+        stats,
+      };
+    });
+
+    const totals = statsFromInsightRow(acctRows[0]);
+
+    return {
+      ok: true,
+      window: win,
+      account: {
+        id: `act_${accountId}`,
+        name: acct.name || '(unnamed account)',
+        currency: acct.currency || 'GBP',
+        account_status: acct.account_status,
+      },
+      totals,
+      ads: cards,
+    };
+  } catch (err) {
+    return { ok: false, window: win, error: err && err.message ? err.message : String(err) };
+  }
+}
+
 // The connection test the boot log and /connection-status both use. It fetches
 // the specific ad account we'll actually run ads in — proving in one call that
 // (a) the token works, (b) it has ads access, and (c) it can see that account.

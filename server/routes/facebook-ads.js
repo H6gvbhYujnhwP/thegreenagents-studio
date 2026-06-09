@@ -14,7 +14,7 @@
 
 import express from 'express';
 import { requireAuth } from '../middleware/auth.js';
-import { metaConfigured, testConnection, META } from '../services/meta-api.js';
+import { metaConfigured, testConnection, getAdsOverview, META } from '../services/meta-api.js';
 
 const router = express.Router();
 router.use(requireAuth);
@@ -41,6 +41,21 @@ router.get('/connection-status', async (req, res) => {
     api_version: META.apiVersion,
     ad_account_id: `act_${META.adAccountId}`,
   });
+});
+
+// ── ADS + STATS (Stage 2: read) ──────────────────────────────────────────────
+// Returns the configured account, window totals, and a card per ad with its
+// own stats — everything the admin Facebook Ads screen renders. The window is
+// chosen via ?window=7d|30d|lifetime (defaults to 30d). Always 200: a Meta
+// failure comes back as { ok:false, error } so the screen shows a clean message
+// rather than a thrown request.
+router.get('/ads', async (req, res) => {
+  if (!metaConfigured()) {
+    return res.json({ ok: false, configured: false, error: 'Meta API is not configured.' });
+  }
+  const window = req.query.window || '30d';
+  const overview = await getAdsOverview({ window });
+  res.json({ configured: true, ...overview });
 });
 
 export default router;

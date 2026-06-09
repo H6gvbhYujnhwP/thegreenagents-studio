@@ -77,6 +77,7 @@ export default function Sidebar({ onLogout, activeView, onNavigate }) {
         <NavItem id="instagram"        label="Instagram"        active={activeView==='instagram'}        onNavigate={onNavigate} icon={<UsersIcon />} dim suffix="Soon" />
         <NavItem id="tiktok"           label="TikTok"           active={activeView==='tiktok'}           onNavigate={onNavigate} icon={<UsersIcon />} dim suffix="Soon" />
         <NavItem id="facebook-pixels"  label="Meta Pixels"      active={activeView==='facebook-pixels'}  onNavigate={onNavigate} icon={<UsersIcon />} />
+        <NavItem id="facebook-ads"     label="Facebook Ads"     active={activeView==='facebook-ads'}     onNavigate={onNavigate} icon={<UsersIcon />} />
 
         <hr style={DIVIDER} />
 

@@ -8,6 +8,7 @@ import PortalAdmin from './PortalAdmin.jsx';
 import IDYQAdmin from './apps/IDYQAdmin.jsx';
 import CrmHotProspects from './CrmHotProspects.jsx';
 import FacebookPixels from './FacebookPixels.jsx';
+import FacebookAds from './FacebookAds.jsx';
 
 // Which section the operator is on is remembered across a browser refresh.
 // We store the current top-level view and read it back on first load, so a
@@ -21,7 +22,7 @@ const VALID_VIEWS = [
   'portal-customers',
   'crm-hot-prospects',
   'apps-idyq',
-  'facebook-posts', 'instagram', 'tiktok', 'facebook-pixels',
+  'facebook-posts', 'instagram', 'tiktok', 'facebook-pixels', 'facebook-ads',
 ];
 const LAST_VIEW_KEY = 'studio.admin.last_view';
 
@@ -181,6 +182,16 @@ export default function Dashboard({ onLogout }) {
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
         <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
         <FacebookPixels />
+      </div>
+    );
+  }
+
+  // ── Facebook Ads (admin) ───────────────────────────────────────────────────
+  if (view === 'facebook-ads') {
+    return (
+      <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+        <FacebookAds />
       </div>
     );
   }
