@@ -22,6 +22,7 @@ import express from 'express';
 import { v4 as uuid } from 'uuid';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
+import { metaConfigured, getPixelStats } from '../services/meta-api.js';
 
 const router = express.Router();
 router.use(requireAuth);
@@ -100,6 +101,29 @@ router.get('/:id', (req, res) => {
   `).get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
   res.json(shape(row));
+});
+
+// ── LIVE STATS (read-only pixel activity) ────────────────────────────────────
+// Anonymous aggregate event counts from the customer's Meta Pixel — no personal
+// or contact data (Meta doesn't expose that). Always 200; clean flags drive the
+// UI:  no_pixel (none set yet) · ok:false (Meta error) · ok:true (counts).
+router.get('/:id/stats', async (req, res) => {
+  const row = db.prepare(
+    'SELECT pixel_id, goal, conversion_event FROM facebook_pixels WHERE id = ?'
+  ).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+
+  const window = ['7d', '30d', 'lifetime'].includes(req.query.window) ? req.query.window : '30d';
+
+  if (!metaConfigured()) {
+    return res.json({ ok: false, configured: false, window, error: 'Meta API is not configured.' });
+  }
+  if (!row.pixel_id) {
+    return res.json({ ok: true, configured: true, no_pixel: true, window, events: [] });
+  }
+
+  const stats = await getPixelStats({ pixelId: row.pixel_id, window });
+  res.json({ configured: true, goal: row.goal, conversion_event: row.conversion_event, ...stats });
 });
 
 // ── ADD ───────────────────────────────────────────────────────────────────

@@ -210,13 +210,7 @@ export default function FacebookPixels() {
             </div>
           </div>
 
-          <div style={{ border:`1px dashed ${BORDER}`, borderRadius:8, padding:14, background:BG }}>
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6 }}>
-              <span style={{ fontSize:13, fontWeight:500, color:MUTED }}>Live campaign results</span>
-              <span style={{ background:BLUE_BG, color:BLUE, fontSize:12, fontWeight:500, padding:'3px 10px', borderRadius:8 }}>Phase 2</span>
-            </div>
-            <div style={{ fontSize:12, color:TERTIARY }}>Leads, spend and cost-per-lead pull in automatically from Meta — switches on once the Facebook account is out of review.</div>
-          </div>
+          <PixelLiveTracking key={selected.id} recordId={selected.id} goal={selected.goal} conversionEvent={selected.conversion_event} />
         </div>
       )}
 
@@ -268,6 +262,125 @@ function AddPixelModal({ available, onAdd, onClose }) {
           <button onClick={submit} style={{ background:'#0F6E56', color:'#fff', border:'none', borderRadius:6, padding:'8px 16px', fontSize:13, fontWeight:500, cursor:'pointer' }}>Add customer</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── LIVE TRACKING (read-only pixel activity, Option A) ───────────────────────
+// Anonymous aggregate event counts pulled live from the customer's Meta Pixel —
+// no personal or contact data (Meta doesn't expose that through the pixel).
+// Self-contained: owns its window toggle + fetch. Remounted (via key) when the
+// selected customer changes, so it always reflects the open pixel.
+const PIXEL_WINDOWS = [ {key:'7d',label:'7 days'}, {key:'30d',label:'30 days'}, {key:'lifetime',label:'Lifetime'} ];
+
+function timeAgo(iso) {
+  const t = iso ? Date.parse(iso) : NaN;
+  if (Number.isNaN(t)) return null;
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);   if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);   if (h < 24) return `${h} hour${h === 1 ? '' : 's'} ago`;
+  const d = Math.floor(h / 24);   if (d < 30) return `${d} day${d === 1 ? '' : 's'} ago`;
+  const mo = Math.floor(d / 30);  if (mo < 12) return `${mo} month${mo === 1 ? '' : 's'} ago`;
+  return `${Math.floor(mo / 12)} year${Math.floor(mo / 12) === 1 ? '' : 's'} ago`;
+}
+
+const PIXEL_STATUS = {
+  active:  { label: 'Active',  fg: GREEN_HI, dot: GREEN_HI },
+  quiet:   { label: 'Quiet',   fg: AMBER,    dot: AMBER },
+  no_data: { label: 'No data', fg: GREY,     dot: TERTIARY },
+};
+
+function PixelLiveTracking({ recordId, goal, conversionEvent }) {
+  const [window, setWindow] = useState('30d');
+  const [data, setData]     = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetch(`/api/facebook-pixels/${recordId}/stats?window=${encodeURIComponent(window)}`)
+      .then(r => r.json())
+      .then(d => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData({ ok:false, error:'Could not reach Studio. Try again in a moment.' }); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [recordId, window]);
+
+  const box = { border:`1px solid ${BORDER}`, borderRadius:8, padding:14, background:'#fff' };
+  const fmtNum = (n) => Number(n || 0).toLocaleString('en-GB');
+
+  const header = (
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, marginBottom:10, flexWrap:'wrap' }}>
+      <span style={{ fontSize:13, fontWeight:500, color:TEXT }}>Live tracking</span>
+      <div style={{ display:'inline-flex', border:`1px solid ${BORDER}`, borderRadius:6, overflow:'hidden' }}>
+        {PIXEL_WINDOWS.map((w,i)=>(
+          <button key={w.key} onClick={()=>setWindow(w.key)} style={{ padding:'5px 11px', fontSize:12, cursor:'pointer', border:'none', borderLeft:i===0?'none':`1px solid ${BORDER}`, background:window===w.key?GREEN_HI:'#fff', color:window===w.key?'#fff':MUTED, fontWeight:window===w.key?500:400 }}>{w.label}</button>
+        ))}
+      </div>
+    </div>
+  );
+
+  if (loading) {
+    return <div style={box}>{header}<div style={{ fontSize:12, color:TERTIARY }}>Loading live activity…</div></div>;
+  }
+  if (data && data.no_pixel) {
+    return <div style={box}>{header}<div style={{ fontSize:12, color:TERTIARY }}>Add this customer&rsquo;s Pixel ID above to see live tracking.</div></div>;
+  }
+  if (!data || data.ok === false) {
+    const msg = (data && data.error) || 'Could not load pixel activity from Meta.';
+    return (
+      <div style={box}>{header}
+        <div style={{ fontSize:12, color:AMBER, background:AMBER_BG, borderRadius:6, padding:'8px 10px' }}>{msg}</div>
+      </div>
+    );
+  }
+
+  const st = PIXEL_STATUS[data.status] || PIXEL_STATUS.no_data;
+  const events = Array.isArray(data.events) ? data.events : [];
+  const goalType = (conversionEvent && conversionEvent.trim()) || (goal === 'sales' ? 'Purchase' : 'Lead');
+  const goalEvent = events.find(e => String(e.type).toLowerCase() === goalType.toLowerCase());
+  const goalLabel = goal === 'sales' ? 'Sales' : 'Leads';
+  const last = timeAgo(data.pixel && data.pixel.last_fired_time);
+
+  const statCell = (label, value) => (
+    <div style={{ border:`1px solid ${BORDER}`, borderRadius:8, padding:'10px 12px', background:BG }}>
+      <div style={{ fontSize:11, color:TERTIARY }}>{label}</div>
+      <div style={{ fontSize:20, fontWeight:500, color:TEXT }}>{value}</div>
+    </div>
+  );
+
+  return (
+    <div style={box}>
+      {header}
+
+      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:12 }}>
+        <span style={{ width:8, height:8, borderRadius:'50%', background:st.dot, display:'inline-block' }} />
+        <span style={{ fontSize:12, fontWeight:500, color:st.fg }}>{st.label}</span>
+        {last && <span style={{ fontSize:12, color:TERTIARY }}>· last event {last}</span>}
+      </div>
+
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(120px, 1fr))', gap:10, marginBottom:12 }}>
+        {statCell('Events tracked', fmtNum(data.total_events))}
+        {statCell(goalLabel, fmtNum(goalEvent ? goalEvent.count : 0))}
+        {statCell('Event types', fmtNum(events.length))}
+      </div>
+
+      {events.length === 0 ? (
+        <div style={{ fontSize:12, color:TERTIARY }}>No events fired in this window yet.</div>
+      ) : (
+        <div>
+          <div style={{ fontSize:12, color:MUTED, marginBottom:6 }}>Events tracked</div>
+          <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+            {events.map(e => (
+              <div key={e.type} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', fontSize:13, padding:'4px 0', borderBottom:`1px solid ${BG}` }}>
+                <span style={{ color:TEXT }}>{e.label}</span>
+                <span style={{ color:MUTED, fontWeight:500 }}>{fmtNum(e.count)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

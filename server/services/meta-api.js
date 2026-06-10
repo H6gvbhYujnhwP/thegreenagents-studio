@@ -270,6 +270,125 @@ export async function getAdsOverview({ window = '30d', adAccountId = null } = {}
   }
 }
 
+// ── Pixel stats (Meta Pixels — read-only tracking, Option A) ──────────────────
+//
+// The Meta Pixel measures WEBSITE events (page views, leads, purchases…). This
+// pulls the pixel's own event-fire counts — anonymous aggregate counts only, no
+// individual visitors or contact details (Meta never exposes those through the
+// pixel). Independent of ad spend (that's the Ads screen's job).
+//
+// Two calls per overview:
+//   • GET /{pixel_id}?fields=name,last_fired_time  → name + "last activity"
+//   • GET /{pixel_id}/stats?aggregation=event&...  → counts per event type
+// The /stats edge's response shape has historically varied across Graph
+// versions, so the parser below tolerates a couple of shapes and never throws —
+// failures come back as { ok:false } so the UI renders a clean message.
+
+// Map Meta's standard event names to plain-English labels for the screens.
+const PIXEL_EVENT_LABELS = {
+  PageView: 'Page views',
+  ViewContent: 'View content',
+  Search: 'Searches',
+  AddToCart: 'Add to cart',
+  AddToWishlist: 'Add to wishlist',
+  InitiateCheckout: 'Checkout started',
+  AddPaymentInfo: 'Payment info added',
+  Purchase: 'Purchases',
+  Lead: 'Leads',
+  CompleteRegistration: 'Registrations',
+  Contact: 'Contacts',
+  SubmitApplication: 'Applications',
+  Subscribe: 'Subscriptions',
+  Schedule: 'Bookings',
+  StartTrial: 'Trials started',
+  FindLocation: 'Location lookups',
+  CustomizeProduct: 'Product customisations',
+  Donate: 'Donations',
+};
+function friendlyEventLabel(type) {
+  if (PIXEL_EVENT_LABELS[type]) return PIXEL_EVENT_LABELS[type];
+  // Humanise an unknown CamelCase / custom event name: "MyCustomEvent" → "My custom event".
+  const spaced = String(type).replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
+  return spaced ? spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase() : String(type);
+}
+
+// Window → a start_time (unix seconds). The /stats edge uses start_time/end_time,
+// not Meta's date_preset. 'lifetime' just reaches back far (the edge has its own
+// retention cap; we don't need to be exact).
+function pixelWindowStart(window) {
+  const now = Math.floor(Date.now() / 1000);
+  const day = 86400;
+  if (window === '7d') return now - 7 * day;
+  if (window === 'lifetime') return now - 730 * day;
+  return now - 30 * day; // default 30d
+}
+
+// Normalise the /stats response into a Map of event_type → total count, summed
+// across whatever time buckets Meta returns. Tolerates the two shapes we've
+// seen: rows carrying a `data: [{ value, count }]` array, or a `value` object
+// that's a plain { EventName: count } map.
+function sumPixelEvents(statsJson) {
+  const totals = new Map();
+  const rows = (statsJson && Array.isArray(statsJson.data)) ? statsJson.data : [];
+  const bump = (type, n) => {
+    if (!type) return;
+    const add = Number(n) || 0;
+    totals.set(type, (totals.get(type) || 0) + add);
+  };
+  for (const row of rows) {
+    if (row && Array.isArray(row.data)) {
+      for (const d of row.data) bump(d && d.value, d && d.count);
+    } else if (row && row.value && typeof row.value === 'object') {
+      for (const [type, count] of Object.entries(row.value)) bump(type, count);
+    }
+  }
+  return totals;
+}
+
+// One-call overview the admin + portal Meta Pixels screens use: the pixel's
+// name, last activity, a live/quiet/no-data status, and a per-event count list.
+// Never throws — failures come back as { ok:false, error }.
+export async function getPixelStats({ pixelId, window = '30d' } = {}) {
+  const win = ['7d', '30d', 'lifetime'].includes(window) ? window : '30d';
+  const id = String(pixelId || '').replace(/\D/g, '');
+  if (!id) return { ok: false, window: win, error: 'No pixel ID set for this customer yet.' };
+
+  try {
+    const start = pixelWindowStart(win);
+    const end = Math.floor(Date.now() / 1000);
+
+    const [meta, stats] = await Promise.all([
+      metaRequest(`${id}`, { params: { fields: 'name,last_fired_time' } }),
+      metaRequest(`${id}/stats`, { params: { aggregation: 'event', start_time: start, end_time: end } }),
+    ]);
+
+    const totals = sumPixelEvents(stats);
+    const events = [...totals.entries()]
+      .map(([type, count]) => ({ type, label: friendlyEventLabel(type), count }))
+      .sort((a, b) => b.count - a.count);
+    const total_events = events.reduce((n, e) => n + e.count, 0);
+
+    // Status from last_fired_time: fired in last 24h → active; older → quiet;
+    // never fired (or unknown) → no_data.
+    let status = 'no_data';
+    const lf = meta && meta.last_fired_time ? Date.parse(meta.last_fired_time) : NaN;
+    if (!Number.isNaN(lf)) {
+      status = (Date.now() - lf) <= 24 * 3600 * 1000 ? 'active' : 'quiet';
+    }
+
+    return {
+      ok: true,
+      window: win,
+      pixel: { id, name: (meta && meta.name) || null, last_fired_time: (meta && meta.last_fired_time) || null },
+      status,
+      total_events,
+      events,
+    };
+  } catch (err) {
+    return { ok: false, window: win, error: err && err.message ? err.message : String(err) };
+  }
+}
+
 // The connection test the boot log and /connection-status both use. It fetches
 // the specific ad account we'll actually run ads in — proving in one call that
 // (a) the token works, (b) it has ads access, and (c) it can see that account.
