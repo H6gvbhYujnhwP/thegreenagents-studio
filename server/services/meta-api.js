@@ -141,6 +141,19 @@ export async function listAdAccounts() {
   });
 }
 
+// List the Meta Pixels in the configured business. Powers the admin pixel
+// picker so the operator selects a pixel instead of typing its ID. Returns the
+// raw rows ({ id, name, last_fired_time }); throws on error (the route catches).
+// Only pixels the system-user token can see (i.e. in our business) come back.
+export async function listPixels() {
+  const c = cfg();
+  if (!c.businessId) throw new Error('META_BUSINESS_ID is not set');
+  const json = await metaRequest(`${c.businessId}/adspixels`, {
+    params: { fields: 'id,name,last_fired_time', limit: 200 },
+  });
+  return Array.isArray(json.data) ? json.data : [];
+}
+
 // ── Reading ads + stats (Stage 2: read) ──────────────────────────────────────
 
 // The date windows the admin screen offers, mapped to Meta's date_preset values.

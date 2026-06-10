@@ -22,7 +22,7 @@ import express from 'express';
 import { v4 as uuid } from 'uuid';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
-import { metaConfigured, getPixelStats } from '../services/meta-api.js';
+import { metaConfigured, getPixelStats, listPixels } from '../services/meta-api.js';
 
 const router = express.Router();
 router.use(requireAuth);
@@ -89,6 +89,23 @@ router.get('/available-customers', (req, res) => {
     ORDER BY name COLLATE NOCASE ASC
   `).all();
   res.json(rows);
+});
+
+// ── AVAILABLE PIXELS (from Meta) ─────────────────────────────────────────────
+// Lists the Meta Pixels in the business so the admin can pick one instead of
+// typing the ID. Must sit before GET /:id (a literal path, not an :id). Always
+// 200: { ok:true, pixels:[...] } or { ok:false, error, pixels:[] } so the UI
+// can fall back to manual entry without breaking.
+router.get('/available-pixels', async (req, res) => {
+  if (!metaConfigured()) {
+    return res.json({ ok: false, configured: false, error: 'Meta API is not configured.', pixels: [] });
+  }
+  try {
+    const pixels = await listPixels();
+    res.json({ ok: true, configured: true, pixels });
+  } catch (err) {
+    res.json({ ok: false, configured: true, error: err && err.message ? err.message : String(err), pixels: [] });
+  }
 });
 
 // ── DETAIL ───────────────────────────────────────────────────────────────────

@@ -182,7 +182,7 @@ export default function FacebookPixels() {
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(180px, 1fr))', gap:12, marginBottom:18 }}>
             <div><label style={fieldLab}>Business ID</label><input style={fieldInput} defaultValue={selected.business_id||''} onBlur={e=>patch(selected.id,{business_id:e.target.value})} /></div>
             <div><label style={fieldLab}>Ad account ID</label><input style={fieldInput} defaultValue={selected.ad_account_id||''} onBlur={e=>patch(selected.id,{ad_account_id:e.target.value})} /></div>
-            <div><label style={fieldLab}>Pixel ID</label><input style={fieldInput} defaultValue={selected.pixel_id||''} onBlur={e=>patch(selected.id,{pixel_id:e.target.value})} /></div>
+            <div><label style={fieldLab}>Pixel ID</label><PixelPicker value={selected.pixel_id||''} onChange={(id,name)=>patch(selected.id, (name && !selected.pixel_name) ? {pixel_id:id, pixel_name:name} : {pixel_id:id})} style={fieldInput} /></div>
             <div><label style={fieldLab}>Pixel name</label><input style={fieldInput} defaultValue={selected.pixel_name||''} onBlur={e=>patch(selected.id,{pixel_name:e.target.value})} /></div>
             <div><label style={fieldLab}>Website domain</label><input style={fieldInput} defaultValue={selected.domain||''} onBlur={e=>patch(selected.id,{domain:e.target.value})} /></div>
             <div><label style={fieldLab}>Facebook page</label><input style={fieldInput} defaultValue={selected.facebook_page||''} onBlur={e=>patch(selected.id,{facebook_page:e.target.value})} /></div>
@@ -252,7 +252,7 @@ function AddPixelModal({ available, onAdd, onClose }) {
           <div><label style={lab}>Website domain</label><input style={inp} value={f.domain} onChange={e=>set('domain', e.target.value)} placeholder="wedoyourquotes.com" /></div>
           <div><label style={lab}>Business ID</label><input style={inp} value={f.business_id} onChange={e=>set('business_id', e.target.value)} /></div>
           <div><label style={lab}>Ad account ID</label><input style={inp} value={f.ad_account_id} onChange={e=>set('ad_account_id', e.target.value)} /></div>
-          <div><label style={lab}>Pixel ID</label><input style={inp} value={f.pixel_id} onChange={e=>set('pixel_id', e.target.value)} /></div>
+          <div><label style={lab}>Pixel ID</label><PixelPicker value={f.pixel_id} onChange={(id,name)=>{ set('pixel_id', id); if (name && !f.pixel_name) set('pixel_name', name); }} style={inp} /></div>
           <div><label style={lab}>Pixel name</label><input style={inp} value={f.pixel_name} onChange={e=>set('pixel_name', e.target.value)} placeholder="Client — Main Pixel" /></div>
           <div><label style={lab}>Facebook page</label><input style={inp} value={f.facebook_page} onChange={e=>set('facebook_page', e.target.value)} /></div>
           <div><label style={lab}>Conversion event</label><input style={inp} value={f.conversion_event} onChange={e=>set('conversion_event', e.target.value)} placeholder="Lead" /></div>
@@ -382,5 +382,82 @@ function PixelLiveTracking({ recordId, goal, conversionEvent }) {
         </div>
       )}
     </div>
+  );
+}
+
+// ── PIXEL PICKER ─────────────────────────────────────────────────────────────
+// Lets the operator choose a Meta Pixel from the business (via the Graph API)
+// instead of typing its ID. Falls back to a plain text input if the list is
+// empty or Meta is unreachable, and always offers a "type manually" escape.
+// Commits on select (dropdown) or on blur (manual typing) so the setup panel
+// doesn't fire a save on every keystroke.
+let _pixelListPromise = null;
+function fetchPixelList() {
+  if (!_pixelListPromise) {
+    _pixelListPromise = fetch('/api/facebook-pixels/available-pixels')
+      .then(r => r.json())
+      .catch(() => ({ ok: false, pixels: [] }));
+  }
+  return _pixelListPromise;
+}
+
+function PixelPicker({ value, onChange, style }) {
+  const [pixels, setPixels] = useState(null); // null = loading
+  const [manual, setManual] = useState(false);
+  const [text, setText]     = useState(value || '');
+
+  useEffect(() => { setText(value || ''); }, [value]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPixelList().then(d => {
+      if (cancelled) return;
+      const list = (d && Array.isArray(d.pixels)) ? d.pixels : [];
+      setPixels(list);
+      // A value already saved but not in the list (e.g. another business) →
+      // start in manual mode so it stays visible/editable.
+      if (value && !list.some(p => String(p.id) === String(value))) setManual(true);
+    });
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const linkBtn = { background:'none', border:'none', color:GREEN_HI, fontSize:11, cursor:'pointer', padding:'4px 0 0', display:'inline-block' };
+
+  if (pixels === null) {
+    return <input style={style} value={text} readOnly placeholder="Loading pixels…" />;
+  }
+
+  if (manual || pixels.length === 0) {
+    return (
+      <div>
+        <input
+          style={style} value={text}
+          onChange={e => setText(e.target.value)}
+          onBlur={() => { if (text !== (value || '')) onChange(text); }}
+          placeholder="Pixel ID (digits only)"
+        />
+        {pixels.length > 0 && (
+          <button type="button" onClick={() => setManual(false)} style={linkBtn}>↤ Pick from list</button>
+        )}
+      </div>
+    );
+  }
+
+  const known = pixels.some(p => String(p.id) === String(value));
+  return (
+    <select
+      style={style}
+      value={known ? value : ''}
+      onChange={e => {
+        if (e.target.value === '__manual__') { setManual(true); return; }
+        const p = pixels.find(x => String(x.id) === e.target.value);
+        onChange(e.target.value, p ? p.name : undefined);
+      }}>
+      <option value="">Select a pixel…</option>
+      {pixels.map(p => (
+        <option key={p.id} value={p.id}>{p.name ? `${p.name} — ${p.id}` : p.id}</option>
+      ))}
+      <option value="__manual__">✏️ Type ID manually…</option>
+    </select>
   );
 }
