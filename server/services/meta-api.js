@@ -218,10 +218,10 @@ export async function getInsights(adAccountId = cfg().adAccountId, { level = 'ad
 // totals for the window, and a card per ad with its own stats. All Meta
 // response-shape handling lives here so the route stays thin. Never throws —
 // failures come back as { ok:false, error } so the UI renders a clean message.
-export async function getAdsOverview({ window = '30d' } = {}) {
+export async function getAdsOverview({ window = '30d', adAccountId = null } = {}) {
   const win = WINDOW_PRESETS[window] ? window : '30d';
   try {
-    const accountId = cfg().adAccountId;
+    const accountId = adAccountId || cfg().adAccountId;
     const [acct, ads, adRows, acctRows] = await Promise.all([
       getAdAccount(accountId),
       listAds(accountId),
