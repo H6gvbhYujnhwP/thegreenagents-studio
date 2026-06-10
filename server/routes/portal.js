@@ -30,7 +30,7 @@ import { uploadImageToR2 } from '../services/r2.js';
 import { queuePost } from '../services/supergrow.js';
 import { sendEmail } from '../services/ses.js';
 import { resolveLinkedSet, resolveCrmCustomerId, buildSubscriptionsPanel, applySubscriptionsUpdate } from './hot-prospects.js';
-import { metaConfigured, getAdsOverview } from '../services/meta-api.js';
+import { metaConfigured, getAdsOverview, getPixelStats } from '../services/meta-api.js';
 import { v4 as uuid } from 'uuid';
 
 const router = Router();
@@ -2889,6 +2889,32 @@ router.get('/facebook-ads', async (req, res) => {
 
   const overview = await getAdsOverview({ window, adAccountId: fa.ad_account_id });
   res.json({ configured: true, ...overview });
+});
+
+// ─── GET /api/portal/meta-pixels ──────────────────────────────────────────────
+// Read-only Meta Pixel activity for the logged-in customer (decision #107).
+// Anonymous aggregate website events only (page views, leads, …) — no personal
+// or contact data. Scoped directly by the customer's own id (the admin keys the
+// pixel row to the portal-facing id), so no linked_external_id hop — correct for
+// both the Cube6-linked and Manson-self-linked shapes, same as facebook-ads.
+// Always 200; flags drive the UI: no_pixel · ok:false · ok:true.
+router.get('/meta-pixels', async (req, res) => {
+  if (!metaConfigured()) {
+    return res.json({ ok: false, configured: false, error: 'Tracking is not connected right now.' });
+  }
+
+  const window = ['7d', '30d', 'lifetime'].includes(req.query.window) ? req.query.window : '30d';
+
+  const px = db.prepare(
+    'SELECT pixel_id FROM facebook_pixels WHERE email_client_id = ?'
+  ).get(req.portalClient.id);
+
+  if (!px || !px.pixel_id) {
+    return res.json({ ok: true, configured: true, no_pixel: true, window, events: [], series: [] });
+  }
+
+  const stats = await getPixelStats({ window, pixelId: px.pixel_id });
+  res.json({ configured: true, ...stats });
 });
 
 export default router;

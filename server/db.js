@@ -1060,8 +1060,8 @@ db.exec(`
       'Coming soon — short-form video scripts and content for TikTok.',
       'coming_soon', null, null, 28],
     ['facebook_pixels', 'Meta Pixels',
-      'Coming soon — Facebook Pixel + Conversions API installation and management.',
-      'coming_soon', null, null, 29],
+      'Read-only Meta Pixel tracking for each customer (decision #107): Studio displays the pixel\'s live website activity (page views, leads, etc.). Set one pixel per customer on the admin Meta Pixels screen. State is "live" so the customer portal shows the real page once a pixel is set.',
+      'live', null, null, 29],
     ['facebook_ads', 'Facebook Ads',
       'Read-only Facebook performance for each customer (decision #107): Studio displays spend, reach, leads, cost-per-lead and the live ads. Campaigns are made and managed outside Studio (Manus AI). Set one ad account per customer on the admin Facebook Ads screen. State is "live" so the customer portal shows the real page once an ad account is set.',
       'live', null, null, 31],
@@ -1118,8 +1118,11 @@ db.exec(`
   //   • 'facebook_ads' goes live so the customer portal shows the real
   //     read-only Facebook Ads page once an ad account is set (otherwise it
   //     would stay gated as coming_soon for everyone).
+  //   • 'facebook_pixels' goes live for the same reason — so the portal Meta
+  //     Pixels page shows once a pixel is set.
   db.prepare(`UPDATE services SET state = 'retired' WHERE service_key = 'facebook'`).run();
   db.prepare(`UPDATE services SET state = 'live'    WHERE service_key = 'facebook_ads'`).run();
+  db.prepare(`UPDATE services SET state = 'live'    WHERE service_key = 'facebook_pixels'`).run();
 }
 
 // 14l-fp. Facebook Pixels — per-customer Meta Pixel setup record (#facebook-pixels).

@@ -358,9 +358,33 @@ function sumPixelEvents(statsJson) {
   return totals;
 }
 
-// One-call overview the admin + portal Meta Pixels screens use: the pixel's
-// name, last activity, a live/quiet/no-data status, and a per-event count list.
-// Never throws — failures come back as { ok:false, error }.
+// Build a per-day activity series for the history graph, from the same /stats
+// rows. Each row is a time bucket carrying a timestamp + its event counts; we
+// floor the timestamp to a calendar day (UTC) and sum every event in that row
+// into that day. Defensive: rows without a usable timestamp are skipped, so a
+// shape we don't expect yields an empty series (the chart hides gracefully)
+// rather than throwing.
+function buildDailySeries(statsJson) {
+  const byDay = new Map(); // 'YYYY-MM-DD' -> total events that day
+  const rows = (statsJson && Array.isArray(statsJson.data)) ? statsJson.data : [];
+  for (const row of rows) {
+    const ts = Number(row && (row.start_time != null ? row.start_time : row.timestamp));
+    if (!ts) continue;
+    const d = new Date(ts * 1000);
+    if (Number.isNaN(d.getTime())) continue;
+    const key = d.toISOString().slice(0, 10);
+    let rowTotal = 0;
+    if (Array.isArray(row.data)) {
+      for (const e of row.data) rowTotal += Number(e && e.count) || 0;
+    } else if (row.value && typeof row.value === 'object') {
+      for (const v of Object.values(row.value)) rowTotal += Number(v) || 0;
+    }
+    byDay.set(key, (byDay.get(key) || 0) + rowTotal);
+  }
+  return [...byDay.entries()]
+    .map(([date, count]) => ({ date, count }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
 export async function getPixelStats({ pixelId, window = '30d' } = {}) {
   const win = ['7d', '30d', 'lifetime'].includes(window) ? window : '30d';
   const id = String(pixelId || '').replace(/\D/g, '');
@@ -396,6 +420,7 @@ export async function getPixelStats({ pixelId, window = '30d' } = {}) {
       status,
       total_events,
       events,
+      series: buildDailySeries(stats),
     };
   } catch (err) {
     return { ok: false, window: win, error: err && err.message ? err.message : String(err) };

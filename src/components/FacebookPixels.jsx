@@ -180,37 +180,13 @@ export default function FacebookPixels() {
           </div>
 
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(180px, 1fr))', gap:12, marginBottom:18 }}>
-            <div><label style={fieldLab}>Business ID</label><input style={fieldInput} defaultValue={selected.business_id||''} onBlur={e=>patch(selected.id,{business_id:e.target.value})} /></div>
-            <div><label style={fieldLab}>Ad account ID</label><input style={fieldInput} defaultValue={selected.ad_account_id||''} onBlur={e=>patch(selected.id,{ad_account_id:e.target.value})} /></div>
             <div><label style={fieldLab}>Pixel ID</label><PixelPicker value={selected.pixel_id||''} onChange={(id,name)=>patch(selected.id, (name && !selected.pixel_name) ? {pixel_id:id, pixel_name:name} : {pixel_id:id})} style={fieldInput} /></div>
             <div><label style={fieldLab}>Pixel name</label><input style={fieldInput} defaultValue={selected.pixel_name||''} onBlur={e=>patch(selected.id,{pixel_name:e.target.value})} /></div>
             <div><label style={fieldLab}>Website domain</label><input style={fieldInput} defaultValue={selected.domain||''} onBlur={e=>patch(selected.id,{domain:e.target.value})} /></div>
             <div><label style={fieldLab}>Facebook page</label><input style={fieldInput} defaultValue={selected.facebook_page||''} onBlur={e=>patch(selected.id,{facebook_page:e.target.value})} /></div>
-            <div><label style={fieldLab}>Goal</label>
-              <select style={fieldInput} value={selected.goal} onChange={e=>patch(selected.id,{goal:e.target.value})}>
-                <option value="leads">Leads</option><option value="sales">Sales</option>
-              </select>
-            </div>
-            <div><label style={fieldLab}>Conversion event</label><input style={fieldInput} defaultValue={selected.conversion_event||''} onBlur={e=>patch(selected.id,{conversion_event:e.target.value})} placeholder="Lead" /></div>
           </div>
 
-          <div style={{ borderTop:`1px solid ${BORDER}`, paddingTop:14, marginBottom:16 }}>
-            <div style={{ fontSize:13, fontWeight:500, color:TEXT, marginBottom:8 }}>Setup checklist</div>
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(190px, 1fr))', gap:'2px 16px' }}>
-              {CHECKLIST.map(([key,label]) => {
-                const done = !!(selected.checklist && selected.checklist[key]);
-                return (
-                  <label key={key} style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, color:done?TEXT:MUTED, padding:'5px 0', cursor:'pointer' }}>
-                    <input type="checkbox" checked={done}
-                      onChange={e=>{ const next={ ...(selected.checklist||{}) }; next[key]=e.target.checked?1:0; patch(selected.id,{checklist_json:next}); }} />
-                    {label}
-                  </label>
-                );
-              })}
-            </div>
-          </div>
-
-          <PixelLiveTracking key={selected.id} recordId={selected.id} goal={selected.goal} conversionEvent={selected.conversion_event} />
+          <PixelLiveTracking key={selected.id} recordId={selected.id} />
         </div>
       )}
 
@@ -244,18 +220,10 @@ function AddPixelModal({ available, onAdd, onClose }) {
               {available.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </div>
-          <div><label style={lab}>Goal</label>
-            <select style={inp} value={f.goal} onChange={e=>set('goal', e.target.value)}>
-              <option value="leads">Leads</option><option value="sales">Sales</option>
-            </select>
-          </div>
           <div><label style={lab}>Website domain</label><input style={inp} value={f.domain} onChange={e=>set('domain', e.target.value)} placeholder="wedoyourquotes.com" /></div>
-          <div><label style={lab}>Business ID</label><input style={inp} value={f.business_id} onChange={e=>set('business_id', e.target.value)} /></div>
-          <div><label style={lab}>Ad account ID</label><input style={inp} value={f.ad_account_id} onChange={e=>set('ad_account_id', e.target.value)} /></div>
           <div><label style={lab}>Pixel ID</label><PixelPicker value={f.pixel_id} onChange={(id,name)=>{ set('pixel_id', id); if (name && !f.pixel_name) set('pixel_name', name); }} style={inp} /></div>
           <div><label style={lab}>Pixel name</label><input style={inp} value={f.pixel_name} onChange={e=>set('pixel_name', e.target.value)} placeholder="Client — Main Pixel" /></div>
           <div><label style={lab}>Facebook page</label><input style={inp} value={f.facebook_page} onChange={e=>set('facebook_page', e.target.value)} /></div>
-          <div><label style={lab}>Conversion event</label><input style={inp} value={f.conversion_event} onChange={e=>set('conversion_event', e.target.value)} placeholder="Lead" /></div>
         </div>
         <div style={{ display:'flex', justifyContent:'flex-end', gap:10, marginTop:20 }}>
           <button onClick={onClose} style={{ background:'#fff', color:'#666', border:'1px solid #e0e0dc', borderRadius:6, padding:'8px 16px', fontSize:13, cursor:'pointer' }}>Cancel</button>
@@ -291,7 +259,43 @@ const PIXEL_STATUS = {
   no_data: { label: 'No data', fg: GREY,     dot: TERTIARY },
 };
 
-function PixelLiveTracking({ recordId, goal, conversionEvent }) {
+// Short date label for the chart axis: '2026-06-09' → '9 Jun'.
+function fmtShortDate(iso) {
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${d.getUTCDate()} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]}`;
+}
+
+// Dependency-free daily-activity bar chart. series = [{date, count}] sorted asc.
+// Renders nothing meaningful until there's some history, in which case it shows
+// a tidy note instead of an empty box.
+function PixelBarChart({ series }) {
+  const pts = Array.isArray(series) ? series : [];
+  const max = pts.reduce((m, p) => Math.max(m, Number(p.count) || 0), 0);
+  if (pts.length === 0 || max === 0) {
+    return <div style={{ fontSize:12, color:TERTIARY, padding:'8px 0' }}>Not enough history to chart yet — it&rsquo;ll build up as activity comes in.</div>;
+  }
+  const W = 600, H = 90, base = 82, top = 8;
+  const slot = W / pts.length;
+  const barW = Math.max(1, slot * 0.6);
+  return (
+    <div>
+      <svg width="100%" height="90" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display:'block' }}>
+        <line x1="0" y1={base} x2={W} y2={base} stroke={BORDER} strokeWidth="1" />
+        {pts.map((p, i) => {
+          const h = ((Number(p.count) || 0) / max) * (base - top);
+          return <rect key={p.date} x={i * slot + (slot - barW) / 2} y={base - h} width={barW} height={h} fill={GREEN_HI} rx="1" />;
+        })}
+      </svg>
+      <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, color:TERTIARY, marginTop:4 }}>
+        <span>{fmtShortDate(pts[0].date)}</span>
+        <span>{fmtShortDate(pts[pts.length - 1].date)}</span>
+      </div>
+    </div>
+  );
+}
+
+function PixelLiveTracking({ recordId }) {
   const [window, setWindow] = useState('30d');
   const [data, setData]     = useState(null);
   const [loading, setLoading] = useState(true);
@@ -338,47 +342,32 @@ function PixelLiveTracking({ recordId, goal, conversionEvent }) {
 
   const st = PIXEL_STATUS[data.status] || PIXEL_STATUS.no_data;
   const events = Array.isArray(data.events) ? data.events : [];
-  const goalType = (conversionEvent && conversionEvent.trim()) || (goal === 'sales' ? 'Purchase' : 'Lead');
-  const goalEvent = events.find(e => String(e.type).toLowerCase() === goalType.toLowerCase());
-  const goalLabel = goal === 'sales' ? 'Sales' : 'Leads';
   const last = timeAgo(data.pixel && data.pixel.last_fired_time);
-
-  const statCell = (label, value) => (
-    <div style={{ border:`1px solid ${BORDER}`, borderRadius:8, padding:'10px 12px', background:BG }}>
-      <div style={{ fontSize:11, color:TERTIARY }}>{label}</div>
-      <div style={{ fontSize:20, fontWeight:500, color:TEXT }}>{value}</div>
-    </div>
-  );
 
   return (
     <div style={box}>
       {header}
 
-      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:12 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:14 }}>
         <span style={{ width:8, height:8, borderRadius:'50%', background:st.dot, display:'inline-block' }} />
         <span style={{ fontSize:12, fontWeight:500, color:st.fg }}>{st.label}</span>
-        {last && <span style={{ fontSize:12, color:TERTIARY }}>· last event {last}</span>}
+        {last && <span style={{ fontSize:12, color:TERTIARY }}>· last activity {last}</span>}
       </div>
 
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(120px, 1fr))', gap:10, marginBottom:12 }}>
-        {statCell('Events tracked', fmtNum(data.total_events))}
-        {statCell(goalLabel, fmtNum(goalEvent ? goalEvent.count : 0))}
-        {statCell('Event types', fmtNum(events.length))}
-      </div>
+      <div style={{ fontSize:12, color:MUTED, marginBottom:6 }}>Activity over time</div>
+      <div style={{ marginBottom:16 }}><PixelBarChart series={data.series} /></div>
 
+      <div style={{ fontSize:12, color:MUTED, marginBottom:6 }}>What your pixel is tracking</div>
       {events.length === 0 ? (
         <div style={{ fontSize:12, color:TERTIARY }}>No events fired in this window yet.</div>
       ) : (
-        <div>
-          <div style={{ fontSize:12, color:MUTED, marginBottom:6 }}>Events tracked</div>
-          <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-            {events.map(e => (
-              <div key={e.type} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', fontSize:13, padding:'4px 0', borderBottom:`1px solid ${BG}` }}>
-                <span style={{ color:TEXT }}>{e.label}</span>
-                <span style={{ color:MUTED, fontWeight:500 }}>{fmtNum(e.count)}</span>
-              </div>
-            ))}
-          </div>
+        <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+          {events.map(e => (
+            <div key={e.type} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', fontSize:13, padding:'4px 0', borderBottom:`1px solid ${BG}` }}>
+              <span style={{ color:TEXT }}>{e.label}</span>
+              <span style={{ color:MUTED, fontWeight:500 }}>{fmtNum(e.count)}</span>
+            </div>
+          ))}
         </div>
       )}
     </div>

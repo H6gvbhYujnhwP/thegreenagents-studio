@@ -547,7 +547,7 @@ function PortalChrome({ user, client, services, onLogout }) {
     linkedin:        { state:'enabled',     label:'LinkedIn Posts',  pitch:null },
     instagram:       { state:'coming_soon', label:'Instagram',       pitch:null },
     tiktok:          { state:'coming_soon', label:'TikTok',          pitch:null },
-    facebook_pixels: { state:'coming_soon', label:'Facebook Pixels', pitch:null },
+    facebook_pixels: { state:'coming_soon', label:'Meta Pixels', pitch:null },
     facebook_ads:    { state:'not_required', label:'Facebook Ads',   pitch:null },
   };
 
@@ -603,7 +603,7 @@ function PortalChrome({ user, client, services, onLogout }) {
               onClick={() => setPage('tiktok')}
               dim={svc.tiktok?.state !== 'enabled'}
             />
-            <NavItem label="Facebook Pixels"
+            <NavItem label="Meta Pixels"
               active={page==='facebook_pixels'}
               onClick={() => setPage('facebook_pixels')}
               dim={svc.facebook_pixels?.state !== 'enabled'}
@@ -746,8 +746,8 @@ function PortalChrome({ user, client, services, onLogout }) {
             </ServiceGate>
           )}
           {page === 'facebook_pixels' && (
-            <ServiceGate svc={svc.facebook_pixels} serviceName="Facebook Pixels">
-              <div />
+            <ServiceGate svc={svc.facebook_pixels} serviceName="Meta Pixels">
+              <PortalMetaPixels />
             </ServiceGate>
           )}
           {page === 'facebook_ads' && (
@@ -4687,6 +4687,162 @@ function tabBtnStyle(active) {
     marginBottom:-1,
     transition:'color 80ms ease-in',
   };
+}
+
+// ── META PIXELS PAGE (read-only website tracking, decision #107) ─────────────
+// Portal mirror of the admin Live tracking view, scoped server-side to the
+// logged-in customer's pixel. Anonymous aggregate website events only (page
+// views, leads, …) — no personal or contact data. Reads GET /api/portal/
+// meta-pixels. Clean states: no_pixel → empty; ok:false → soft notice; ok:true
+// → status line + activity graph + plain-English event list.
+const PX_WINDOWS = [ {key:'7d',label:'Last 7 days'}, {key:'30d',label:'Last 30 days'}, {key:'lifetime',label:'Lifetime'} ];
+
+function pxTimeAgo(iso) {
+  const t = iso ? Date.parse(iso) : NaN;
+  if (Number.isNaN(t)) return null;
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);  if (h < 24) return `${h} hour${h === 1 ? '' : 's'} ago`;
+  const d = Math.floor(h / 24);  if (d < 30) return `${d} day${d === 1 ? '' : 's'} ago`;
+  const mo = Math.floor(d / 30); if (mo < 12) return `${mo} month${mo === 1 ? '' : 's'} ago`;
+  return `${Math.floor(mo / 12)} year${Math.floor(mo / 12) === 1 ? '' : 's'} ago`;
+}
+function pxShortDate(iso) {
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${d.getUTCDate()} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]}`;
+}
+
+function PortalPixelChart({ series }) {
+  const pts = Array.isArray(series) ? series : [];
+  const max = pts.reduce((m, p) => Math.max(m, Number(p.count) || 0), 0);
+  if (pts.length === 0 || max === 0) {
+    return <div style={{ fontSize:13, color:TERTIARY_TEXT, padding:'8px 0' }}>Not enough history to chart yet — it&rsquo;ll build up as visitors arrive.</div>;
+  }
+  const W = 600, H = 100, base = 90, top = 8;
+  const slot = W / pts.length;
+  const barW = Math.max(1, slot * 0.6);
+  return (
+    <div>
+      <svg width="100%" height="100" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display:'block' }}>
+        <line x1="0" y1={base} x2={W} y2={base} stroke={BORDER} strokeWidth="1" />
+        {pts.map((p, i) => {
+          const h = ((Number(p.count) || 0) / max) * (base - top);
+          return <rect key={p.date} x={i * slot + (slot - barW) / 2} y={base - h} width={barW} height={h} fill={TGA_GREEN} rx="1" />;
+        })}
+      </svg>
+      <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, color:TERTIARY_TEXT, marginTop:4 }}>
+        <span>{pxShortDate(pts[0].date)}</span>
+        <span>{pxShortDate(pts[pts.length - 1].date)}</span>
+      </div>
+    </div>
+  );
+}
+
+function PortalMetaPixels() {
+  const [window, setWindow] = useState('30d');
+  const [data, setData]     = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]   = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true); setError(null);
+    fetch(`/api/portal/meta-pixels?window=${encodeURIComponent(window)}`, { credentials:'include' })
+      .then(r => r.json())
+      .then(d => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setError('Could not load your tracking just now. Please try again in a moment.'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [window]);
+
+  const card = { background:CARD, border:`0.5px solid ${BORDER}`, borderRadius:8, padding:'16px 18px' };
+  const fmtNum = (n) => Number(n || 0).toLocaleString('en-GB');
+
+  const emptyState = (
+    <div style={{ ...card, border:`0.5px dashed ${BORDER}`, textAlign:'center', padding:'40px 32px', color:MUTED, fontSize:14 }}>
+      Tracking will appear here once your pixel is live.
+    </div>
+  );
+
+  const Heading = (
+    <div style={{ display:'flex', alignItems:'flex-end', justifyContent:'space-between', gap:12, flexWrap:'wrap' }}>
+      <div>
+        <h2 style={pageTitle()}>Website Tracking</h2>
+        <p style={pageSub()}>See what your Meta Pixel is picking up on your website.</p>
+      </div>
+      <div style={{ display:'inline-flex', border:`0.5px solid ${BORDER}`, borderRadius:6, overflow:'hidden', marginBottom:16 }}>
+        {PX_WINDOWS.map((w,i)=>(
+          <button key={w.key} onClick={()=>setWindow(w.key)} style={{ padding:'6px 12px', fontSize:12, cursor:'pointer', border:'none', borderLeft:i===0?'none':`0.5px solid ${BORDER}`, background:window===w.key?GREEN:'#fff', color:window===w.key?'#fff':MUTED, fontWeight:window===w.key?500:400 }}>{w.label}</button>
+        ))}
+      </div>
+    </div>
+  );
+
+  if (!loading && data && data.no_pixel) {
+    return (<div>{Heading}{emptyState}</div>);
+  }
+  if (error || (!loading && data && data.ok === false)) {
+    const msg = error || (data && data.error) || 'Tracking is unavailable right now.';
+    return (
+      <div>{Heading}
+        <div style={{ ...card, background:AMBER_BG, border:`0.5px solid ${AMBER}`, color:AMBER, fontSize:13 }}>{msg}</div>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (<div>{Heading}<div style={{ ...card, color:TERTIARY_TEXT, fontSize:13 }}>Loading your tracking…</div></div>);
+  }
+
+  const events = Array.isArray(data.events) ? data.events : [];
+  const series = Array.isArray(data.series) ? data.series : [];
+  const noActivity = events.length === 0 && series.length === 0;
+  if (noActivity) {
+    return (<div>{Heading}{emptyState}</div>);
+  }
+
+  const STATUS_TEXT = {
+    active:  { dot: GREEN,         text: 'Your tracking is active' },
+    quiet:   { dot: AMBER,         text: 'Your tracking is connected' },
+    no_data: { dot: TERTIARY_TEXT, text: 'Waiting for activity' },
+  };
+  const st = STATUS_TEXT[data.status] || STATUS_TEXT.no_data;
+  const last = pxTimeAgo(data.pixel && data.pixel.last_fired_time);
+
+  return (
+    <div>
+      {Heading}
+
+      <div style={{ ...card, marginBottom:14 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:16 }}>
+          <span style={{ width:9, height:9, borderRadius:'50%', background:st.dot, display:'inline-block' }} />
+          <span style={{ fontSize:14, fontWeight:500, color:TEXT }}>{st.text}</span>
+          {last && <span style={{ fontSize:13, color:TERTIARY_TEXT }}>— last activity {last}</span>}
+        </div>
+
+        <div style={{ fontSize:13, color:MUTED, marginBottom:8 }}>Activity over time</div>
+        <PortalPixelChart series={series} />
+      </div>
+
+      <div style={card}>
+        <div style={{ fontSize:13, color:MUTED, marginBottom:10 }}>What&rsquo;s being tracked</div>
+        {events.length === 0 ? (
+          <div style={{ fontSize:13, color:TERTIARY_TEXT }}>No events tracked in this window yet.</div>
+        ) : (
+          <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+            {events.map(e => (
+              <div key={e.type} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', fontSize:14, padding:'6px 0', borderBottom:`0.5px solid ${BG}` }}>
+                <span style={{ color:TEXT }}>{e.label}</span>
+                <span style={{ color:TEXT, fontWeight:500 }}>{fmtNum(e.count)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // ── FACEBOOK ADS PAGE (read-only, decision #107) ─────────────────────────────
