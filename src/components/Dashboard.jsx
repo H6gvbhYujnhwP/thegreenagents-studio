@@ -22,7 +22,7 @@ const VALID_VIEWS = [
   'portal-customers',
   'crm-hot-prospects',
   'apps-idyq',
-  'facebook-posts', 'instagram', 'tiktok', 'facebook-pixels', 'facebook-ads',
+  'instagram', 'tiktok', 'facebook-pixels', 'facebook-ads',
 ];
 const LAST_VIEW_KEY = 'studio.admin.last_view';
 
@@ -202,7 +202,6 @@ export default function Dashboard({ onLogout }) {
   // screen lands for any of these, replace the branch with a real component
   // mount (same pattern as PortalAdmin above).
   const COMING_SOON_TITLES = {
-    'facebook-posts':  'Facebook Posts',
     'instagram':       'Instagram',
     'tiktok':          'TikTok',
   };
@@ -332,7 +331,7 @@ export default function Dashboard({ onLogout }) {
 
 // ── Admin coming-soon placeholder ────────────────────────────────────────────
 // Single re-usable screen for sidebar items whose admin side hasn't been built
-// yet. Used by Facebook Posts, Instagram, TikTok, Facebook Pixels admin tabs.
+// yet. Used by the Instagram + TikTok admin tabs.
 // When any of those gets a real admin UI, replace its branch in Dashboard's
 // view router with a real component mount and this stays for the rest.
 function AdminComingSoon({ title }) {

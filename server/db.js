@@ -1051,8 +1051,8 @@ db.exec(`
       'Customers see their LinkedIn posts pending approval, drawn from the linked LinkedIn account.',
       'live', 'clients', 'LinkedIn account', 10],
     ['facebook', 'Facebook Posts',
-      'Coming soon — once Facebook posting is wired up, you\'ll be able to link a Facebook page here.',
-      'coming_soon', null, null, 20],
+      'Retired (decision #107) — Studio no longer offers Facebook Posts. Manus AI handles posting; Studio keeps Meta Pixels + Facebook Ads only.',
+      'retired', null, null, 20],
     ['instagram', 'Instagram',
       'Coming soon — Instagram posts in your customer\'s brand voice.',
       'coming_soon', null, null, 25],
@@ -1107,6 +1107,19 @@ db.exec(`
     UPDATE services SET display_name = 'Meta Pixels'
     WHERE service_key = 'facebook_pixels'
   `).run();
+
+  // Idempotent state changes (decision #107). INSERT OR IGNORE above never
+  // touches an existing row, so service-STATE changes for rows that earlier
+  // deploys already created must be forced here:
+  //   • 'facebook' (Facebook Posts) is retired — Studio keeps only Meta Pixels
+  //     + Facebook Ads; Manus handles posting. Retiring hides it from the
+  //     customer portal, the admin sidebar, and the admin Manage-services list
+  //     (every read filters `state != 'retired'`).
+  //   • 'facebook_ads' goes live so the customer portal shows the real
+  //     read-only Facebook Ads page once an ad account is set (otherwise it
+  //     would stay gated as coming_soon for everyone).
+  db.prepare(`UPDATE services SET state = 'retired' WHERE service_key = 'facebook'`).run();
+  db.prepare(`UPDATE services SET state = 'live'    WHERE service_key = 'facebook_ads'`).run();
 }
 
 // 14l-fp. Facebook Pixels — per-customer Meta Pixel setup record (#facebook-pixels).

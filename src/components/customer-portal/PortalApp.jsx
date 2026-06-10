@@ -545,7 +545,6 @@ function PortalChrome({ user, client, services, onLogout }) {
   const svc = services || {
     email:           { state:'enabled',     label:'Email',           pitch:null },
     linkedin:        { state:'enabled',     label:'LinkedIn Posts',  pitch:null },
-    facebook:        { state:'coming_soon', label:'Facebook Posts',  pitch:null },
     instagram:       { state:'coming_soon', label:'Instagram',       pitch:null },
     tiktok:          { state:'coming_soon', label:'TikTok',          pitch:null },
     facebook_pixels: { state:'coming_soon', label:'Facebook Pixels', pitch:null },
@@ -593,11 +592,6 @@ function PortalChrome({ user, client, services, onLogout }) {
               active={page==='posts'}
               onClick={() => setPage('posts')}
               dim={svc.linkedin?.state === 'not_required'}
-            />
-            <NavItem label="Facebook Posts"
-              active={page==='facebook'}
-              onClick={() => setPage('facebook')}
-              dim={svc.facebook?.state !== 'enabled'}
             />
             <NavItem label="Instagram"
               active={page==='instagram'}
@@ -740,12 +734,6 @@ function PortalChrome({ user, client, services, onLogout }) {
               autoOpenProspectId={crmOpenProspectId}
               onAutoOpenConsumed={() => setCrmOpenProspectId(null)}
             />
-          )}
-          {page === 'facebook' && (
-            <ServiceGate svc={svc.facebook} serviceName="Facebook Posts">
-              {/* Real <PortalFacebook /> component when the service ships. */}
-              <div />
-            </ServiceGate>
           )}
           {page === 'instagram' && (
             <ServiceGate svc={svc.instagram} serviceName="Instagram">

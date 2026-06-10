@@ -73,7 +73,6 @@ export default function Sidebar({ onLogout, activeView, onNavigate }) {
 
         <div style={SECTION}>Social Media</div>
         <NavItem id="clients"          label="LinkedIn Posts"   active={activeView==='clients'}          onNavigate={onNavigate} icon={<UsersIcon />} />
-        <NavItem id="facebook-posts"   label="Facebook Posts"   active={activeView==='facebook-posts'}   onNavigate={onNavigate} icon={<UsersIcon />} dim suffix="Soon" />
         <NavItem id="instagram"        label="Instagram"        active={activeView==='instagram'}        onNavigate={onNavigate} icon={<UsersIcon />} dim suffix="Soon" />
         <NavItem id="tiktok"           label="TikTok"           active={activeView==='tiktok'}           onNavigate={onNavigate} icon={<UsersIcon />} dim suffix="Soon" />
         <NavItem id="facebook-pixels"  label="Meta Pixels"      active={activeView==='facebook-pixels'}  onNavigate={onNavigate} icon={<UsersIcon />} />
