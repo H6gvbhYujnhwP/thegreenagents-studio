@@ -30,6 +30,7 @@ import { uploadImageToR2 } from '../services/r2.js';
 import { queuePost } from '../services/supergrow.js';
 import { sendEmail } from '../services/ses.js';
 import { resolveLinkedSet, resolveCrmCustomerId, buildSubscriptionsPanel, applySubscriptionsUpdate } from './hot-prospects.js';
+import { metaConfigured, getAdsOverview } from '../services/meta-api.js';
 import { v4 as uuid } from 'uuid';
 
 const router = Router();
@@ -2853,6 +2854,41 @@ router.get('/hot-prospects/:id/thread', (req, res) => {
   };
 
   res.json({ prospect: prospectWithSource, thread: merged });
+});
+
+// ─── GET /api/portal/facebook-ads ─────────────────────────────────────────────
+// Read-only Facebook performance for the logged-in customer (decision #107).
+// Studio never writes to Facebook — Manus makes/manages the campaigns; this is
+// just the customer's window onto spend / reach / leads / cost-per-lead + their
+// live ads.
+//
+// Scoping: the customer's ad account lives in facebook_ads, keyed by the
+// customer's OWN id (the admin sets it on the portal-facing row), so we look it
+// up directly by req.portalClient.id — no linked_external_id hop is needed here
+// (unlike email). This is correct for both the Cube6-linked and Manson-self-
+// linked shapes: both get their facebook_ads row under their own portal id.
+//
+// Always 200. The frontend renders one of three clean states from the flags:
+//   • no_account  → customer has no ad account set yet  → "appear once live"
+//   • ok:false    → Meta call failed                    → soft error line
+//   • ok:true     → account + window totals + ad cards (ads may be empty)
+router.get('/facebook-ads', async (req, res) => {
+  if (!metaConfigured()) {
+    return res.json({ ok: false, configured: false, error: 'Facebook is not connected right now.' });
+  }
+
+  const window = ['7d', '30d', 'lifetime'].includes(req.query.window) ? req.query.window : '30d';
+
+  const fa = db.prepare(
+    'SELECT ad_account_id FROM facebook_ads WHERE email_client_id = ?'
+  ).get(req.portalClient.id);
+
+  if (!fa || !fa.ad_account_id) {
+    return res.json({ ok: true, configured: true, no_account: true, window, ads: [] });
+  }
+
+  const overview = await getAdsOverview({ window, adAccountId: fa.ad_account_id });
+  res.json({ configured: true, ...overview });
 });
 
 export default router;

@@ -1063,8 +1063,8 @@ db.exec(`
       'Coming soon — Facebook Pixel + Conversions API installation and management.',
       'coming_soon', null, null, 29],
     ['facebook_ads', 'Facebook Ads',
-      'Manage each customer\'s Facebook ad campaigns from Studio — budget, creatives, and performance — via the Meta Marketing API. Built in stages; this is the catalogue entry the Facebook Ads feature hangs off.',
-      'coming_soon', null, null, 31],
+      'Read-only Facebook performance for each customer (decision #107): Studio displays spend, reach, leads, cost-per-lead and the live ads. Campaigns are made and managed outside Studio (Manus AI). Set one ad account per customer on the admin Facebook Ads screen. State is "live" so the customer portal shows the real page once an ad account is set.',
+      'live', null, null, 31],
     ['email', 'Email (Inbox + Campaigns)',
       'Inbox replies and email-campaign stats. Pick the underlying email system record — usually the domain you send their cold email from (e.g. mail.engineersolutions.co.uk for the "Cube6" portal customer).',
       'live', 'email_clients', 'Email system record', 30],
@@ -1082,7 +1082,7 @@ db.exec(`
     ['instagram', 'Showcase your work where decisions get made visually. We turn your projects, products, and team moments into scroll-stopping Instagram posts — captions and images crafted in your brand voice, delivered for review every week.'],
     ['tiktok', 'Where the next generation of buyers lives. We write TikTok-native scripts and produce short-form video content that gets watched, not skipped — designed to build awareness with audiences traditional channels miss.'],
     ['facebook_pixels', 'Stop guessing who\'s converting. We install and manage your Meta Pixel and Conversions API so every form submission, sale, or sign-up flows back to Meta — making your ad spend smarter and your reporting clearer.'],
-    ['facebook_ads', 'Put your offer in front of the right buyers on Facebook and Instagram. We design, launch, and manage your ad campaigns — you set your daily budget and monthly cap, approve the creative, and watch the leads come in. Everything else is handled for you.'],
+    ['facebook_ads', 'See exactly how your Facebook and Instagram ads are performing — spend, reach, leads, and cost per lead — all in one place, updated live. We design, launch, and manage the campaigns for you; your portal is your window onto the results.'],
     ['email', 'Turn cold contacts into warm conversations. We run targeted outbound email campaigns from a properly-warmed mailbox, route every reply into your portal inbox, and keep deliverability rock-solid so the right buyers actually see your message.'],
   ];
   const updatePitch = db.prepare(`UPDATE services SET customer_pitch = ? WHERE service_key = ?`);

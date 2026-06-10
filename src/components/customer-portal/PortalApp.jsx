@@ -549,6 +549,7 @@ function PortalChrome({ user, client, services, onLogout }) {
     instagram:       { state:'coming_soon', label:'Instagram',       pitch:null },
     tiktok:          { state:'coming_soon', label:'TikTok',          pitch:null },
     facebook_pixels: { state:'coming_soon', label:'Facebook Pixels', pitch:null },
+    facebook_ads:    { state:'not_required', label:'Facebook Ads',   pitch:null },
   };
 
   return (
@@ -612,6 +613,11 @@ function PortalChrome({ user, client, services, onLogout }) {
               active={page==='facebook_pixels'}
               onClick={() => setPage('facebook_pixels')}
               dim={svc.facebook_pixels?.state !== 'enabled'}
+            />
+            <NavItem label="Facebook Ads"
+              active={page==='facebook_ads'}
+              onClick={() => setPage('facebook_ads')}
+              dim={svc.facebook_ads?.state !== 'enabled'}
             />
           </NavSection>
 
@@ -754,6 +760,11 @@ function PortalChrome({ user, client, services, onLogout }) {
           {page === 'facebook_pixels' && (
             <ServiceGate svc={svc.facebook_pixels} serviceName="Facebook Pixels">
               <div />
+            </ServiceGate>
+          )}
+          {page === 'facebook_ads' && (
+            <ServiceGate svc={svc.facebook_ads} serviceName="Facebook Ads">
+              <PortalFacebookAds />
             </ServiceGate>
           )}
           {page === 'settings'  && <PortalSettings user={user} client={client} services={svc} />}
@@ -4688,6 +4699,133 @@ function tabBtnStyle(active) {
     marginBottom:-1,
     transition:'color 80ms ease-in',
   };
+}
+
+// ── FACEBOOK ADS PAGE (read-only, decision #107) ─────────────────────────────
+// Portal mirror of the admin Facebook Ads read view, scoped server-side to the
+// logged-in customer's ad account. Read-only — nothing here writes to Facebook
+// (Manus makes/manages the campaigns). Reads GET /api/portal/facebook-ads.
+// Three clean states from the response flags:
+//   • no_account → "Your ads will appear here once they're live."
+//   • ok:false   → a soft notice (Facebook unreachable / Meta error)
+//   • ok:true    → four headline stat cards + a card per live ad (may be empty)
+const FA_WINDOWS = [ {key:'7d',label:'Last 7 days'}, {key:'30d',label:'Last 30 days'}, {key:'lifetime',label:'Lifetime'} ];
+
+function faStatusPill(eff, status) {
+  const s = (eff || status || '').toUpperCase();
+  if (s === 'ACTIVE') return { label:'Active', fg:'#0F6E56', bg:'#E1F5EE' };
+  if (s === 'PAUSED' || s === 'ADSET_PAUSED' || s === 'CAMPAIGN_PAUSED') return { label:'Paused', fg:'#854F0B', bg:'#FAEEDA' };
+  if (s === 'IN_PROCESS' || s === 'PENDING_REVIEW') return { label:'In review', fg:'#185FA5', bg:'#E6F1FB' };
+  if (s === 'DISAPPROVED' || s === 'WITH_ISSUES' || s === 'ADSET_DISAPPROVED') return { label:'Has issues', fg:'#A32D2D', bg:'#FCEBEB' };
+  if (s === 'ARCHIVED' || s === 'DELETED') return { label:'Archived', fg:'#5F5E5A', bg:'#F1EFE8' };
+  const label = (eff || status || 'Unknown').toLowerCase().replace(/_/g,' ').replace(/^\w/, c=>c.toUpperCase());
+  return { label, fg:'#5F5E5A', bg:'#F1EFE8' };
+}
+
+function PortalFacebookAds() {
+  const [window, setWindow] = useState('30d');
+  const [data, setData]     = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]   = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true); setError(null);
+    fetch(`/api/portal/facebook-ads?window=${encodeURIComponent(window)}`, { credentials:'include' })
+      .then(r => r.json())
+      .then(d => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setError('Could not load your ads just now. Please try again in a moment.'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [window]);
+
+  const card = { background:CARD, border:`0.5px solid ${BORDER}`, borderRadius:8, padding:'14px 16px' };
+  const currency = (data && data.account && data.account.currency) || 'GBP';
+  const fmtMoney = (n) => (n===null||n===undefined) ? '—' : (()=>{ try { return new Intl.NumberFormat('en-GB',{style:'currency',currency}).format(n); } catch { return `£${Number(n).toFixed(2)}`; } })();
+  const fmtNum   = (n) => (n===null||n===undefined) ? '—' : Number(n).toLocaleString('en-GB');
+
+  const emptyState = (
+    <div style={{ ...card, border:`0.5px dashed ${BORDER}`, textAlign:'center', padding:'40px 32px', color:MUTED, fontSize:14 }}>
+      Your ads will appear here once they&rsquo;re live.
+    </div>
+  );
+
+  const Heading = (
+    <div style={{ display:'flex', alignItems:'flex-end', justifyContent:'space-between', gap:12, flexWrap:'wrap' }}>
+      <div>
+        <h2 style={pageTitle()}>Facebook Ads</h2>
+        <p style={pageSub()}>Your live ad performance, straight from Facebook.</p>
+      </div>
+      {/* Window filter — read-only; changes what you see, never the ads themselves. */}
+      <div style={{ display:'inline-flex', border:`0.5px solid ${BORDER}`, borderRadius:6, overflow:'hidden', marginBottom:16 }}>
+        {FA_WINDOWS.map((w,i)=>(
+          <button key={w.key} onClick={()=>setWindow(w.key)} style={{ padding:'6px 12px', fontSize:12, cursor:'pointer', border:'none', borderLeft:i===0?'none':`0.5px solid ${BORDER}`, background:window===w.key?GREEN:'#fff', color:window===w.key?'#fff':MUTED, fontWeight:window===w.key?500:400 }}>{w.label}</button>
+        ))}
+      </div>
+    </div>
+  );
+
+  // States that don't show the stat grid: no account yet, or a Meta/network error.
+  if (!loading && data && data.no_account) {
+    return (<div>{Heading}{emptyState}</div>);
+  }
+  if (error || (!loading && data && data.ok === false)) {
+    const msg = error || (data && data.error) || 'Facebook is unavailable right now.';
+    return (
+      <div>
+        {Heading}
+        <div style={{ ...card, background:AMBER_BG, border:`0.5px solid ${AMBER}`, color:AMBER, fontSize:13 }}>{msg}</div>
+      </div>
+    );
+  }
+
+  const totals = (data && data.totals) || { spend:0, reach:0, leads:0, cost_per_lead:null };
+  const ads    = (data && Array.isArray(data.ads)) ? data.ads : [];
+  const statCell = (label, value) => (<div><div style={{ fontSize:11, color:TERTIARY_TEXT }}>{label}</div><div style={{ fontSize:14, fontWeight:500, color:TEXT }}>{value}</div></div>);
+
+  return (
+    <div>
+      {Heading}
+
+      {/* Four headline stat cards */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(150px, 1fr))', gap:12, marginBottom:14 }}>
+        <div style={card}><div style={{ fontSize:13, color:MUTED }}>Spend</div><div style={{ fontSize:24, fontWeight:500, color:TEXT }}>{loading?'…':fmtMoney(totals.spend)}</div></div>
+        <div style={card}><div style={{ fontSize:13, color:MUTED }}>Reach</div><div style={{ fontSize:24, fontWeight:500, color:TEXT }}>{loading?'…':fmtNum(totals.reach)}</div></div>
+        <div style={card}><div style={{ fontSize:13, color:MUTED }}>Leads</div><div style={{ fontSize:24, fontWeight:500, color:TEXT }}>{loading?'…':fmtNum(totals.leads)}</div></div>
+        <div style={card}><div style={{ fontSize:13, color:MUTED }}>Cost per lead</div><div style={{ fontSize:24, fontWeight:500, color:TEXT }}>{loading?'…':fmtMoney(totals.cost_per_lead)}</div></div>
+      </div>
+
+      {loading && <div style={{ fontSize:13, color:TERTIARY_TEXT, padding:'12px 0' }}>Loading your ads…</div>}
+
+      {!loading && ads.length === 0 && emptyState}
+
+      <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+        {!loading && ads.map(ad => {
+          const pill = faStatusPill(ad.effective_status, ad.status);
+          const s = ad.stats || {};
+          return (
+            <div key={ad.id} style={{ ...card, display:'flex', gap:14 }}>
+              <div style={{ width:120, height:120, flex:'none', borderRadius:8, background:'#F1EFE8', overflow:'hidden', display:'flex', alignItems:'center', justifyContent:'center' }}>
+                {ad.image_url
+                  ? <img src={ad.image_url} alt="" style={{ width:'100%', height:'100%', objectFit:'cover' }} onError={(e)=>{e.target.style.display='none';}} />
+                  : <span style={{ color:TERTIARY_TEXT, fontSize:11 }}>No image</span>}
+              </div>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
+                  <div style={{ fontWeight:500, fontSize:15, color:TEXT, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{ad.title || ad.name}</div>
+                  <span style={{ fontSize:11, padding:'3px 8px', borderRadius:6, background:pill.bg, color:pill.fg, flex:'none' }}>{pill.label}</span>
+                </div>
+                {(ad.body || ad.title) && <div style={{ fontSize:13, color:MUTED, margin:'4px 0 10px', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>{ad.body || ad.name}</div>}
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:8 }}>
+                  {statCell('Spend', fmtMoney(s.spend))}{statCell('Reach', fmtNum(s.reach))}{statCell('Leads', fmtNum(s.leads))}{statCell('Cost / lead', fmtMoney(s.cost_per_lead))}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 // ── SETTINGS PAGE ────────────────────────────────────────────────────────────
