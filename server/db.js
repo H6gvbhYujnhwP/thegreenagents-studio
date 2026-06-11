@@ -1776,3 +1776,52 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_contact_unsubscribed_all_lookup
     ON contact_unsubscribed_all(email_client_id, contact_email);
 `);
+
+// ── 21. admin_users — Studio admin STAFF accounts (Phase 1 of Sales CRM) ──────
+// The admin side historically had ONE shared login (STUDIO_USERNAME +
+// STUDIO_PASSWORD env vars). That env login STILL works and is the permanent
+// break-glass SUPER-ADMIN — it can never be locked out and always has full
+// access. These rows are ADDITIONAL named staff accounts the super-admin
+// creates, each with their own bcrypt password and a per-user access map.
+//
+// access_json: JSON object { "<section_key>": true, ... } — which sidebar
+//   sections this user may see. is_super=1 ignores access_json (full access).
+//   Section keys live in routes/admin-users.js (SECTIONS) — single source of
+//   truth for the tickbox grid.
+// disabled_at: soft-disable (keeps the row + history, blocks login). NULL = active.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS admin_users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    email TEXT,
+    password_hash TEXT NOT NULL,
+    is_super INTEGER NOT NULL DEFAULT 0,
+    access_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_login_at TEXT,
+    disabled_at TEXT
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_users_username
+    ON admin_users(LOWER(username));
+`);
+
+// ── 22. admin_sessions — SQLite-backed sessions for named staff logins ────────
+// id IS the bearer token (crypto.randomBytes(32).base64url), returned by
+// /api/auth/login and sent back as `Authorization: Bearer <token>` (or ?token=
+// for SSE) — exactly the same transport as the legacy env-password token, so
+// the frontend's existing auth plumbing is untouched. Idle 7d / absolute 30d,
+// enforced in middleware/auth.js + routes/auth.js. The env break-glass login
+// does NOT create a session row — it stays stateless as before.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS admin_sessions (
+    id TEXT PRIMARY KEY,
+    admin_user_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (admin_user_id) REFERENCES admin_users(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_admin_sessions_user
+    ON admin_sessions(admin_user_id);
+  CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires
+    ON admin_sessions(expires_at);
+`);
