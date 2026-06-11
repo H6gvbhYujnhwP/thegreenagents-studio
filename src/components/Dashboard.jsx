@@ -13,6 +13,7 @@ import StaffAccess from './StaffAccess.jsx';
 import CrmCompanies from './CrmCompanies.jsx';
 import CrmTasks from './CrmTasks.jsx';
 import CrmDeals from './CrmDeals.jsx';
+import CrmOrders from './CrmOrders.jsx';
 
 // Which section the operator is on is remembered across a browser refresh.
 // We store the current top-level view and read it back on first load, so a
@@ -28,6 +29,7 @@ const VALID_VIEWS = [
   'crm-companies',
   'crm-tasks',
   'crm-deals',
+  'crm-orders', 'crm-approvals', 'crm-purchasing',
   'apps-idyq',
   'instagram', 'tiktok', 'facebook-pixels', 'facebook-ads',
   'staff-access',
@@ -51,12 +53,15 @@ const VIEW_SECTION = {
   'crm-companies': 'crm_companies',
   'crm-tasks': 'crm_tasks',
   'crm-deals': 'crm_deals',
+  'crm-orders': 'crm_orders',
+  'crm-approvals': 'crm_approvals',
+  'crm-purchasing': 'crm_purchasing',
   'apps-idyq': 'idyq',
 };
 const VIEW_ORDER = [
   'clients', 'instagram', 'tiktok', 'facebook-pixels', 'facebook-ads',
   'email-customers', 'email-domain-health', 'email-mailboxes',
-  'portal-customers', 'crm-hot-prospects', 'crm-companies', 'crm-tasks', 'crm-deals', 'apps-idyq',
+  'portal-customers', 'crm-hot-prospects', 'crm-companies', 'crm-tasks', 'crm-deals', 'crm-orders', 'crm-approvals', 'crm-purchasing', 'apps-idyq',
 ];
 
 function isSuperUser(u) { return !u || u.is_super || u.access === 'ALL'; }
@@ -254,6 +259,17 @@ export default function Dashboard({ onLogout, user }) {
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
         <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} user={user} />
         <CrmDeals />
+      </div>
+    );
+  }
+
+  // ── CRM — Orders / Approval / Purchasing (admin) ──────────────────────────
+  if (view === 'crm-orders' || view === 'crm-approvals' || view === 'crm-purchasing') {
+    const q = view === 'crm-approvals' ? 'approval' : view === 'crm-purchasing' ? 'purchasing' : 'orders';
+    return (
+      <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} user={user} />
+        <CrmOrders user={user} queue={q} />
       </div>
     );
   }

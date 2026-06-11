@@ -31,6 +31,7 @@ export default function CrmCompanies({ user }) {
   const isSuper = !user || user.is_super || user.access === 'ALL';
   const canTasks = isSuper || !!(user && user.access && user.access.crm_tasks);
   const canDeals = isSuper || !!(user && user.access && user.access.crm_deals);
+  const canOrders = isSuper || !!(user && user.access && user.access.crm_orders);
 
   const [companies, setCompanies] = useState([]);
   const [counts, setCounts] = useState({ all: 0 });
@@ -50,6 +51,8 @@ export default function CrmCompanies({ user }) {
   const [taskModal, setTaskModal] = useState(null); // 'new' | taskObj | null
   const [deals, setDeals] = useState([]);
   const [dealModal, setDealModal] = useState(null); // 'new' | dealObj | null
+  const [orders, setOrders] = useState([]);
+  const [orderModal, setOrderModal] = useState(null); // 'new' | orderObj | null
 
   const loadContacts = useCallback(async (companyId) => {
     try { const r = await fetch('/api/crm/contacts?company_id=' + companyId); if (r.ok) { const d = await r.json(); setContacts(d.contacts || []); } } catch {}
@@ -63,7 +66,10 @@ export default function CrmCompanies({ user }) {
   const loadDeals = useCallback(async (companyId) => {
     try { const r = await fetch('/api/crm/deals?company_id=' + companyId); if (r.ok) { const d = await r.json(); setDeals(d.deals || []); } } catch {}
   }, []);
-  useEffect(() => { if (company) { loadContacts(company.id); loadHistory(company.id); if (canTasks) loadTasks(company.id); if (canDeals) loadDeals(company.id); } }, [company, canTasks, canDeals, loadContacts, loadHistory, loadTasks, loadDeals]);
+  const loadOrders = useCallback(async (companyId) => {
+    try { const r = await fetch('/api/crm/orders?company_id=' + companyId); if (r.ok) { const d = await r.json(); setOrders(d.orders || []); } } catch {}
+  }, []);
+  useEffect(() => { if (company) { loadContacts(company.id); loadHistory(company.id); if (canTasks) loadTasks(company.id); if (canDeals) loadDeals(company.id); if (canOrders) loadOrders(company.id); } }, [company, canTasks, canDeals, canOrders, loadContacts, loadHistory, loadTasks, loadDeals, loadOrders]);
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -84,7 +90,7 @@ export default function CrmCompanies({ user }) {
   }, []);
 
   async function openCompany(id) {
-    setSelectedId(id); setCompany(null); setTab('details'); setContacts([]); setHistory([]); setTasks([]); setDeals([]);
+    setSelectedId(id); setCompany(null); setTab('details'); setContacts([]); setHistory([]); setTasks([]); setDeals([]); setOrders([]);
     try { const r = await fetch('/api/crm/companies/' + id); if (r.ok) { const d = await r.json(); setCompany(d.company); } } catch {}
   }
 
@@ -136,7 +142,7 @@ export default function CrmCompanies({ user }) {
                 { key: 'history', label: 'History', on: true },
                 { key: 'tasks', label: 'Tasks', on: canTasks },
                 { key: 'deals', label: 'Deals', on: canDeals },
-                { key: 'orders', label: 'Orders', on: false },
+                { key: 'orders', label: 'Orders', on: canOrders },
               ].map(t => t.on ? (
                 <span key={t.key} onClick={() => setTab(t.key)} style={{ fontSize: 12, padding: '6px 12px', cursor: 'pointer', fontWeight: tab === t.key ? 500 : 400, color: tab === t.key ? GREEN_DARK : '#666', borderBottom: '2px solid ' + (tab === t.key ? GREEN_DARK : 'transparent') }}>{t.label}{t.key === 'contacts' && contacts.length ? ` (${contacts.length})` : ''}</span>
               ) : (
@@ -194,8 +200,15 @@ export default function CrmCompanies({ user }) {
               />
             )}
 
-            <div style={{ borderTop: '0.5px solid #eee', marginTop: 16, paddingTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: 12, color: '#aaa' }}>Orders activate as we build the next phase.</span>
+            {tab === 'orders' && (
+              <OrdersPanel
+                orders={orders}
+                onAdd={() => setOrderModal('new')}
+                onOpen={(o) => setOrderModal(o)}
+              />
+            )}
+
+            <div style={{ borderTop: '0.5px solid #eee', marginTop: 16, paddingTop: 12, display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
               <button style={{ ...btnGhost, color: '#A32D2D', borderColor: '#F0997B' }} onClick={() => removeCompany(company)}>Delete</button>
             </div>
           </div>
@@ -204,6 +217,7 @@ export default function CrmCompanies({ user }) {
         {contactModal && company && <ContactModal mode={contactModal === 'new' ? 'new' : 'edit'} contact={contactModal === 'new' ? null : contactModal} companyId={company.id} onClose={() => setContactModal(null)} onSaved={() => { setContactModal(null); loadContacts(company.id); }} />}
         {taskModal && company && <TaskModal mode={taskModal === 'new' ? 'new' : 'edit'} task={taskModal === 'new' ? null : taskModal} companyId={company.id} assignees={assignees} onClose={() => setTaskModal(null)} onSaved={() => { setTaskModal(null); loadTasks(company.id); }} />}
         {dealModal && company && <DealModal mode={dealModal === 'new' ? 'new' : 'edit'} deal={dealModal === 'new' ? null : dealModal} companyId={company.id} assignees={assignees} onClose={() => setDealModal(null)} onSaved={() => { setDealModal(null); loadDeals(company.id); loadHistory(company.id); }} />}
+        {orderModal && company && <OrderModal user={user} order={orderModal === 'new' ? null : orderModal} companyId={company.id} onClose={() => setOrderModal(null)} onSaved={() => { setOrderModal(null); loadOrders(company.id); loadHistory(company.id); }} />}
       </div>
     );
   }
@@ -719,6 +733,208 @@ export function DealModal({ mode, deal, companyId, assignees, onClose, onSaved }
           <button style={btnGhost} onClick={onClose}>Cancel</button>
           <button style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={save}>{busy ? 'Saving…' : (mode === 'new' ? 'Add deal' : 'Save changes')}</button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Orders: status pill, company Orders tab panel, and the order editor ──────
+const ORDER_STATUS = {
+  draft:             { label: 'Draft',             bg: '#F1EFE8', color: '#5b5b57' },
+  awaiting_approval: { label: 'Awaiting approval', bg: '#FAEEDA', color: '#854F0B' },
+  approved:          { label: 'Approved',          bg: '#E6F1FB', color: '#0C447C' },
+  rejected:          { label: 'Returned',          bg: '#FBE6E2', color: '#9E2A1E' },
+  purchasing:        { label: 'Purchasing',        bg: '#EDE7F6', color: '#5B21B6' },
+  completed:         { label: 'Completed',         bg: '#E1F5EE', color: '#0F6E56' },
+};
+export function OrderStatusPill({ status }) {
+  const m = ORDER_STATUS[status] || ORDER_STATUS.draft;
+  return <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 8, background: m.bg, color: m.color, fontWeight: 500 }}>{m.label}</span>;
+}
+
+function OrdersPanel({ orders, onAdd, onOpen }) {
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <span style={{ fontSize: 13, color: '#666' }}>{orders.length} order{orders.length === 1 ? '' : 's'}</span>
+        <button style={{ ...btnPrimary, height: 30, padding: '0 12px', fontSize: 12 }} onClick={onAdd}>+ New order</button>
+      </div>
+      {orders.length === 0 ? (
+        <div style={{ padding: '24px 0', textAlign: 'center', color: '#999', fontSize: 13 }}>No orders yet — write one to forward for approval.</div>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead><tr style={{ textAlign: 'left', color: '#888', fontSize: 12 }}>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}>Order</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}>Title</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500, textAlign: 'right' }}>Value</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}>Status</th>
+          </tr></thead>
+          <tbody>
+            {orders.map(o => (
+              <tr key={o.id} style={{ borderTop: '0.5px solid #eee', cursor: 'pointer' }} onClick={() => onOpen(o)}>
+                <td style={{ padding: '10px 8px', color: '#1a1a1a' }}>#{o.order_no}</td>
+                <td style={{ padding: '10px 8px', color: '#666' }}>{o.title || '—'}</td>
+                <td style={{ padding: '10px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(o.value)}</td>
+                <td style={{ padding: '10px 8px' }}><OrderStatusPill status={o.status} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+// The order editor + workflow actions. Used by the company Orders tab AND the
+// CRM → Orders / Approval / Purchasing dashboards.
+export function OrderModal({ user, order, companyId, onClose, onSaved }) {
+  const isSuper = !user || user.is_super || user.access === 'ALL';
+  const acc = (k) => isSuper || !!(user && user.access && user.access[k]);
+  const canOrders = acc('crm_orders');
+  const canPurchasing = acc('crm_purchasing');
+
+  const [full, setFull] = useState(order && order.lines ? order : null);
+  const [loading, setLoading] = useState(!!(order && order.id));
+  const [lines, setLines] = useState([{ description: '', qty: 1, unit_price: 0 }]);
+  const [title, setTitle] = useState('');
+  const [profit, setProfit] = useState('');
+  const [notes, setNotes] = useState('');
+  const [comment, setComment] = useState('');
+  const [pstatus, setPstatus] = useState('');
+  const [pnotes, setPnotes] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  function hydrate(o) {
+    setTitle(o.title || ''); setProfit(o.profit ?? ''); setNotes(o.notes || '');
+    setPstatus(o.purchasing_status || ''); setPnotes(o.purchasing_notes || '');
+    setLines(o.lines && o.lines.length ? o.lines.map(l => ({ description: l.description, qty: l.qty, unit_price: l.unit_price })) : [{ description: '', qty: 1, unit_price: 0 }]);
+  }
+  useEffect(() => {
+    let alive = true;
+    if (order && order.id) {
+      fetch('/api/crm/orders/' + order.id).then(r => r.ok ? r.json() : null).then(d => { if (alive && d && d.order) { setFull(d.order); hydrate(d.order); } setLoading(false); }).catch(() => setLoading(false));
+    } else { setLoading(false); }
+    return () => { alive = false; };
+  }, [order]);
+
+  const status = full ? full.status : 'draft';
+  const isNew = !order || !order.id;
+  const editable = isNew || ['draft', 'rejected'].includes(status);
+  const total = lines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.unit_price) || 0), 0);
+
+  function setLine(i, k, v) { setLines(ls => ls.map((l, idx) => idx === i ? { ...l, [k]: v } : l)); }
+  function addLine() { setLines(ls => [...ls, { description: '', qty: 1, unit_price: 0 }]); }
+  function removeLine(i) { setLines(ls => ls.filter((_, idx) => idx !== i)); }
+
+  async function persist() {
+    const body = { company_id: companyId, title, profit, notes, lines: lines.filter(l => (l.description || '').trim()) };
+    const r = order && order.id
+      ? await fetch('/api/crm/orders/' + order.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      : await fetch('/api/crm/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Could not save');
+    return d.order;
+  }
+  async function act(fn) { setBusy(true); setErr(''); try { await fn(); onSaved(); } catch (e) { setErr(e.message || 'Could not reach the server'); setBusy(false); } }
+  const saveDraft = () => act(async () => { await persist(); });
+  const forward = () => act(async () => { const o = await persist(); await fetch('/api/crm/orders/' + o.id + '/forward', { method: 'POST' }); });
+  const approve = () => act(async () => { await fetch('/api/crm/orders/' + order.id + '/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ comment }) }); });
+  const reject = () => act(async () => { await fetch('/api/crm/orders/' + order.id + '/reject', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ comment }) }); });
+  const sendToPurchasing = () => act(async () => { await fetch('/api/crm/orders/' + order.id + '/send-to-purchasing', { method: 'POST' }); });
+  const savePurchasing = () => act(async () => { await fetch('/api/crm/orders/' + order.id + '/purchasing', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ purchasing_status: pstatus, purchasing_notes: pnotes }) }); });
+  const complete = () => act(async () => { await fetch('/api/crm/orders/' + order.id + '/complete', { method: 'POST' }); });
+  const del = () => { if (window.confirm('Delete this order?')) act(async () => { await fetch('/api/crm/orders/' + order.id, { method: 'DELETE' }); }); };
+
+  const cell = { padding: '6px 6px', borderBottom: '0.5px solid #eee' };
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, padding: 20 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, padding: 26, width: 'min(680px, 95vw)', maxHeight: '90vh', overflow: 'auto', boxShadow: '0 4px 24px rgba(0,0,0,0.15)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <div style={{ fontSize: 16, fontWeight: 500, color: '#1a1a1a' }}>{isNew ? 'New order' : 'Order #' + full?.order_no} {full ? <OrderStatusPill status={status} /> : null}</div>
+        </div>
+
+        {loading ? <div style={{ padding: 20, color: '#888' }}>Loading…</div> : <>
+          <div style={{ marginBottom: 12 }}><label style={label}>Title (optional)</label><input style={inputStyle} value={title} onChange={e => setTitle(e.target.value)} disabled={!editable} placeholder="e.g. Q3 catalogue order" /></div>
+
+          <div style={{ fontSize: 12, fontWeight: 500, color: '#555', margin: '4px 0 6px' }}>Line items</div>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, marginBottom: 6 }}>
+            <thead><tr style={{ textAlign: 'left', color: '#999', fontSize: 11 }}>
+              <th style={{ padding: '4px 6px', fontWeight: 500 }}>Description</th>
+              <th style={{ padding: '4px 6px', fontWeight: 500, width: 60 }}>Qty</th>
+              <th style={{ padding: '4px 6px', fontWeight: 500, width: 90 }}>Unit £</th>
+              <th style={{ padding: '4px 6px', fontWeight: 500, width: 80, textAlign: 'right' }}>Total</th>
+              {editable && <th style={{ width: 24 }}></th>}
+            </tr></thead>
+            <tbody>
+              {lines.map((l, i) => (
+                <tr key={i}>
+                  <td style={cell}>{editable ? <input style={{ ...inputStyle, height: 32 }} value={l.description} onChange={e => setLine(i, 'description', e.target.value)} /> : <span>{l.description}</span>}</td>
+                  <td style={cell}>{editable ? <input type="number" min="0" step="1" style={{ ...inputStyle, height: 32 }} value={l.qty} onChange={e => setLine(i, 'qty', e.target.value)} /> : <span>{l.qty}</span>}</td>
+                  <td style={cell}>{editable ? <input type="number" min="0" step="0.01" style={{ ...inputStyle, height: 32 }} value={l.unit_price} onChange={e => setLine(i, 'unit_price', e.target.value)} /> : <span>{fmtMoney(l.unit_price)}</span>}</td>
+                  <td style={{ ...cell, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtMoney((Number(l.qty) || 0) * (Number(l.unit_price) || 0))}</td>
+                  {editable && <td style={cell}><button onClick={() => removeLine(i)} style={{ background: 'none', border: 'none', color: '#ccc', cursor: 'pointer', fontSize: 15 }}>×</button></td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {editable && <button style={{ ...btnGhost, padding: '5px 10px', fontSize: 12 }} onClick={addLine}>+ Add line</button>}
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 18, marginTop: 10, alignItems: 'center' }}>
+            <div style={{ fontSize: 13, color: '#666' }}>Order total <span style={{ fontSize: 16, fontWeight: 600, color: '#1a1a1a', marginLeft: 8 }}>{fmtMoney(total)}</span></div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 12, marginTop: 12, flexWrap: 'wrap' }}>
+            <div style={{ flex: 1, minWidth: 140 }}><label style={label}>Profit (£)</label><input type="number" step="0.01" style={inputStyle} value={profit} onChange={e => setProfit(e.target.value)} disabled={!editable} /></div>
+          </div>
+          <div style={{ marginTop: 12 }}><label style={label}>Notes</label><textarea style={{ ...inputStyle, minHeight: 56, resize: 'vertical', fontFamily: 'inherit' }} value={notes} onChange={e => setNotes(e.target.value)} disabled={!editable} /></div>
+
+          {/* Decision / purchasing context */}
+          {full && full.decision_comment && (status === 'approved' || status === 'rejected') && (
+            <div style={{ marginTop: 12, padding: '10px 12px', background: '#f7f7f4', borderRadius: 8, fontSize: 13, color: '#555' }}>
+              <strong style={{ fontWeight: 500 }}>{status === 'approved' ? 'Approved' : 'Returned'}{full.approver ? ' by ' + full.approver : ''}:</strong> {full.decision_comment}
+            </div>
+          )}
+
+          {status === 'awaiting_approval' && isSuper && (
+            <div style={{ marginTop: 14 }}>
+              <label style={label}>Decision comment (optional)</label>
+              <textarea style={{ ...inputStyle, minHeight: 50, resize: 'vertical', fontFamily: 'inherit' }} value={comment} onChange={e => setComment(e.target.value)} />
+            </div>
+          )}
+          {status === 'awaiting_approval' && !isSuper && (
+            <div style={{ marginTop: 12, fontSize: 13, color: '#854F0B', background: '#FAEEDA', padding: '10px 12px', borderRadius: 8 }}>Awaiting admin approval.</div>
+          )}
+
+          {(status === 'purchasing') && (
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: '0.5px solid #eee' }}>
+              <div style={{ fontSize: 12, fontWeight: 500, color: '#555', marginBottom: 8 }}>Purchasing</div>
+              <div style={{ marginBottom: 10 }}><label style={label}>Purchasing status</label><input style={inputStyle} value={pstatus} onChange={e => setPstatus(e.target.value)} disabled={!canPurchasing} placeholder="e.g. Ordered with supplier / Awaiting delivery" /></div>
+              <div><label style={label}>Purchasing notes</label><textarea style={{ ...inputStyle, minHeight: 50, resize: 'vertical', fontFamily: 'inherit' }} value={pnotes} onChange={e => setPnotes(e.target.value)} disabled={!canPurchasing} /></div>
+            </div>
+          )}
+          {status === 'completed' && full && full.purchasing_notes && (
+            <div style={{ marginTop: 12, padding: '10px 12px', background: '#f7f7f4', borderRadius: 8, fontSize: 13, color: '#555' }}>Purchasing: {full.purchasing_notes}</div>
+          )}
+
+          {err && <div style={{ color: '#c0392b', fontSize: 13, marginTop: 12 }}>{err}</div>}
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginTop: 18, flexWrap: 'wrap' }}>
+            <div>
+              {!isNew && editable && canOrders && <button style={{ ...btnGhost, color: '#A32D2D', borderColor: '#F0997B' }} onClick={del} disabled={busy}>Delete</button>}
+            </div>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              <button style={btnGhost} onClick={onClose}>Close</button>
+              {editable && canOrders && <button style={btnGhost} onClick={saveDraft} disabled={busy}>Save draft</button>}
+              {editable && canOrders && <button style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }} onClick={forward} disabled={busy}>Forward for approval</button>}
+              {status === 'awaiting_approval' && isSuper && <button style={{ ...btnGhost, color: '#9E2A1E', borderColor: '#F0997B' }} onClick={reject} disabled={busy}>Reject</button>}
+              {status === 'awaiting_approval' && isSuper && <button style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }} onClick={approve} disabled={busy}>Approve</button>}
+              {status === 'approved' && canOrders && <button style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }} onClick={sendToPurchasing} disabled={busy}>Send to purchasing</button>}
+              {status === 'purchasing' && canPurchasing && <button style={btnGhost} onClick={savePurchasing} disabled={busy}>Save</button>}
+              {status === 'purchasing' && canPurchasing && <button style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }} onClick={complete} disabled={busy}>Mark completed</button>}
+            </div>
+          </div>
+        </>}
       </div>
     </div>
   );

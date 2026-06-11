@@ -119,3 +119,17 @@ export function requireAccess(sectionKey) {
     next();
   };
 }
+
+/** Pass if the user has ANY of the given section keys (or is super). Used for
+ *  views readable from more than one section (e.g. the orders list, reachable
+ *  from Orders, Approval queue or Purchasing queue). */
+export function requireAnyAccess(sectionKeys) {
+  return function (req, res, next) {
+    const admin = resolveAdmin(tokenFrom(req));
+    if (!admin) return res.status(401).json({ error: 'Unauthorised' });
+    const ok = admin.access === 'ALL' || (admin.access && sectionKeys.some(k => admin.access[k]));
+    if (!ok) return res.status(403).json({ error: 'No access' });
+    req.adminUser = admin;
+    next();
+  };
+}

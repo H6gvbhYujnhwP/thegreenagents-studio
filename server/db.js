@@ -1958,3 +1958,52 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_crm_deals_company ON crm_deals(company_id);
   CREATE INDEX IF NOT EXISTS idx_crm_deals_tenant_status ON crm_deals(tenant, status);
 `);
+
+// ── 28. crm_orders + crm_order_lines — order workflow (Phase 7) ───────────────
+// An order belongs to a company and is made of line items (qty × unit_price).
+// `value` is the recomputed sum of its lines; `profit` is entered manually.
+// order_no is a per-tenant sequential number for display ("Order #3").
+//
+// Lifecycle (status):
+//   draft → awaiting_approval → approved → purchasing → completed
+//                    └────────→ rejected (back to draft for changes)
+// Approve/reject are ADMIN-ONLY (super-admin). "Send to purchasing" sits with
+// the order owner (crm_orders). Purchasing updates/complete need crm_purchasing.
+// Each step auto-logs to the company timeline. `tenant` denormalised for box
+// scoping; deleting a company removes its orders + lines.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS crm_orders (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    tenant TEXT NOT NULL,
+    order_no INTEGER,
+    title TEXT,
+    status TEXT NOT NULL DEFAULT 'draft',
+    value REAL NOT NULL DEFAULT 0,
+    profit REAL NOT NULL DEFAULT 0,
+    notes TEXT,
+    approver TEXT,
+    approved_at TEXT,
+    decision_comment TEXT,
+    purchasing_status TEXT,
+    purchasing_notes TEXT,
+    sent_to_purchasing_at TEXT,
+    completed_at TEXT,
+    created_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_crm_orders_company ON crm_orders(company_id);
+  CREATE INDEX IF NOT EXISTS idx_crm_orders_tenant_status ON crm_orders(tenant, status);
+
+  CREATE TABLE IF NOT EXISTS crm_order_lines (
+    id TEXT PRIMARY KEY,
+    order_id TEXT NOT NULL,
+    tenant TEXT NOT NULL,
+    description TEXT NOT NULL,
+    qty REAL NOT NULL DEFAULT 1,
+    unit_price REAL NOT NULL DEFAULT 0,
+    sort INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_crm_order_lines_order ON crm_order_lines(order_id);
+`);

@@ -171,6 +171,8 @@ router.delete('/:id', (req, res) => {
   db.prepare(`DELETE FROM crm_history WHERE company_id = ?`).run(row.id);
   db.prepare(`DELETE FROM crm_tasks WHERE company_id = ?`).run(row.id);
   db.prepare(`DELETE FROM crm_deals WHERE company_id = ?`).run(row.id);
+  db.prepare(`DELETE FROM crm_order_lines WHERE order_id IN (SELECT id FROM crm_orders WHERE company_id = ?)`).run(row.id);
+  db.prepare(`DELETE FROM crm_orders WHERE company_id = ?`).run(row.id);
   db.prepare(`DELETE FROM crm_companies WHERE id = ?`).run(row.id);
   res.json({ ok: true });
 });

@@ -18,6 +18,7 @@ import crmContactsRoutes from './routes/crm-contacts.js';
 import crmHistoryRoutes from './routes/crm-history.js';
 import crmTasksRoutes from './routes/crm-tasks.js';
 import crmDealsRoutes from './routes/crm-deals.js';
+import crmOrdersRoutes from './routes/crm-orders.js';
 import facebookPixelsRoutes from './routes/facebook-pixels.js';
 import facebookAdsRoutes from './routes/facebook-ads.js';
 import { metaConfigured, testConnection, META } from './services/meta-api.js';
@@ -58,6 +59,7 @@ app.use('/api/crm/contacts', crmContactsRoutes); // Sales CRM — company contac
 app.use('/api/crm/history', crmHistoryRoutes); // Sales CRM — activity timeline (requireAccess crm_companies)
 app.use('/api/crm/tasks', crmTasksRoutes); // Sales CRM — tasks (requireAccess crm_tasks)
 app.use('/api/crm/deals', crmDealsRoutes); // Sales CRM — deals/forecast (requireAccess crm_deals)
+app.use('/api/crm/orders', crmOrdersRoutes); // Sales CRM — orders/approval/purchasing workflow
 app.use('/api/clients',     clientRoutes);
 app.use('/api/campaigns',   campaignRoutes);
 app.use('/api/email/hot-prospects', hotProspectsRoutes); // CRM — admin-side Hot Prospects list (requireAuth). Mounted BEFORE /api/email so the more specific path matches first.
