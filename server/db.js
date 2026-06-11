@@ -1863,3 +1863,25 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_crm_companies_tenant_name
     ON crm_companies(tenant, LOWER(name));
 `);
+
+// ── 24. crm_contacts — people within a CRM company (Phase 3) ──────────────────
+// Multiple contacts per company. `tenant` is denormalised from the parent
+// company so every read/write stays scoped to one box without a join, and a
+// stray company_id can never leak a contact across tenants. Deleting a company
+// removes its contacts (explicit cascade in routes/crm-companies.js).
+// is_decision_maker: 0/1 — more than one contact may be flagged.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS crm_contacts (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    tenant TEXT NOT NULL,
+    name TEXT NOT NULL,
+    role TEXT,
+    email TEXT,
+    phone TEXT,
+    is_decision_maker INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_crm_contacts_company ON crm_contacts(company_id);
+`);

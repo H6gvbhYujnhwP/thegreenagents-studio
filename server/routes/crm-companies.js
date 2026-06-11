@@ -158,6 +158,7 @@ router.put('/:id', (req, res) => {
 router.delete('/:id', (req, res) => {
   const row = db.prepare(`SELECT id FROM crm_companies WHERE tenant = ? AND id = ?`).get(TENANT, req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
+  db.prepare(`DELETE FROM crm_contacts WHERE company_id = ?`).run(row.id);
   db.prepare(`DELETE FROM crm_companies WHERE id = ?`).run(row.id);
   res.json({ ok: true });
 });

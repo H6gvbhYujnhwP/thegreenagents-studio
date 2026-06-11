@@ -38,6 +38,14 @@ export default function CrmCompanies() {
   const [selectedId, setSelectedId] = useState(null);
   const [company, setCompany] = useState(null); // profile
   const [modal, setModal] = useState(null); // 'new' | companyObj | null
+  const [tab, setTab] = useState('details');
+  const [contacts, setContacts] = useState([]);
+  const [contactModal, setContactModal] = useState(null); // 'new' | contactObj | null
+
+  const loadContacts = useCallback(async (companyId) => {
+    try { const r = await fetch('/api/crm/contacts?company_id=' + companyId); if (r.ok) { const d = await r.json(); setContacts(d.contacts || []); } } catch {}
+  }, []);
+  useEffect(() => { if (company) loadContacts(company.id); }, [company, loadContacts]);
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -58,7 +66,7 @@ export default function CrmCompanies() {
   }, []);
 
   async function openCompany(id) {
-    setSelectedId(id); setCompany(null);
+    setSelectedId(id); setCompany(null); setTab('details'); setContacts([]);
     try { const r = await fetch('/api/crm/companies/' + id); if (r.ok) { const d = await r.json(); setCompany(d.company); } } catch {}
   }
 
@@ -104,29 +112,51 @@ export default function CrmCompanies() {
             </div>
 
             <div style={{ display: 'flex', gap: 4, borderBottom: '0.5px solid #eee', margin: '16px 0 16px', flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 12, padding: '6px 12px', color: GREEN_DARK, borderBottom: '2px solid ' + GREEN_DARK, fontWeight: 500 }}>Details</span>
-              {['Contacts', 'History', 'Tasks', 'Deals', 'Orders'].map(t => <span key={t} style={{ fontSize: 12, padding: '6px 12px', color: '#bbb' }}>{t}</span>)}
+              {[
+                { key: 'details', label: 'Details', on: true },
+                { key: 'contacts', label: 'Contacts', on: true },
+                { key: 'history', label: 'History', on: false },
+                { key: 'tasks', label: 'Tasks', on: false },
+                { key: 'deals', label: 'Deals', on: false },
+                { key: 'orders', label: 'Orders', on: false },
+              ].map(t => t.on ? (
+                <span key={t.key} onClick={() => setTab(t.key)} style={{ fontSize: 12, padding: '6px 12px', cursor: 'pointer', fontWeight: tab === t.key ? 500 : 400, color: tab === t.key ? GREEN_DARK : '#666', borderBottom: '2px solid ' + (tab === t.key ? GREEN_DARK : 'transparent') }}>{t.label}{t.key === 'contacts' && contacts.length ? ` (${contacts.length})` : ''}</span>
+              ) : (
+                <span key={t.key} style={{ fontSize: 12, padding: '6px 12px', color: '#bbb' }}>{t.label}</span>
+              ))}
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '8px 24px' }}>
-              <Field label="Website" value={company.website} />
-              <Field label="Phone" value={company.phone} />
-              <Field label="Address" value={[company.address, company.town, company.postcode].filter(Boolean).join(', ')} />
-              <Field label="Category / industry" value={company.category} />
-              <Field label="Source" value={company.source} />
-            </div>
-            <div style={{ marginTop: 6 }}>
-              <div style={{ fontSize: 12, color: '#999', marginBottom: 2 }}>Notes</div>
-              <div style={{ fontSize: 13, color: '#333', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{company.notes || '—'}</div>
-            </div>
+            {tab === 'details' && <>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '8px 24px' }}>
+                <Field label="Website" value={company.website} />
+                <Field label="Phone" value={company.phone} />
+                <Field label="Address" value={[company.address, company.town, company.postcode].filter(Boolean).join(', ')} />
+                <Field label="Category / industry" value={company.category} />
+                <Field label="Source" value={company.source} />
+              </div>
+              <div style={{ marginTop: 6 }}>
+                <div style={{ fontSize: 12, color: '#999', marginBottom: 2 }}>Notes</div>
+                <div style={{ fontSize: 13, color: '#333', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{company.notes || '—'}</div>
+              </div>
+            </>}
+
+            {tab === 'contacts' && (
+              <ContactsPanel
+                contacts={contacts}
+                onAdd={() => setContactModal('new')}
+                onEdit={(c) => setContactModal(c)}
+                onDelete={async (c) => { if (window.confirm(`Remove ${c.name}?`)) { await fetch('/api/crm/contacts/' + c.id, { method: 'DELETE' }); loadContacts(company.id); } }}
+              />
+            )}
 
             <div style={{ borderTop: '0.5px solid #eee', marginTop: 16, paddingTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: 12, color: '#aaa' }}>Contacts, History, Tasks, Deals and Orders activate as we build the later phases.</span>
+              <span style={{ fontSize: 12, color: '#aaa' }}>History, Tasks, Deals and Orders activate as we build the later phases.</span>
               <button style={{ ...btnGhost, color: '#A32D2D', borderColor: '#F0997B' }} onClick={() => removeCompany(company)}>Delete</button>
             </div>
           </div>
         )}
         {modal && <CompanyModal mode="edit" company={modal} assignees={assignees} onClose={() => setModal(null)} onSaved={(c) => { setModal(null); setCompany(c); }} />}
+        {contactModal && company && <ContactModal mode={contactModal === 'new' ? 'new' : 'edit'} contact={contactModal === 'new' ? null : contactModal} companyId={company.id} onClose={() => setContactModal(null)} onSaved={() => { setContactModal(null); loadContacts(company.id); }} />}
       </div>
     );
   }
@@ -260,6 +290,93 @@ function CompanyModal({ mode, company, assignees, onClose, onSaved }) {
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
           <button style={btnGhost} onClick={onClose}>Cancel</button>
           <button style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={save}>{busy ? 'Saving…' : (mode === 'new' ? 'Add company' : 'Save changes')}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Contacts tab panel ────────────────────────────────────────────────────
+function ContactsPanel({ contacts, onAdd, onEdit, onDelete }) {
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <span style={{ fontSize: 13, color: '#666' }}>{contacts.length} contact{contacts.length === 1 ? '' : 's'}</span>
+        <button style={{ ...btnPrimary, height: 30, padding: '0 12px', fontSize: 12 }} onClick={onAdd}>+ Add contact</button>
+      </div>
+      {contacts.length === 0 ? (
+        <div style={{ padding: '24px 0', textAlign: 'center', color: '#999', fontSize: 13 }}>No contacts yet — add the people you deal with at this company.</div>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead><tr style={{ textAlign: 'left', color: '#888', fontSize: 12 }}>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}>Name</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}>Role</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}>Email</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}>Phone</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}></th>
+          </tr></thead>
+          <tbody>
+            {contacts.map(c => (
+              <tr key={c.id} style={{ borderTop: '0.5px solid #eee' }}>
+                <td style={{ padding: '10px 8px', color: '#1a1a1a' }}>{c.name}{c.is_decision_maker ? <span style={{ fontSize: 10, padding: '2px 7px', borderRadius: 8, background: '#E1F5EE', color: GREEN_DARK, fontWeight: 500, marginLeft: 8 }}>Decision-maker</span> : null}</td>
+                <td style={{ padding: '10px 8px', color: '#666' }}>{c.role || '—'}</td>
+                <td style={{ padding: '10px 8px', color: '#666' }}>{c.email || '—'}</td>
+                <td style={{ padding: '10px 8px', color: '#666' }}>{c.phone || '—'}</td>
+                <td style={{ padding: '10px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                  <button style={{ ...btnGhost, padding: '4px 10px' }} onClick={() => onEdit(c)}>Edit</button>
+                  <button style={{ ...btnGhost, padding: '4px 10px', marginLeft: 6, color: '#A32D2D', borderColor: '#F0997B' }} onClick={() => onDelete(c)}>Remove</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+// ── Add / edit contact modal ──────────────────────────────────────────────
+function ContactModal({ mode, contact, companyId, onClose, onSaved }) {
+  const [f, setF] = useState({
+    name: contact?.name || '', role: contact?.role || '', email: contact?.email || '',
+    phone: contact?.phone || '', is_decision_maker: contact ? !!contact.is_decision_maker : false,
+  });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const set = (k) => (e) => setF(s => ({ ...s, [k]: e.target.value }));
+
+  async function save() {
+    if (!f.name.trim()) { setErr('Contact name is required'); return; }
+    setBusy(true); setErr('');
+    try {
+      const body = { ...f, company_id: companyId };
+      const r = mode === 'new'
+        ? await fetch('/api/crm/contacts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        : await fetch('/api/crm/contacts/' + contact.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const d = await r.json();
+      if (!r.ok) { setErr(d.error || 'Could not save'); setBusy(false); return; }
+      onSaved();
+    } catch { setErr('Could not reach the server'); setBusy(false); }
+  }
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, padding: 20 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, padding: 26, width: 'min(520px, 94vw)', maxHeight: '88vh', overflow: 'auto', boxShadow: '0 4px 24px rgba(0,0,0,0.15)' }}>
+        <div style={{ fontSize: 16, fontWeight: 500, color: '#1a1a1a', marginBottom: 16 }}>{mode === 'new' ? 'Add contact' : 'Edit contact'}</div>
+        <div style={{ marginBottom: 12 }}><label style={label}>Name *</label><input style={inputStyle} value={f.name} onChange={set('name')} autoFocus /></div>
+        <div style={{ marginBottom: 12 }}><label style={label}>Role / job title</label><input style={inputStyle} value={f.role} onChange={set('role')} /></div>
+        <div style={{ display: 'flex', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 150 }}><label style={label}>Email</label><input style={inputStyle} value={f.email} onChange={set('email')} /></div>
+          <div style={{ flex: 1, minWidth: 150 }}><label style={label}>Phone</label><input style={inputStyle} value={f.phone} onChange={set('phone')} /></div>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 14, cursor: 'pointer', marginBottom: 4 }}>
+          <input type="checkbox" checked={f.is_decision_maker} onChange={e => setF(s => ({ ...s, is_decision_maker: e.target.checked }))} style={{ accentColor: GREEN_DARK, width: 16, height: 16 }} />
+          Decision-maker
+        </label>
+        {err && <div style={{ color: '#c0392b', fontSize: 13, marginTop: 10 }}>{err}</div>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 18 }}>
+          <button style={btnGhost} onClick={onClose}>Cancel</button>
+          <button style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={save}>{busy ? 'Saving…' : (mode === 'new' ? 'Add contact' : 'Save changes')}</button>
         </div>
       </div>
     </div>
