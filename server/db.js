@@ -1906,3 +1906,27 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_crm_history_company ON crm_history(company_id, created_at DESC);
 `);
+
+// ── 26. crm_tasks — sales tasks per CRM company (Phase 5) ─────────────────────
+// A task belongs to a company and is assigned to a staff member (assignee_id:
+// admin_users.id | '__super__' | NULL). `tenant` denormalised for box scoping.
+// priority: low | normal | high. status: open | done (completed_at stamped on
+// completion). Completing a task auto-logs a line to that company's timeline.
+// Deleting a company removes its tasks (cascade in routes/crm-companies.js).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS crm_tasks (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    tenant TEXT NOT NULL,
+    title TEXT NOT NULL,
+    assignee_id TEXT,
+    due_date TEXT,
+    priority TEXT NOT NULL DEFAULT 'normal',
+    status TEXT NOT NULL DEFAULT 'open',
+    completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_crm_tasks_company ON crm_tasks(company_id);
+  CREATE INDEX IF NOT EXISTS idx_crm_tasks_tenant_status ON crm_tasks(tenant, status, due_date);
+`);

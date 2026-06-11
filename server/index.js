@@ -16,6 +16,7 @@ import adminUsersRoutes from './routes/admin-users.js';
 import crmCompaniesRoutes from './routes/crm-companies.js';
 import crmContactsRoutes from './routes/crm-contacts.js';
 import crmHistoryRoutes from './routes/crm-history.js';
+import crmTasksRoutes from './routes/crm-tasks.js';
 import facebookPixelsRoutes from './routes/facebook-pixels.js';
 import facebookAdsRoutes from './routes/facebook-ads.js';
 import { metaConfigured, testConnection, META } from './services/meta-api.js';
@@ -54,6 +55,7 @@ app.use('/api/admin-users', adminUsersRoutes); // Studio staff accounts + per-se
 app.use('/api/crm/companies', crmCompaniesRoutes); // Sales CRM — company records (requireAccess crm_companies)
 app.use('/api/crm/contacts', crmContactsRoutes); // Sales CRM — company contacts (requireAccess crm_companies)
 app.use('/api/crm/history', crmHistoryRoutes); // Sales CRM — activity timeline (requireAccess crm_companies)
+app.use('/api/crm/tasks', crmTasksRoutes); // Sales CRM — tasks (requireAccess crm_tasks)
 app.use('/api/clients',     clientRoutes);
 app.use('/api/campaigns',   campaignRoutes);
 app.use('/api/email/hot-prospects', hotProspectsRoutes); // CRM — admin-side Hot Prospects list (requireAuth). Mounted BEFORE /api/email so the more specific path matches first.

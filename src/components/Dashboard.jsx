@@ -11,6 +11,7 @@ import FacebookPixels from './FacebookPixels.jsx';
 import FacebookAds from './FacebookAds.jsx';
 import StaffAccess from './StaffAccess.jsx';
 import CrmCompanies from './CrmCompanies.jsx';
+import CrmTasks from './CrmTasks.jsx';
 
 // Which section the operator is on is remembered across a browser refresh.
 // We store the current top-level view and read it back on first load, so a
@@ -24,6 +25,7 @@ const VALID_VIEWS = [
   'portal-customers',
   'crm-hot-prospects',
   'crm-companies',
+  'crm-tasks',
   'apps-idyq',
   'instagram', 'tiktok', 'facebook-pixels', 'facebook-ads',
   'staff-access',
@@ -45,12 +47,13 @@ const VIEW_SECTION = {
   'portal-customers': 'portal_customers',
   'crm-hot-prospects': 'email_hot_prospects',
   'crm-companies': 'crm_companies',
+  'crm-tasks': 'crm_tasks',
   'apps-idyq': 'idyq',
 };
 const VIEW_ORDER = [
   'clients', 'instagram', 'tiktok', 'facebook-pixels', 'facebook-ads',
   'email-customers', 'email-domain-health', 'email-mailboxes',
-  'portal-customers', 'crm-hot-prospects', 'crm-companies', 'apps-idyq',
+  'portal-customers', 'crm-hot-prospects', 'crm-companies', 'crm-tasks', 'apps-idyq',
 ];
 
 function isSuperUser(u) { return !u || u.is_super || u.access === 'ALL'; }
@@ -227,7 +230,17 @@ export default function Dashboard({ onLogout, user }) {
     return (
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
         <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} user={user} />
-        <CrmCompanies />
+        <CrmCompanies user={user} />
+      </div>
+    );
+  }
+
+  // ── CRM — Tasks dashboard (admin) ─────────────────────────────────────────
+  if (view === 'crm-tasks') {
+    return (
+      <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} user={user} />
+        <CrmTasks />
       </div>
     );
   }

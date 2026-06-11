@@ -169,6 +169,7 @@ router.delete('/:id', (req, res) => {
   if (!row) return res.status(404).json({ error: 'Not found' });
   db.prepare(`DELETE FROM crm_contacts WHERE company_id = ?`).run(row.id);
   db.prepare(`DELETE FROM crm_history WHERE company_id = ?`).run(row.id);
+  db.prepare(`DELETE FROM crm_tasks WHERE company_id = ?`).run(row.id);
   db.prepare(`DELETE FROM crm_companies WHERE id = ?`).run(row.id);
   res.json({ ok: true });
 });

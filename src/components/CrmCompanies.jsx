@@ -27,7 +27,10 @@ function Pill({ status }) {
   return <span style={{ fontSize: 11, padding: '2px 9px', borderRadius: 8, background: s.bg, color: s.color, fontWeight: 500 }}>{s.label}</span>;
 }
 
-export default function CrmCompanies() {
+export default function CrmCompanies({ user }) {
+  const isSuper = !user || user.is_super || user.access === 'ALL';
+  const canTasks = isSuper || !!(user && user.access && user.access.crm_tasks);
+
   const [companies, setCompanies] = useState([]);
   const [counts, setCounts] = useState({ all: 0 });
   const [statusFilter, setStatusFilter] = useState('all');
@@ -42,6 +45,8 @@ export default function CrmCompanies() {
   const [contacts, setContacts] = useState([]);
   const [contactModal, setContactModal] = useState(null); // 'new' | contactObj | null
   const [history, setHistory] = useState([]);
+  const [tasks, setTasks] = useState([]);
+  const [taskModal, setTaskModal] = useState(null); // 'new' | taskObj | null
 
   const loadContacts = useCallback(async (companyId) => {
     try { const r = await fetch('/api/crm/contacts?company_id=' + companyId); if (r.ok) { const d = await r.json(); setContacts(d.contacts || []); } } catch {}
@@ -49,7 +54,10 @@ export default function CrmCompanies() {
   const loadHistory = useCallback(async (companyId) => {
     try { const r = await fetch('/api/crm/history?company_id=' + companyId); if (r.ok) { const d = await r.json(); setHistory(d.history || []); } } catch {}
   }, []);
-  useEffect(() => { if (company) { loadContacts(company.id); loadHistory(company.id); } }, [company, loadContacts, loadHistory]);
+  const loadTasks = useCallback(async (companyId) => {
+    try { const r = await fetch('/api/crm/tasks?company_id=' + companyId); if (r.ok) { const d = await r.json(); setTasks(d.tasks || []); } } catch {}
+  }, []);
+  useEffect(() => { if (company) { loadContacts(company.id); loadHistory(company.id); if (canTasks) loadTasks(company.id); } }, [company, canTasks, loadContacts, loadHistory, loadTasks]);
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -70,7 +78,7 @@ export default function CrmCompanies() {
   }, []);
 
   async function openCompany(id) {
-    setSelectedId(id); setCompany(null); setTab('details'); setContacts([]); setHistory([]);
+    setSelectedId(id); setCompany(null); setTab('details'); setContacts([]); setHistory([]); setTasks([]);
     try { const r = await fetch('/api/crm/companies/' + id); if (r.ok) { const d = await r.json(); setCompany(d.company); } } catch {}
   }
 
@@ -120,7 +128,7 @@ export default function CrmCompanies() {
                 { key: 'details', label: 'Details', on: true },
                 { key: 'contacts', label: 'Contacts', on: true },
                 { key: 'history', label: 'History', on: true },
-                { key: 'tasks', label: 'Tasks', on: false },
+                { key: 'tasks', label: 'Tasks', on: canTasks },
                 { key: 'deals', label: 'Deals', on: false },
                 { key: 'orders', label: 'Orders', on: false },
               ].map(t => t.on ? (
@@ -161,14 +169,25 @@ export default function CrmCompanies() {
               />
             )}
 
+            {tab === 'tasks' && (
+              <TasksPanel
+                tasks={tasks}
+                onAdd={() => setTaskModal('new')}
+                onEdit={(t) => setTaskModal(t)}
+                onToggle={async (t) => { await fetch('/api/crm/tasks/' + t.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: t.status === 'done' ? 'open' : 'done' }) }); loadTasks(company.id); loadHistory(company.id); }}
+                onDelete={async (t) => { if (window.confirm('Delete this task?')) { await fetch('/api/crm/tasks/' + t.id, { method: 'DELETE' }); loadTasks(company.id); } }}
+              />
+            )}
+
             <div style={{ borderTop: '0.5px solid #eee', marginTop: 16, paddingTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: 12, color: '#aaa' }}>Tasks, Deals and Orders activate as we build the later phases.</span>
+              <span style={{ fontSize: 12, color: '#aaa' }}>Deals and Orders activate as we build the later phases.</span>
               <button style={{ ...btnGhost, color: '#A32D2D', borderColor: '#F0997B' }} onClick={() => removeCompany(company)}>Delete</button>
             </div>
           </div>
         )}
         {modal && <CompanyModal mode="edit" company={modal} assignees={assignees} onClose={() => setModal(null)} onSaved={(c) => { setModal(null); setCompany(c); }} />}
         {contactModal && company && <ContactModal mode={contactModal === 'new' ? 'new' : 'edit'} contact={contactModal === 'new' ? null : contactModal} companyId={company.id} onClose={() => setContactModal(null)} onSaved={() => { setContactModal(null); loadContacts(company.id); }} />}
+        {taskModal && company && <TaskModal mode={taskModal === 'new' ? 'new' : 'edit'} task={taskModal === 'new' ? null : taskModal} companyId={company.id} assignees={assignees} onClose={() => setTaskModal(null)} onSaved={() => { setTaskModal(null); loadTasks(company.id); }} />}
       </div>
     );
   }
@@ -447,6 +466,122 @@ function HistoryPanel({ history, onAdd, onDelete }) {
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Tasks tab panel + shared task bits ────────────────────────────────────
+const PRIORITY_META = {
+  high:   { label: 'High',   bg: '#FBE6E2', color: '#9E2A1E' },
+  normal: { label: 'Normal', bg: '#E6F1FB', color: '#0C447C' },
+  low:    { label: 'Low',    bg: '#F1EFE8', color: '#5b5b57' },
+};
+export function PriorityPill({ priority }) {
+  const m = PRIORITY_META[priority] || PRIORITY_META.normal;
+  return <span style={{ fontSize: 10, padding: '2px 7px', borderRadius: 8, background: m.bg, color: m.color, fontWeight: 500 }}>{m.label}</span>;
+}
+export function fmtDue(due, overdue) {
+  if (!due) return { text: '—', over: false };
+  let text = due;
+  try { text = new Date(due + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }); } catch {}
+  return { text: overdue ? text + ' (overdue)' : text, over: !!overdue };
+}
+
+function TasksPanel({ tasks, onAdd, onEdit, onToggle, onDelete }) {
+  const open = tasks.filter(t => t.status !== 'done').length;
+  const done = tasks.length - open;
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <span style={{ fontSize: 13, color: '#666' }}>{open} open · {done} done</span>
+        <button style={{ ...btnPrimary, height: 30, padding: '0 12px', fontSize: 12 }} onClick={onAdd}>+ Add task</button>
+      </div>
+      {tasks.length === 0 ? (
+        <div style={{ padding: '24px 0', textAlign: 'center', color: '#999', fontSize: 13 }}>No tasks yet — add one to track the next step.</div>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead><tr style={{ textAlign: 'left', color: '#888', fontSize: 12 }}>
+            <th style={{ padding: '8px 8px', width: 26 }}></th>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}>Task</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}>Assignee</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}>Due</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}>Priority</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}></th>
+          </tr></thead>
+          <tbody>
+            {tasks.map(t => {
+              const done = t.status === 'done';
+              const due = fmtDue(t.due_date, t.overdue);
+              return (
+                <tr key={t.id} style={{ borderTop: '0.5px solid #eee' }}>
+                  <td style={{ padding: '10px 8px' }}><input type="checkbox" checked={done} onChange={() => onToggle(t)} style={{ width: 15, height: 15, accentColor: GREEN_DARK }} /></td>
+                  <td style={{ padding: '10px 8px', color: done ? '#aaa' : '#1a1a1a', textDecoration: done ? 'line-through' : 'none' }}>{t.title}</td>
+                  <td style={{ padding: '10px 8px', color: '#888' }}>{t.assignee_name || '—'}</td>
+                  <td style={{ padding: '10px 8px', color: due.over ? '#9E2A1E' : '#888', fontWeight: due.over ? 500 : 400 }}>{due.text}</td>
+                  <td style={{ padding: '10px 8px' }}>{done ? null : <PriorityPill priority={t.priority} />}</td>
+                  <td style={{ padding: '10px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <button style={{ ...btnGhost, padding: '4px 10px' }} onClick={() => onEdit(t)}>Edit</button>
+                    <button style={{ ...btnGhost, padding: '4px 10px', marginLeft: 6, color: '#A32D2D', borderColor: '#F0997B' }} onClick={() => onDelete(t)}>Remove</button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+// ── Add / edit task modal ─────────────────────────────────────────────────
+export function TaskModal({ mode, task, companyId, assignees, onClose, onSaved }) {
+  const [f, setF] = useState({
+    title: task?.title || '', assignee_id: task?.assignee_id || '',
+    due_date: task?.due_date || '', priority: task?.priority || 'normal',
+  });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const set = (k) => (e) => setF(s => ({ ...s, [k]: e.target.value }));
+
+  async function save() {
+    if (!f.title.trim()) { setErr('Task title is required'); return; }
+    setBusy(true); setErr('');
+    try {
+      const body = { ...f, company_id: companyId, assignee_id: f.assignee_id || null };
+      const r = mode === 'new'
+        ? await fetch('/api/crm/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        : await fetch('/api/crm/tasks/' + task.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const d = await r.json();
+      if (!r.ok) { setErr(d.error || 'Could not save'); setBusy(false); return; }
+      onSaved();
+    } catch { setErr('Could not reach the server'); setBusy(false); }
+  }
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, padding: 20 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, padding: 26, width: 'min(520px, 94vw)', maxHeight: '88vh', overflow: 'auto', boxShadow: '0 4px 24px rgba(0,0,0,0.15)' }}>
+        <div style={{ fontSize: 16, fontWeight: 500, color: '#1a1a1a', marginBottom: 16 }}>{mode === 'new' ? 'Add task' : 'Edit task'}</div>
+        <div style={{ marginBottom: 12 }}><label style={label}>Task *</label><input style={inputStyle} value={f.title} onChange={set('title')} autoFocus placeholder="e.g. Send catalogue pricing" /></div>
+        <div style={{ display: 'flex', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 140 }}><label style={label}>Assignee</label>
+            <select style={{ ...inputStyle, height: 38 }} value={f.assignee_id} onChange={set('assignee_id')}>
+              <option value="">Unassigned</option>
+              {(assignees || []).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </div>
+          <div style={{ flex: 1, minWidth: 140 }}><label style={label}>Due date</label><input type="date" style={{ ...inputStyle, height: 38 }} value={f.due_date} onChange={set('due_date')} /></div>
+          <div style={{ flex: 1, minWidth: 110 }}><label style={label}>Priority</label>
+            <select style={{ ...inputStyle, height: 38 }} value={f.priority} onChange={set('priority')}>
+              <option value="low">Low</option><option value="normal">Normal</option><option value="high">High</option>
+            </select>
+          </div>
+        </div>
+        {err && <div style={{ color: '#c0392b', fontSize: 13, marginBottom: 10 }}>{err}</div>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+          <button style={btnGhost} onClick={onClose}>Cancel</button>
+          <button style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={save}>{busy ? 'Saving…' : (mode === 'new' ? 'Add task' : 'Save changes')}</button>
+        </div>
+      </div>
     </div>
   );
 }
