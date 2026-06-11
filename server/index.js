@@ -13,6 +13,7 @@ import portalRoutes from './routes/portal.js';
 import idyqBridgeRoutes from './routes/idyq-bridge.js';
 import hotProspectsRoutes from './routes/hot-prospects.js';
 import adminUsersRoutes from './routes/admin-users.js';
+import crmCompaniesRoutes from './routes/crm-companies.js';
 import facebookPixelsRoutes from './routes/facebook-pixels.js';
 import facebookAdsRoutes from './routes/facebook-ads.js';
 import { metaConfigured, testConnection, META } from './services/meta-api.js';
@@ -48,6 +49,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 app.use('/api/auth',        authRoutes);
 app.use('/api/admin-users', adminUsersRoutes); // Studio staff accounts + per-section access (super-admin only)
+app.use('/api/crm/companies', crmCompaniesRoutes); // Sales CRM — company records (requireAccess crm_companies)
 app.use('/api/clients',     clientRoutes);
 app.use('/api/campaigns',   campaignRoutes);
 app.use('/api/email/hot-prospects', hotProspectsRoutes); // CRM — admin-side Hot Prospects list (requireAuth). Mounted BEFORE /api/email so the more specific path matches first.

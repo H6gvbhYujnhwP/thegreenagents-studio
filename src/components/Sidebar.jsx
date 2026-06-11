@@ -13,7 +13,7 @@ export default function Sidebar({ onLogout, activeView, onNavigate, user }) {
   const showSocial = can('linkedin_posts') || can('instagram') || can('tiktok') || can('meta_pixels') || can('facebook_ads');
   const showEmail  = can('customers') || can('domain_health') || can('mailboxes');
   const showPortal = can('portal_customers');
-  const showCrm    = can('email_hot_prospects');
+  const showCrm    = can('email_hot_prospects') || can('crm_companies');
   const showApp    = can('idyq');
   // Live prospect-count badge for the Mailboxes menu item.
   // Refreshes every 30s while the app is open. Gracefully handles failure
@@ -110,7 +110,8 @@ export default function Sidebar({ onLogout, activeView, onNavigate, user }) {
           {/* CRM — the section heading makes it cheap to add more entries later
               (Sales CRM screens land here as later phases ship). */}
           <div style={SECTION}>CRM</div>
-          <SubItem id="crm-hot-prospects"   label="E-Mail Campaign Hot Prospects" active={activeView==='crm-hot-prospects'} onNavigate={onNavigate} icon={<HotProspectsIcon />} badge={hotProspectsDue} badgeUrgent />
+          {can('crm_companies')      && <SubItem id="crm-companies"      label="Sales CRM"                     active={activeView==='crm-companies'}     onNavigate={onNavigate} icon={<UsersIcon />} />}
+          {can('email_hot_prospects') && <SubItem id="crm-hot-prospects"   label="E-Mail Campaign Hot Prospects" active={activeView==='crm-hot-prospects'} onNavigate={onNavigate} icon={<HotProspectsIcon />} badge={hotProspectsDue} badgeUrgent />}
         </>}
 
         {showApp && <>

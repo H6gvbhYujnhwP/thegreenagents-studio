@@ -1825,3 +1825,41 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires
     ON admin_sessions(expires_at);
 `);
+
+// ── 23. crm_companies — Sales CRM company records (Phase 2) ───────────────────
+// The CENTRE of the Sales CRM. Everything else (contacts, history, tasks,
+// deals, orders — later phases) hangs off a company row.
+//
+// MULTI-TENANT by design: `tenant` is the sealed box this row belongs to.
+//   'tga'                 → The Green Agents' own pipeline (built first).
+//   <email_clients.id>    → a customer's own private CRM (final phase).
+// Every read/write is scoped by tenant so boxes never see each other.
+//
+// status: 'suspect' | 'prospect' | 'hot_prospect' | 'customer' (the sales stage).
+// account_manager_id: who owns the company — an admin_users.id, the literal
+//   '__super__' (the break-glass super-admin / "you"), or NULL (unassigned).
+//   Resolved to a display name at read time; survives staff deletion (shows
+//   "Unassigned" if the owner row is later removed — just reassign).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS crm_companies (
+    id TEXT PRIMARY KEY,
+    tenant TEXT NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'suspect',
+    account_manager_id TEXT,
+    website TEXT,
+    phone TEXT,
+    address TEXT,
+    town TEXT,
+    postcode TEXT,
+    category TEXT,
+    source TEXT,
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_crm_companies_tenant_status
+    ON crm_companies(tenant, status);
+  CREATE INDEX IF NOT EXISTS idx_crm_companies_tenant_name
+    ON crm_companies(tenant, LOWER(name));
+`);
