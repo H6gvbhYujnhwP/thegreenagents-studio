@@ -1930,3 +1930,31 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_crm_tasks_company ON crm_tasks(company_id);
   CREATE INDEX IF NOT EXISTS idx_crm_tasks_tenant_status ON crm_tasks(tenant, status, due_date);
 `);
+
+// ── 27. crm_deals — sales deals / forecast per CRM company (Phase 6) ──────────
+// A deal belongs to a company. Per the agreed model every deal can carry BOTH
+// a one-off value and a recurring monthly value. profit is entered manually
+// (no fixed margin formula yet). likelihood is 0–100 (%). status open|won|lost;
+// closed_at stamped when it leaves 'open'. owner_id: admin_users.id |
+// '__super__' | NULL. Forecast tiles weight ONLY open deals by likelihood.
+// `tenant` denormalised for box scoping. Deleting a company removes its deals.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS crm_deals (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    tenant TEXT NOT NULL,
+    title TEXT NOT NULL,
+    one_off_value REAL NOT NULL DEFAULT 0,
+    monthly_value REAL NOT NULL DEFAULT 0,
+    profit REAL NOT NULL DEFAULT 0,
+    likelihood INTEGER NOT NULL DEFAULT 0,
+    expected_close TEXT,
+    owner_id TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    closed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_crm_deals_company ON crm_deals(company_id);
+  CREATE INDEX IF NOT EXISTS idx_crm_deals_tenant_status ON crm_deals(tenant, status);
+`);

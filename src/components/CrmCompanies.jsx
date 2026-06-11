@@ -30,6 +30,7 @@ function Pill({ status }) {
 export default function CrmCompanies({ user }) {
   const isSuper = !user || user.is_super || user.access === 'ALL';
   const canTasks = isSuper || !!(user && user.access && user.access.crm_tasks);
+  const canDeals = isSuper || !!(user && user.access && user.access.crm_deals);
 
   const [companies, setCompanies] = useState([]);
   const [counts, setCounts] = useState({ all: 0 });
@@ -47,6 +48,8 @@ export default function CrmCompanies({ user }) {
   const [history, setHistory] = useState([]);
   const [tasks, setTasks] = useState([]);
   const [taskModal, setTaskModal] = useState(null); // 'new' | taskObj | null
+  const [deals, setDeals] = useState([]);
+  const [dealModal, setDealModal] = useState(null); // 'new' | dealObj | null
 
   const loadContacts = useCallback(async (companyId) => {
     try { const r = await fetch('/api/crm/contacts?company_id=' + companyId); if (r.ok) { const d = await r.json(); setContacts(d.contacts || []); } } catch {}
@@ -57,7 +60,10 @@ export default function CrmCompanies({ user }) {
   const loadTasks = useCallback(async (companyId) => {
     try { const r = await fetch('/api/crm/tasks?company_id=' + companyId); if (r.ok) { const d = await r.json(); setTasks(d.tasks || []); } } catch {}
   }, []);
-  useEffect(() => { if (company) { loadContacts(company.id); loadHistory(company.id); if (canTasks) loadTasks(company.id); } }, [company, canTasks, loadContacts, loadHistory, loadTasks]);
+  const loadDeals = useCallback(async (companyId) => {
+    try { const r = await fetch('/api/crm/deals?company_id=' + companyId); if (r.ok) { const d = await r.json(); setDeals(d.deals || []); } } catch {}
+  }, []);
+  useEffect(() => { if (company) { loadContacts(company.id); loadHistory(company.id); if (canTasks) loadTasks(company.id); if (canDeals) loadDeals(company.id); } }, [company, canTasks, canDeals, loadContacts, loadHistory, loadTasks, loadDeals]);
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -78,7 +84,7 @@ export default function CrmCompanies({ user }) {
   }, []);
 
   async function openCompany(id) {
-    setSelectedId(id); setCompany(null); setTab('details'); setContacts([]); setHistory([]); setTasks([]);
+    setSelectedId(id); setCompany(null); setTab('details'); setContacts([]); setHistory([]); setTasks([]); setDeals([]);
     try { const r = await fetch('/api/crm/companies/' + id); if (r.ok) { const d = await r.json(); setCompany(d.company); } } catch {}
   }
 
@@ -129,7 +135,7 @@ export default function CrmCompanies({ user }) {
                 { key: 'contacts', label: 'Contacts', on: true },
                 { key: 'history', label: 'History', on: true },
                 { key: 'tasks', label: 'Tasks', on: canTasks },
-                { key: 'deals', label: 'Deals', on: false },
+                { key: 'deals', label: 'Deals', on: canDeals },
                 { key: 'orders', label: 'Orders', on: false },
               ].map(t => t.on ? (
                 <span key={t.key} onClick={() => setTab(t.key)} style={{ fontSize: 12, padding: '6px 12px', cursor: 'pointer', fontWeight: tab === t.key ? 500 : 400, color: tab === t.key ? GREEN_DARK : '#666', borderBottom: '2px solid ' + (tab === t.key ? GREEN_DARK : 'transparent') }}>{t.label}{t.key === 'contacts' && contacts.length ? ` (${contacts.length})` : ''}</span>
@@ -179,8 +185,17 @@ export default function CrmCompanies({ user }) {
               />
             )}
 
+            {tab === 'deals' && (
+              <DealsPanel
+                deals={deals}
+                onAdd={() => setDealModal('new')}
+                onEdit={(d) => setDealModal(d)}
+                onDelete={async (d) => { if (window.confirm('Delete this deal?')) { await fetch('/api/crm/deals/' + d.id, { method: 'DELETE' }); loadDeals(company.id); } }}
+              />
+            )}
+
             <div style={{ borderTop: '0.5px solid #eee', marginTop: 16, paddingTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: 12, color: '#aaa' }}>Deals and Orders activate as we build the later phases.</span>
+              <span style={{ fontSize: 12, color: '#aaa' }}>Orders activate as we build the next phase.</span>
               <button style={{ ...btnGhost, color: '#A32D2D', borderColor: '#F0997B' }} onClick={() => removeCompany(company)}>Delete</button>
             </div>
           </div>
@@ -188,6 +203,7 @@ export default function CrmCompanies({ user }) {
         {modal && <CompanyModal mode="edit" company={modal} assignees={assignees} onClose={() => setModal(null)} onSaved={(c) => { setModal(null); setCompany(c); }} />}
         {contactModal && company && <ContactModal mode={contactModal === 'new' ? 'new' : 'edit'} contact={contactModal === 'new' ? null : contactModal} companyId={company.id} onClose={() => setContactModal(null)} onSaved={() => { setContactModal(null); loadContacts(company.id); }} />}
         {taskModal && company && <TaskModal mode={taskModal === 'new' ? 'new' : 'edit'} task={taskModal === 'new' ? null : taskModal} companyId={company.id} assignees={assignees} onClose={() => setTaskModal(null)} onSaved={() => { setTaskModal(null); loadTasks(company.id); }} />}
+        {dealModal && company && <DealModal mode={dealModal === 'new' ? 'new' : 'edit'} deal={dealModal === 'new' ? null : dealModal} companyId={company.id} assignees={assignees} onClose={() => setDealModal(null)} onSaved={() => { setDealModal(null); loadDeals(company.id); loadHistory(company.id); }} />}
       </div>
     );
   }
@@ -580,6 +596,128 @@ export function TaskModal({ mode, task, companyId, assignees, onClose, onSaved }
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
           <button style={btnGhost} onClick={onClose}>Cancel</button>
           <button style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={save}>{busy ? 'Saving…' : (mode === 'new' ? 'Add task' : 'Save changes')}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Deals tab panel + shared deal bits ────────────────────────────────────
+export function fmtMoney(n) {
+  const v = Number(n) || 0;
+  return '£' + v.toLocaleString('en-GB', { maximumFractionDigits: 0 });
+}
+const DEAL_STATUS = {
+  open: { label: 'Open', bg: '#E6F1FB', color: '#0C447C' },
+  won:  { label: 'Won',  bg: '#E1F5EE', color: '#0F6E56' },
+  lost: { label: 'Lost', bg: '#F1EFE8', color: '#777' },
+};
+export function DealStatusPill({ status }) {
+  const m = DEAL_STATUS[status] || DEAL_STATUS.open;
+  return <span style={{ fontSize: 10, padding: '2px 7px', borderRadius: 8, background: m.bg, color: m.color, fontWeight: 500 }}>{m.label}</span>;
+}
+
+function DealsPanel({ deals, onAdd, onEdit, onDelete }) {
+  const open = deals.filter(d => d.status === 'open');
+  const oneOff = open.reduce((s, d) => s + (Number(d.one_off_value) || 0), 0);
+  const monthly = open.reduce((s, d) => s + (Number(d.monthly_value) || 0), 0);
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <span style={{ fontSize: 13, color: '#666' }}>{open.length} open · {fmtMoney(oneOff)} one-off + {fmtMoney(monthly)}/mo</span>
+        <button style={{ ...btnPrimary, height: 30, padding: '0 12px', fontSize: 12 }} onClick={onAdd}>+ Add deal</button>
+      </div>
+      {deals.length === 0 ? (
+        <div style={{ padding: '24px 0', textAlign: 'center', color: '#999', fontSize: 13 }}>No deals yet — add one to forecast this company.</div>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead><tr style={{ textAlign: 'left', color: '#888', fontSize: 12 }}>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}>Deal</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500, textAlign: 'right' }}>One-off</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500, textAlign: 'right' }}>Monthly</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500, textAlign: 'right' }}>Profit</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500, textAlign: 'right' }}>Likely</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}>Close</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}>Status</th>
+            <th style={{ padding: '8px 8px', fontWeight: 500 }}></th>
+          </tr></thead>
+          <tbody>
+            {deals.map(d => (
+              <tr key={d.id} style={{ borderTop: '0.5px solid #eee', cursor: 'pointer' }} onClick={() => onEdit(d)}>
+                <td style={{ padding: '10px 8px', color: '#1a1a1a' }}>{d.title}</td>
+                <td style={{ padding: '10px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(d.one_off_value)}</td>
+                <td style={{ padding: '10px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(d.monthly_value)}</td>
+                <td style={{ padding: '10px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: '#666' }}>{fmtMoney(d.profit)}</td>
+                <td style={{ padding: '10px 8px', textAlign: 'right', color: '#666' }}>{d.status === 'open' ? d.likelihood + '%' : '—'}</td>
+                <td style={{ padding: '10px 8px', color: '#888' }}>{fmtDue(d.expected_close, false).text}</td>
+                <td style={{ padding: '10px 8px' }}><DealStatusPill status={d.status} /></td>
+                <td style={{ padding: '10px 8px', textAlign: 'right' }}><button style={{ ...btnGhost, padding: '4px 10px', color: '#A32D2D', borderColor: '#F0997B' }} onClick={(e) => { e.stopPropagation(); onDelete(d); }}>Remove</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+// ── Add / edit deal modal ─────────────────────────────────────────────────
+export function DealModal({ mode, deal, companyId, assignees, onClose, onSaved }) {
+  const [f, setF] = useState({
+    title: deal?.title || '', one_off_value: deal?.one_off_value ?? '', monthly_value: deal?.monthly_value ?? '',
+    profit: deal?.profit ?? '', likelihood: deal?.likelihood ?? 50, expected_close: deal?.expected_close || '',
+    owner_id: deal?.owner_id || '', status: deal?.status || 'open',
+  });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const set = (k) => (e) => setF(s => ({ ...s, [k]: e.target.value }));
+
+  async function save() {
+    if (!f.title.trim()) { setErr('Deal name is required'); return; }
+    setBusy(true); setErr('');
+    try {
+      const body = { ...f, company_id: companyId, owner_id: f.owner_id || null };
+      const r = mode === 'new'
+        ? await fetch('/api/crm/deals', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        : await fetch('/api/crm/deals/' + deal.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const d = await r.json();
+      if (!r.ok) { setErr(d.error || 'Could not save'); setBusy(false); return; }
+      onSaved();
+    } catch { setErr('Could not reach the server'); setBusy(false); }
+  }
+
+  const money = { ...inputStyle };
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, padding: 20 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 12, padding: 26, width: 'min(560px, 94vw)', maxHeight: '88vh', overflow: 'auto', boxShadow: '0 4px 24px rgba(0,0,0,0.15)' }}>
+        <div style={{ fontSize: 16, fontWeight: 500, color: '#1a1a1a', marginBottom: 16 }}>{mode === 'new' ? 'Add deal' : 'Edit deal'}</div>
+        <div style={{ marginBottom: 12 }}><label style={label}>Deal name *</label><input style={inputStyle} value={f.title} onChange={set('title')} autoFocus placeholder="e.g. Catalogue programme" /></div>
+        <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 130 }}><label style={label}>One-off value (£)</label><input type="number" min="0" step="0.01" style={money} value={f.one_off_value} onChange={set('one_off_value')} /></div>
+          <div style={{ flex: 1, minWidth: 130 }}><label style={label}>Monthly value (£)</label><input type="number" min="0" step="0.01" style={money} value={f.monthly_value} onChange={set('monthly_value')} /></div>
+        </div>
+        <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 130 }}><label style={label}>Profit (£)</label><input type="number" step="0.01" style={money} value={f.profit} onChange={set('profit')} /></div>
+          <div style={{ flex: 1, minWidth: 130 }}><label style={label}>Likelihood to close (%)</label><input type="number" min="0" max="100" step="1" style={money} value={f.likelihood} onChange={set('likelihood')} /></div>
+        </div>
+        <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 130 }}><label style={label}>Expected close</label><input type="date" style={{ ...inputStyle, height: 38 }} value={f.expected_close} onChange={set('expected_close')} /></div>
+          <div style={{ flex: 1, minWidth: 130 }}><label style={label}>Owner</label>
+            <select style={{ ...inputStyle, height: 38 }} value={f.owner_id} onChange={set('owner_id')}>
+              <option value="">Unassigned</option>
+              {(assignees || []).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </div>
+          <div style={{ flex: 1, minWidth: 110 }}><label style={label}>Status</label>
+            <select style={{ ...inputStyle, height: 38 }} value={f.status} onChange={set('status')}>
+              <option value="open">Open</option><option value="won">Won</option><option value="lost">Lost</option>
+            </select>
+          </div>
+        </div>
+        {err && <div style={{ color: '#c0392b', fontSize: 13, marginBottom: 10 }}>{err}</div>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+          <button style={btnGhost} onClick={onClose}>Cancel</button>
+          <button style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={save}>{busy ? 'Saving…' : (mode === 'new' ? 'Add deal' : 'Save changes')}</button>
         </div>
       </div>
     </div>
