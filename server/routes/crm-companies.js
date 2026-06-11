@@ -14,12 +14,14 @@ import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
 import db from '../db.js';
 import { requireAccess } from '../middleware/auth.js';
+import { logHistory } from './crm-history.js';
 
 const router = Router();
 router.use(requireAccess('crm_companies'));
 
 const TENANT = 'tga';
 const STATUSES = ['suspect', 'prospect', 'hot_prospect', 'customer'];
+const STATUS_LABEL = { suspect: 'Suspect', prospect: 'Prospect', hot_prospect: 'Hot prospect', customer: 'Customer' };
 function superName() { return process.env.STUDIO_USERNAME || 'Admin'; }
 
 // Resolve account_manager_id → display name (super sentinel, staff row, or unassigned)
@@ -151,6 +153,13 @@ router.put('/:id', (req, res) => {
     txt('category'), txt('source'), txt('notes'), row.id,
   );
   const updated = db.prepare(`${LIST_SELECT} WHERE c.id = ?`).get(row.id);
+
+  // Auto-log a status change onto the company timeline (audit trail).
+  if (status !== row.status) {
+    const who = req.adminUser ? req.adminUser.username : null;
+    logHistory(row.id, TENANT, 'status_change', `Moved from ${STATUS_LABEL[row.status] || row.status} to ${STATUS_LABEL[status] || status}`, who);
+  }
+
   res.json({ ok: true, company: project(updated) });
 });
 
@@ -159,6 +168,7 @@ router.delete('/:id', (req, res) => {
   const row = db.prepare(`SELECT id FROM crm_companies WHERE tenant = ? AND id = ?`).get(TENANT, req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
   db.prepare(`DELETE FROM crm_contacts WHERE company_id = ?`).run(row.id);
+  db.prepare(`DELETE FROM crm_history WHERE company_id = ?`).run(row.id);
   db.prepare(`DELETE FROM crm_companies WHERE id = ?`).run(row.id);
   res.json({ ok: true });
 });

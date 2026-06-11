@@ -1885,3 +1885,24 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_crm_contacts_company ON crm_contacts(company_id);
 `);
+
+// ── 25. crm_history — activity timeline per CRM company (Phase 4) ──────────────
+// Reverse-chronological audit trail. `kind` is one of the manual types
+// (note | call | email | meeting) or an auto type (status_change | system)
+// dropped in by other parts of the app. `author` is a NAME SNAPSHOT taken at
+// write time (the logged-in user's username, or the actor for auto entries),
+// so the line still reads correctly even if that staff member is later removed.
+// `tenant` denormalised for box scoping. Deleting a company clears its history
+// (explicit cascade in routes/crm-companies.js).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS crm_history (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    tenant TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'note',
+    body TEXT NOT NULL,
+    author TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_crm_history_company ON crm_history(company_id, created_at DESC);
+`);

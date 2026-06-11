@@ -41,11 +41,15 @@ export default function CrmCompanies() {
   const [tab, setTab] = useState('details');
   const [contacts, setContacts] = useState([]);
   const [contactModal, setContactModal] = useState(null); // 'new' | contactObj | null
+  const [history, setHistory] = useState([]);
 
   const loadContacts = useCallback(async (companyId) => {
     try { const r = await fetch('/api/crm/contacts?company_id=' + companyId); if (r.ok) { const d = await r.json(); setContacts(d.contacts || []); } } catch {}
   }, []);
-  useEffect(() => { if (company) loadContacts(company.id); }, [company, loadContacts]);
+  const loadHistory = useCallback(async (companyId) => {
+    try { const r = await fetch('/api/crm/history?company_id=' + companyId); if (r.ok) { const d = await r.json(); setHistory(d.history || []); } } catch {}
+  }, []);
+  useEffect(() => { if (company) { loadContacts(company.id); loadHistory(company.id); } }, [company, loadContacts, loadHistory]);
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -66,7 +70,7 @@ export default function CrmCompanies() {
   }, []);
 
   async function openCompany(id) {
-    setSelectedId(id); setCompany(null); setTab('details'); setContacts([]);
+    setSelectedId(id); setCompany(null); setTab('details'); setContacts([]); setHistory([]);
     try { const r = await fetch('/api/crm/companies/' + id); if (r.ok) { const d = await r.json(); setCompany(d.company); } } catch {}
   }
 
@@ -115,7 +119,7 @@ export default function CrmCompanies() {
               {[
                 { key: 'details', label: 'Details', on: true },
                 { key: 'contacts', label: 'Contacts', on: true },
-                { key: 'history', label: 'History', on: false },
+                { key: 'history', label: 'History', on: true },
                 { key: 'tasks', label: 'Tasks', on: false },
                 { key: 'deals', label: 'Deals', on: false },
                 { key: 'orders', label: 'Orders', on: false },
@@ -149,8 +153,16 @@ export default function CrmCompanies() {
               />
             )}
 
+            {tab === 'history' && (
+              <HistoryPanel
+                history={history}
+                onAdd={async (kind, body) => { await fetch('/api/crm/history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ company_id: company.id, kind, body }) }); loadHistory(company.id); }}
+                onDelete={async (e) => { if (window.confirm('Delete this entry?')) { await fetch('/api/crm/history/' + e.id, { method: 'DELETE' }); loadHistory(company.id); } }}
+              />
+            )}
+
             <div style={{ borderTop: '0.5px solid #eee', marginTop: 16, paddingTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: 12, color: '#aaa' }}>History, Tasks, Deals and Orders activate as we build the later phases.</span>
+              <span style={{ fontSize: 12, color: '#aaa' }}>Tasks, Deals and Orders activate as we build the later phases.</span>
               <button style={{ ...btnGhost, color: '#A32D2D', borderColor: '#F0997B' }} onClick={() => removeCompany(company)}>Delete</button>
             </div>
           </div>
@@ -379,6 +391,62 @@ function ContactModal({ mode, contact, companyId, onClose, onSaved }) {
           <button style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={save}>{busy ? 'Saving…' : (mode === 'new' ? 'Add contact' : 'Save changes')}</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── History tab panel ─────────────────────────────────────────────────────
+const KIND_META = {
+  note:          { label: 'Note',          color: '#555' },
+  call:          { label: 'Call',          color: '#2E7D32' },
+  email:         { label: 'Email',         color: '#0C447C' },
+  meeting:       { label: 'Meeting',       color: '#9333EA' },
+  status_change: { label: 'Status change', color: '#999' },
+  system:        { label: 'Update',        color: '#999' },
+};
+function fmtWhen(ts) {
+  try { return new Date(ts.replace(' ', 'T') + 'Z').toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); }
+  catch { return ts; }
+}
+function HistoryPanel({ history, onAdd, onDelete }) {
+  const [kind, setKind] = useState('note');
+  const [body, setBody] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function log() {
+    if (!body.trim() || busy) return;
+    setBusy(true);
+    await onAdd(kind, body.trim());
+    setBody(''); setBusy(false);
+  }
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
+        <select style={{ ...sel, height: 34 }} value={kind} onChange={e => setKind(e.target.value)}>
+          <option value="note">Note</option><option value="call">Call</option><option value="email">Email</option><option value="meeting">Meeting</option>
+        </select>
+        <input style={{ ...inputStyle, height: 34, flex: 1 }} placeholder="What happened?" value={body} onChange={e => setBody(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') log(); }} />
+        <button style={{ ...btnPrimary, height: 34, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={log}>Log</button>
+      </div>
+      {history.length === 0 ? (
+        <div style={{ padding: '24px 0', textAlign: 'center', color: '#999', fontSize: 13 }}>No activity yet — log a call, email, meeting or note above.</div>
+      ) : (
+        <div style={{ marginTop: 8 }}>
+          {history.map(e => {
+            const m = KIND_META[e.kind] || KIND_META.note;
+            return (
+              <div key={e.id} style={{ display: 'flex', gap: 11, padding: '12px 0', borderBottom: '0.5px solid #eee' }}>
+                <div style={{ width: 9, height: 9, borderRadius: '50%', flex: 'none', marginTop: 5, background: m.color }} />
+                <div style={{ flex: 1 }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.03em', color: m.color }}>{m.label}</span>
+                  <span style={{ fontSize: 11, color: '#aaa' }}> · {e.author || 'Unknown'} · {fmtWhen(e.created_at)}</span>
+                  <div style={{ fontSize: 13, color: '#1a1a1a', lineHeight: 1.5, marginTop: 2, whiteSpace: 'pre-wrap' }}>{e.body}</div>
+                </div>
+                <button title="Delete" onClick={() => onDelete(e)} style={{ background: 'none', border: 'none', color: '#ccc', cursor: 'pointer', fontSize: 15, lineHeight: 1, alignSelf: 'flex-start' }}>×</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
