@@ -9,6 +9,7 @@ import IDYQAdmin from './apps/IDYQAdmin.jsx';
 import CrmHotProspects from './CrmHotProspects.jsx';
 import FacebookPixels from './FacebookPixels.jsx';
 import FacebookAds from './FacebookAds.jsx';
+import StaffAccess from './StaffAccess.jsx';
 
 // Which section the operator is on is remembered across a browser refresh.
 // We store the current top-level view and read it back on first load, so a
@@ -23,8 +24,40 @@ const VALID_VIEWS = [
   'crm-hot-prospects',
   'apps-idyq',
   'instagram', 'tiktok', 'facebook-pixels', 'facebook-ads',
+  'staff-access',
 ];
 const LAST_VIEW_KEY = 'studio.admin.last_view';
+
+// Map each top-level view to the access section key a staff member needs ticked
+// to reach it. Views not listed (e.g. client detail) are always allowed once
+// you can see the parent LinkedIn screen. 'staff-access' is super-admin only.
+const VIEW_SECTION = {
+  'clients': 'linkedin_posts',
+  'instagram': 'instagram',
+  'tiktok': 'tiktok',
+  'facebook-pixels': 'meta_pixels',
+  'facebook-ads': 'facebook_ads',
+  'email-customers': 'customers',
+  'email-domain-health': 'domain_health',
+  'email-mailboxes': 'mailboxes',
+  'portal-customers': 'portal_customers',
+  'crm-hot-prospects': 'email_hot_prospects',
+  'apps-idyq': 'idyq',
+};
+const VIEW_ORDER = [
+  'clients', 'instagram', 'tiktok', 'facebook-pixels', 'facebook-ads',
+  'email-customers', 'email-domain-health', 'email-mailboxes',
+  'portal-customers', 'crm-hot-prospects', 'apps-idyq',
+];
+
+function isSuperUser(u) { return !u || u.is_super || u.access === 'ALL'; }
+function canView(u, v) {
+  if (v === 'staff-access') return !!(u && (u.is_super || u.access === 'ALL'));
+  if (isSuperUser(u)) return true;
+  const key = VIEW_SECTION[v];
+  if (!key) return true; // unmapped view — allow once signed in
+  return !!(u.access && u.access[key]);
+}
 
 function readInitialView() {
   try {
@@ -34,7 +67,7 @@ function readInitialView() {
   return 'clients';
 }
 
-export default function Dashboard({ onLogout }) {
+export default function Dashboard({ onLogout, user }) {
   const [clients, setClients]           = useState([]);
   const [view, setView]                 = useState(readInitialView);
   const [selectedClient, setSelectedClient] = useState(null);
@@ -122,6 +155,34 @@ export default function Dashboard({ onLogout }) {
     try { localStorage.setItem(LAST_VIEW_KEY, v); } catch (e) { /* storage disabled — non-fatal */ }
   }
 
+  // Once we know who's signed in, bounce them off any view they can't see
+  // (e.g. a refresh landed them on a remembered section that's no longer
+  // ticked for them, or a staff member typed a URL). Super-admins always pass.
+  useEffect(() => {
+    if (!user) return;
+    if (!canView(user, view)) {
+      const first = VIEW_ORDER.find(v => canView(user, v));
+      if (first) handleNavigate(first);
+    }
+  }, [user, view]);
+
+  // ── No-access guard ────────────────────────────────────────────────────────
+  // A staff member with zero sections ticked has nowhere to go. Show a calm
+  // message instead of an empty shell. Super-admins never hit this.
+  if (user && !isSuperUser(user) && !VIEW_ORDER.some(v => canView(user, v))) {
+    return (
+      <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} user={user} />
+        <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center', padding:28 }}>
+          <div style={{ background:'#fff', border:'0.5px solid #e0e0dc', borderRadius:12, padding:'40px 32px', maxWidth:440, textAlign:'center' }}>
+            <div style={{ fontSize:15, fontWeight:500, color:'#1a1a1a', marginBottom:8 }}>No sections enabled yet</div>
+            <div style={{ fontSize:13, color:'#666', lineHeight:1.6 }}>Your account doesn't have access to any sections. Ask your administrator to enable what you need.</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ── Email Campaigns views ──────────────────────────────────────────────────
   if (view === 'email-customers' || view === 'email-domain-health' || view === 'email-mailboxes') {
     const initialTab = view === 'email-domain-health' ? 'domains'
@@ -129,7 +190,7 @@ export default function Dashboard({ onLogout }) {
                      : 'customers';
     return (
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
-        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} user={user} />
         <EmailSection initialTab={initialTab} />
       </div>
     );
@@ -139,7 +200,7 @@ export default function Dashboard({ onLogout }) {
   if (view === 'portal-customers') {
     return (
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
-        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} user={user} />
         <PortalAdmin />
       </div>
     );
@@ -152,7 +213,7 @@ export default function Dashboard({ onLogout }) {
   if (view === 'crm-hot-prospects') {
     return (
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
-        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} user={user} />
         <CrmHotProspects />
       </div>
     );
@@ -170,7 +231,7 @@ export default function Dashboard({ onLogout }) {
   if (view === 'apps-idyq') {
     return (
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
-        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} user={user} />
         <IDYQAdmin />
       </div>
     );
@@ -180,7 +241,7 @@ export default function Dashboard({ onLogout }) {
   if (view === 'facebook-pixels') {
     return (
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
-        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} user={user} />
         <FacebookPixels />
       </div>
     );
@@ -190,8 +251,18 @@ export default function Dashboard({ onLogout }) {
   if (view === 'facebook-ads') {
     return (
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
-        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} user={user} />
         <FacebookAds />
+      </div>
+    );
+  }
+
+  // ── Settings: Staff & access (super-admin only) ───────────────────────────
+  if (view === 'staff-access') {
+    return (
+      <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} user={user} />
+        <StaffAccess user={user} />
       </div>
     );
   }
@@ -208,7 +279,7 @@ export default function Dashboard({ onLogout }) {
   if (COMING_SOON_TITLES[view]) {
     return (
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
-        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+        <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} user={user} />
         <AdminComingSoon title={COMING_SOON_TITLES[view]} />
       </div>
     );
@@ -218,7 +289,7 @@ export default function Dashboard({ onLogout }) {
   if (selectedClient) {
     return (
       <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
-        <Sidebar onLogout={onLogout} activeView="clients" onNavigate={handleNavigate} />
+        <Sidebar onLogout={onLogout} activeView="clients" onNavigate={handleNavigate} user={user} />
         <ClientDetail clientId={selectedClient} onBack={()=>setSelectedClient(null)} onRefresh={loadClients} />
       </div>
     );
@@ -230,7 +301,7 @@ export default function Dashboard({ onLogout }) {
 
   return (
     <div style={{ display:'flex', height:'100vh', background:'#f5f5f3' }}>
-      <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} />
+      <Sidebar onLogout={onLogout} activeView={view} onNavigate={handleNavigate} user={user} />
 
       <div style={{ flex:1, overflow:'auto', padding:28 }}>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:24 }}>

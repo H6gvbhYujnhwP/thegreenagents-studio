@@ -3,7 +3,18 @@ import React, { useState, useEffect } from 'react';
 const SECTION = { padding:'10px 16px 4px', fontSize:10, fontWeight:700, color:'rgba(255,255,255,0.55)', letterSpacing:'0.08em', textTransform:'uppercase' };
 const DIVIDER = { margin:'6px 16px 2px', borderTop:'0.5px solid rgba(255,255,255,0.1)', border:'none' };
 
-export default function Sidebar({ onLogout, activeView, onNavigate }) {
+export default function Sidebar({ onLogout, activeView, onNavigate, user }) {
+  // Per-user access. Super-admins (the env break-glass login or an is_super
+  // staff member) see everything. Everyone else sees only the sidebar items
+  // ticked for them. If `user` hasn't loaded yet, fail OPEN (show all) so the
+  // sidebar never flashes empty — the server still gates staff management.
+  const isSuper = !user || user.is_super || user.access === 'ALL';
+  function can(key) { return isSuper || !!(user && user.access && user.access[key]); }
+  const showSocial = can('linkedin_posts') || can('instagram') || can('tiktok') || can('meta_pixels') || can('facebook_ads');
+  const showEmail  = can('customers') || can('domain_health') || can('mailboxes');
+  const showPortal = can('portal_customers');
+  const showCrm    = can('email_hot_prospects');
+  const showApp    = can('idyq');
   // Live prospect-count badge for the Mailboxes menu item.
   // Refreshes every 30s while the app is open. Gracefully handles failure
   // (e.g. backend not yet deployed) by hiding the badge.
@@ -71,42 +82,50 @@ export default function Sidebar({ onLogout, activeView, onNavigate }) {
       {/* Nav */}
       <div style={{ flex:1, paddingTop:10 }}>
 
-        <div style={SECTION}>Social Media</div>
-        <NavItem id="clients"          label="LinkedIn Posts"   active={activeView==='clients'}          onNavigate={onNavigate} icon={<UsersIcon />} />
-        <NavItem id="instagram"        label="Instagram"        active={activeView==='instagram'}        onNavigate={onNavigate} icon={<UsersIcon />} dim suffix="Soon" />
-        <NavItem id="tiktok"           label="TikTok"           active={activeView==='tiktok'}           onNavigate={onNavigate} icon={<UsersIcon />} dim suffix="Soon" />
-        <NavItem id="facebook-pixels"  label="Meta Pixels"      active={activeView==='facebook-pixels'}  onNavigate={onNavigate} icon={<UsersIcon />} />
-        <NavItem id="facebook-ads"     label="Facebook Ads"     active={activeView==='facebook-ads'}     onNavigate={onNavigate} icon={<UsersIcon />} />
+        {showSocial && <>
+          <div style={SECTION}>Social Media</div>
+          {can('linkedin_posts') && <NavItem id="clients"          label="LinkedIn Posts"   active={activeView==='clients'}          onNavigate={onNavigate} icon={<UsersIcon />} />}
+          {can('instagram')      && <NavItem id="instagram"        label="Instagram"        active={activeView==='instagram'}        onNavigate={onNavigate} icon={<UsersIcon />} dim suffix="Soon" />}
+          {can('tiktok')         && <NavItem id="tiktok"           label="TikTok"           active={activeView==='tiktok'}           onNavigate={onNavigate} icon={<UsersIcon />} dim suffix="Soon" />}
+          {can('meta_pixels')    && <NavItem id="facebook-pixels"  label="Meta Pixels"      active={activeView==='facebook-pixels'}  onNavigate={onNavigate} icon={<UsersIcon />} />}
+          {can('facebook_ads')   && <NavItem id="facebook-ads"     label="Facebook Ads"     active={activeView==='facebook-ads'}     onNavigate={onNavigate} icon={<UsersIcon />} />}
+        </>}
 
-        <hr style={DIVIDER} />
+        {showEmail && <>
+          <hr style={DIVIDER} />
+          <div style={SECTION}>Email Campaigns</div>
+          {can('customers')     && <SubItem id="email-customers"     label="Customers"     active={activeView==='email-customers'}     onNavigate={onNavigate} icon={<CustomersIcon />} />}
+          {can('domain_health') && <SubItem id="email-domain-health" label="Domain Health" active={activeView==='email-domain-health'} onNavigate={onNavigate} icon={<DomainIcon />} />}
+          {can('mailboxes')     && <SubItem id="email-mailboxes"     label="Mailboxes"     active={activeView==='email-mailboxes'}     onNavigate={onNavigate} icon={<MailboxIcon />} badge={prospectCount} />}
+        </>}
 
-        <div style={SECTION}>Email Campaigns</div>
-        <SubItem id="email-customers"     label="Customers"     active={activeView==='email-customers'}     onNavigate={onNavigate} icon={<CustomersIcon />} />
-        <SubItem id="email-domain-health" label="Domain Health" active={activeView==='email-domain-health'} onNavigate={onNavigate} icon={<DomainIcon />} />
-        <SubItem id="email-mailboxes"     label="Mailboxes"     active={activeView==='email-mailboxes'}     onNavigate={onNavigate} icon={<MailboxIcon />} badge={prospectCount} />
+        {showPortal && <>
+          <hr style={DIVIDER} />
+          <div style={SECTION}>Customer Portal</div>
+          <SubItem id="portal-customers"    label="Portal Customers" active={activeView==='portal-customers'}  onNavigate={onNavigate} icon={<PortalIcon />} />
+        </>}
 
-        <hr style={DIVIDER} />
+        {showCrm && <>
+          <hr style={DIVIDER} />
+          {/* CRM — the section heading makes it cheap to add more entries later
+              (Sales CRM screens land here as later phases ship). */}
+          <div style={SECTION}>CRM</div>
+          <SubItem id="crm-hot-prospects"   label="E-Mail Campaign Hot Prospects" active={activeView==='crm-hot-prospects'} onNavigate={onNavigate} icon={<HotProspectsIcon />} badge={hotProspectsDue} badgeUrgent />
+        </>}
 
-        <div style={SECTION}>Customer Portal</div>
-        <SubItem id="portal-customers"    label="Portal Customers" active={activeView==='portal-customers'}  onNavigate={onNavigate} icon={<PortalIcon />} />
+        {showApp && <>
+          <hr style={DIVIDER} />
+          {/* App integration — external admin panels embedded inside Studio. */}
+          <div style={SECTION}>App</div>
+          <SubItem id="apps-idyq"           label="IDYQ"             active={activeView==='apps-idyq'}         onNavigate={onNavigate} icon={<IdyqIcon />} />
+        </>}
 
-        <hr style={DIVIDER} />
-
-        {/* CRM — currently one entry, but the section heading makes it cheap
-            to add more later (Warm prospects, Lost deals, etc.) without
-            another sidebar rearrange. */}
-        <div style={SECTION}>CRM</div>
-        <SubItem id="crm-hot-prospects"   label="Hot Prospects"    active={activeView==='crm-hot-prospects'} onNavigate={onNavigate} icon={<HotProspectsIcon />} badge={hotProspectsDue} badgeUrgent />
-
-        <hr style={DIVIDER} />
-
-        {/* App integration — external admin panels embedded inside Studio.
-            Each entry mounts an iframe of the target app's admin URL. Auth is
-            handled by a shared-secret bridge (see server/routes/idyq-bridge.js
-            and the matching /admin-bridge endpoint on the target app's server)
-            so no double-login is required. */}
-        <div style={SECTION}>App</div>
-        <SubItem id="apps-idyq"           label="IDYQ"             active={activeView==='apps-idyq'}         onNavigate={onNavigate} icon={<IdyqIcon />} />
+        {isSuper && <>
+          <hr style={DIVIDER} />
+          {/* Settings — super-admin only. Staff accounts + per-section access. */}
+          <div style={SECTION}>Settings</div>
+          <SubItem id="staff-access"        label="Staff & access"   active={activeView==='staff-access'}      onNavigate={onNavigate} icon={<UsersIcon />} />
+        </>}
 
       </div>
 

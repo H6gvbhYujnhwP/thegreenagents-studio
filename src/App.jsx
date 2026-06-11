@@ -53,27 +53,35 @@ export default function App() {
 
 function AdminApp() {
   const [auth, setAuth] = useState(null); // null = checking, true = in, false = out
+  const [user, setUser] = useState(null); // { username, is_super, access } once known
 
-  useEffect(() => {
-    // Fast local check — if no token stored, skip the server round-trip
+  // Validate the stored token against the server AND pull back who we are +
+  // which sections we're allowed to see. Used on first load and after login.
+  async function checkAuth() {
     const token = localStorage.getItem('studioToken');
-    if (!token) { setAuth(false); return; }
+    if (!token) { setAuth(false); setUser(null); return; }
+    try {
+      const r = await fetch('/api/auth/check');
+      const d = await r.json();
+      setAuth(!!d.authenticated);
+      setUser(d.authenticated ? (d.user || null) : null);
+    } catch {
+      setAuth(false); setUser(null);
+    }
+  }
 
-    // Validate token is still correct against server
-    fetch('/api/auth/check')
-      .then(r => r.json())
-      .then(d => setAuth(d.authenticated))
-      .catch(() => setAuth(false));
-  }, []);
+  useEffect(() => { checkAuth(); }, []);
 
   function handleLogin(token) {
     localStorage.setItem('studioToken', token);
     setAuth(true);
+    checkAuth(); // fetch our user + access map
   }
 
   function handleLogout() {
+    try { fetch('/api/auth/logout', { method: 'POST' }); } catch {}
     localStorage.removeItem('studioToken');
-    setAuth(false);
+    setAuth(false); setUser(null);
   }
 
   if (auth === null) return (
@@ -84,5 +92,5 @@ function AdminApp() {
   );
 
   if (!auth) return <Login onLogin={handleLogin} />;
-  return <Dashboard onLogout={handleLogout} />;
+  return <Dashboard onLogout={handleLogout} user={user} />;
 }
