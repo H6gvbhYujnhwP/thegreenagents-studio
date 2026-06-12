@@ -625,23 +625,30 @@ router.delete('/clients/:id', (req, res) => {
   const c = db.prepare('SELECT * FROM email_clients WHERE id=?').get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Not found' });
   const id = req.params.id;
-  db.transaction(() => {
-    // children keyed indirectly first
-    db.prepare('DELETE FROM email_subscribers WHERE list_id IN (SELECT id FROM email_lists WHERE email_client_id=?)').run(id);
-    db.prepare('DELETE FROM email_sends WHERE campaign_id IN (SELECT id FROM email_campaigns WHERE email_client_id=?)').run(id);
-    db.prepare('DELETE FROM client_sessions WHERE client_user_id IN (SELECT id FROM client_users WHERE email_client_id=?)').run(id);
-    // everything keyed directly by email_client_id
-    for (const t of [
-      'email_lists', 'email_campaigns', 'email_campaign_steps', 'email_outbound', 'email_brands',
-      'email_replies', 'email_inboxes', 'hot_prospects', 'campaign_unsubscribes', 'contact_unsubscribed_all',
-      'customer_services', 'facebook_pixels', 'facebook_ads', 'facebook_ad_creatives', 'client_post_regens',
-      'password_resets', 'client_login_attempts', 'client_users',
-    ]) {
-      try { db.prepare(`DELETE FROM ${t} WHERE email_client_id=?`).run(id); } catch (e) { /* table may not exist on older DBs */ }
-    }
-    db.prepare('DELETE FROM email_clients WHERE id=?').run(id);
-    db.prepare('INSERT OR REPLACE INTO email_client_removals (name) VALUES (?)').run(c.name);
-  })();
+  // Full purge of one customer's entire tree. FK enforcement is disabled for
+  // the duration so delete ORDER doesn't matter (we're removing the whole
+  // graph anyway, and some child tables reference email_subscribers/_sends).
+  // PRAGMA foreign_keys must be toggled OUTSIDE a transaction to take effect.
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.transaction(() => {
+      db.prepare('DELETE FROM email_subscribers WHERE list_id IN (SELECT id FROM email_lists WHERE email_client_id=?)').run(id);
+      db.prepare('DELETE FROM email_sends WHERE campaign_id IN (SELECT id FROM email_campaigns WHERE email_client_id=?)').run(id);
+      db.prepare('DELETE FROM client_sessions WHERE client_user_id IN (SELECT id FROM client_users WHERE email_client_id=?)').run(id);
+      for (const t of [
+        'email_lists', 'email_campaigns', 'email_campaign_steps', 'email_outbound', 'email_brands',
+        'email_replies', 'email_inboxes', 'hot_prospects', 'campaign_unsubscribes', 'contact_unsubscribed_all',
+        'customer_services', 'facebook_pixels', 'facebook_ads', 'facebook_ad_creatives', 'client_post_regens',
+        'password_resets', 'client_login_attempts', 'client_users',
+      ]) {
+        try { db.prepare(`DELETE FROM ${t} WHERE email_client_id=?`).run(id); } catch (e) { /* table may not exist on older DBs */ }
+      }
+      db.prepare('DELETE FROM email_clients WHERE id=?').run(id);
+      db.prepare('INSERT OR REPLACE INTO email_client_removals (name) VALUES (?)').run(c.name);
+    })();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
   res.json({ ok: true, purged: true });
 });
 

@@ -2818,13 +2818,16 @@ function MailboxesSection(){
     // Uses the functional updater form so the 30-second background poll
     // (which captures the initial selectedId in its closure) doesn't
     // snap the operator back to the first mailbox every refresh.
-    if(Array.isArray(d) && d.length>0) setSelectedId(prev => prev || d[0].id);
+    if(Array.isArray(d) && d.length>0){ const vis=d.filter(i=>i.enabled!==0); if(vis.length>0) setSelectedId(prev => prev || vis[0].id); }
   }
 
-  const selected=inboxes.find(i=>i.id===selectedId);
-  const totalProspects=inboxes.reduce((s,i)=>s+(i.new_prospect_count||0),0);
-  const totalUnsub    =inboxes.reduce((s,i)=>s+(i.auto_unsub_count||0),0);
-  const totalReplies  =inboxes.reduce((s,i)=>s+(i.replies_30d||0),0);
+  // Disconnected mailboxes (enabled=0) are hidden — they stop syncing and drop
+  // out of the list, but their reply history stays in the DB.
+  const visible=inboxes.filter(i=>i.enabled!==0);
+  const selected=visible.find(i=>i.id===selectedId);
+  const totalProspects=visible.reduce((s,i)=>s+(i.new_prospect_count||0),0);
+  const totalUnsub    =visible.reduce((s,i)=>s+(i.auto_unsub_count||0),0);
+  const totalReplies  =visible.reduce((s,i)=>s+(i.replies_30d||0),0);
 
   return(<div style={{flex:1,display:'flex',height:'100vh',overflow:'hidden'}}>
 
@@ -2832,7 +2835,7 @@ function MailboxesSection(){
     <div style={{width:260,background:CARD,borderRight:`0.5px solid ${BORDER}`,display:'flex',flexDirection:'column',flexShrink:0}}>
       <div style={{padding:'14px 14px 10px',borderBottom:`0.5px solid ${BORDER}`}}>
         <div style={{fontSize:13,fontWeight:500,color:TEXT}}>Mailboxes</div>
-        <div style={{fontSize:11,color:MUTED,marginTop:2}}>{inboxes.length} connected · {totalProspects} new prospect{totalProspects===1?'':'s'}</div>
+        <div style={{fontSize:11,color:MUTED,marginTop:2}}>{visible.length} connected · {totalProspects} new prospect{totalProspects===1?'':'s'}</div>
       </div>
 
       {/* Aggregate stats strip */}
@@ -2854,8 +2857,8 @@ function MailboxesSection(){
       {/* Mailbox list */}
       <div style={{flex:1,overflowY:'auto'}}>
         {loading?<div style={{color:MUTED,textAlign:'center',padding:32,fontSize:12}}>Loading…</div>
-        :inboxes.length===0?<div style={{color:MUTED,textAlign:'center',padding:32,fontSize:12}}>No mailboxes connected yet</div>
-        :inboxes.map(ib=>{
+        :visible.length===0?<div style={{color:MUTED,textAlign:'center',padding:32,fontSize:12}}>No mailboxes connected yet</div>
+        :visible.map(ib=>{
           const isSelected=ib.id===selectedId;
           const hasError=!!ib.last_error;
           return(<div key={ib.id} onClick={()=>setSelectedId(ib.id)} style={{
@@ -2888,8 +2891,8 @@ function MailboxesSection(){
     {/* Right side — focused inbox detail */}
     {selected ? <MailboxDetail key={selected.id} inbox={selected} onRefresh={loadInboxes}/>
       : <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',background:BG,flexDirection:'column',gap:12}}>
-          <div style={{fontSize:14,color:MUTED}}>{inboxes.length===0?'Connect your first mailbox':'Select a mailbox'}</div>
-          {inboxes.length===0&&<Btn variant="primary" onClick={()=>setModal('connect')}>Connect mailbox</Btn>}
+          <div style={{fontSize:14,color:MUTED}}>{visible.length===0?'Connect your first mailbox':'Select a mailbox'}</div>
+          {visible.length===0&&<Btn variant="primary" onClick={()=>setModal('connect')}>Connect mailbox</Btn>}
         </div>}
 
     {modal==='connect'&&<ConnectMailboxModal onClose={()=>setModal(null)} onSaved={()=>{setModal(null);loadInboxes();}}/>}
@@ -3007,6 +3010,18 @@ function MailboxDetail({inbox, onRefresh}){
     setClassifying(false);
   }
 
+  // Disconnect — stop syncing this mailbox and remove it from the list. Reply
+  // history is kept (linked by inbox_id). Uses DELETE /mailboxes/:id (enabled=0).
+  const [disconnecting,setDisconnecting]=useState(false);
+  async function disconnectMailbox(){
+    if(!window.confirm(`Disconnect ${inbox.email_address}?\n\nIt stops syncing with Gmail and is removed from the list. Reply history is kept.`))return;
+    setDisconnecting(true);
+    try{
+      const r=await fetch(`/api/email/mailboxes/${inbox.id}`,{method:'DELETE'});
+      if(!r.ok){const d=await r.json().catch(()=>({})); setPollMsg({ok:false,text:d.error||'Could not disconnect'}); setDisconnecting(false); return;}
+      onRefresh();
+    }catch(e){ setPollMsg({ok:false,text:'Could not reach the server'}); setDisconnecting(false); }
+  }
   return(<div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0,overflow:'hidden'}}>
 
     {/* Header */}
@@ -3030,6 +3045,15 @@ function MailboxDetail({inbox, onRefresh}){
           color:polling?MUTED:BLUE,cursor:polling?'default':'pointer',textDecoration:'underline',
         }}
       >Resync</button>
+      <button
+        onClick={disconnectMailbox}
+        disabled={polling||disconnecting}
+        title="Stop syncing this mailbox with Gmail and remove it from the list. Reply history is kept."
+        style={{
+          background:'transparent',border:'none',padding:'4px 8px',fontSize:11,
+          color:(polling||disconnecting)?MUTED:DANGER,cursor:(polling||disconnecting)?'default':'pointer',textDecoration:'underline',
+        }}
+      >{disconnecting?'Disconnecting…':'Disconnect'}</button>
     </div>
 
     {/* Poll-result toast — disappears after 5s */}
