@@ -462,7 +462,7 @@ const TH=({children,w})=><th style={{textAlign:'left',padding:'8px 14px',fontSiz
 const TD=({children,muted,center})=><td style={{padding:'9px 14px',fontSize:12,color:muted?MUTED:TEXT,textAlign:center?'center':'left',borderBottom:`0.5px solid ${BORDER}`,verticalAlign:'middle'}}>{children}</td>;
 
 // ── Client modal ──────────────────────────────────────────────────────────────
-function ClientModal({initial,onClose,onSaved}){
+function ClientModal({initial,onClose,onSaved,onRemove}){
   const editing=!!initial?.id;
   const [name,setName]=useState(initial?.name||'');
   const [color,setColor]=useState(initial?.color||'#1D9E75');
@@ -503,7 +503,56 @@ function ClientModal({initial,onClose,onSaved}){
       </div>
     </div>
     {err&&<div style={{color:DANGER,fontSize:13,marginTop:14,marginBottom:10}}>{err}</div>}
-    <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:18}}><Btn onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={save} disabled={saving}>{saving?'Saving…':editing?'Save changes':'Create client'}</Btn></div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,marginTop:18}}>
+      <div>{editing&&onRemove&&<button type="button" onClick={()=>{onClose();onRemove(initial);}} style={{background:'none',border:'none',color:DANGER,fontSize:13,cursor:'pointer',padding:0,textDecoration:'underline'}}>Remove domain…</button>}</div>
+      <div style={{display:'flex',gap:8}}><Btn onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={save} disabled={saving}>{saving?'Saving…':editing?'Save changes':'Create client'}</Btn></div>
+    </div>
+  </Modal>);
+}
+
+// ── Remove-domain modal — Archive (keep records) or Delete everything ──────────
+// Destructive. Archive disconnects Gmail mailboxes + hides the domain but keeps
+// all data (reversible). Delete everything purges every record for the domain
+// and tombstones the name so the AWS auto-sync can't recreate it. AWS/SES is
+// removed manually by the operator. Button only enables once the domain name is
+// typed exactly (same safety pattern as the mailbox resync).
+function RemoveDomainModal({client,onClose,onDone}){
+  const [mode,setMode]=useState('archive');
+  const [confirmText,setConfirmText]=useState('');
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState('');
+  const armed = confirmText.trim().toLowerCase() === (client.name||'').toLowerCase();
+  async function go(){
+    if(!armed||busy)return;
+    setBusy(true);setErr('');
+    try{
+      const r = mode==='delete'
+        ? await fetch(`/api/email/clients/${client.id}`,{method:'DELETE'})
+        : await fetch(`/api/email/clients/${client.id}/archive`,{method:'POST'});
+      const d=await r.json();
+      if(!r.ok||d.error){setErr(d.error||'Could not remove');setBusy(false);return;}
+      onDone();
+    }catch(e){setErr('Could not reach the server');setBusy(false);}
+  }
+  const opt=(val,title,desc)=>(
+    <label style={{display:'flex',gap:10,padding:'11px 12px',border:`1px solid ${mode===val?GREEN:BORDER}`,borderRadius:8,marginBottom:10,cursor:'pointer',alignItems:'flex-start'}}>
+      <input type="radio" name="rmmode" checked={mode===val} onChange={()=>setMode(val)} style={{marginTop:2,accentColor:GREEN}}/>
+      <div><div style={{fontSize:13,fontWeight:500,color:TEXT}}>{title}</div><div style={{fontSize:12,color:MUTED,marginTop:2,lineHeight:1.45}}>{desc}</div></div>
+    </label>
+  );
+  return(<Modal title={`Remove ${client.name}`} onClose={onClose}>
+    <div style={{fontSize:13,color:MUTED,marginBottom:14,lineHeight:1.5}}>This disconnects the Gmail mailboxes for this domain and removes it from the Customers list. AWS/SES is not touched — remove that identity in the AWS console yourself.</div>
+    {opt('archive','Keep records (archive)','Disconnects the mailboxes and hides the domain, but keeps all lists, subscribers, campaigns and replies in the database. You can restore it later.')}
+    {opt('delete','Delete everything','Permanently deletes every record for this domain — lists, subscribers, campaigns, replies, mailboxes, hot prospects, portal logins and Meta/Facebook data. This cannot be undone.')}
+    <div style={{marginTop:6}}>
+      <label style={{display:'block',fontSize:12,color:MUTED,marginBottom:6}}>Type <strong style={{color:TEXT}}>{client.name}</strong> to confirm</label>
+      <input value={confirmText} onChange={e=>setConfirmText(e.target.value)} placeholder={client.name} style={{width:'100%',padding:'8px 10px',border:`1px solid ${BORDER}`,borderRadius:7,fontSize:13,color:TEXT,background:BG,outline:'none',boxSizing:'border-box'}}/>
+    </div>
+    {err&&<div style={{color:DANGER,fontSize:13,marginTop:12}}>{err}</div>}
+    <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:18}}>
+      <Btn onClick={onClose}>Cancel</Btn>
+      <button type="button" onClick={go} disabled={!armed||busy} style={{padding:'8px 16px',borderRadius:7,border:'none',fontSize:13,fontWeight:500,cursor:armed&&!busy?'pointer':'not-allowed',background:armed?DANGER:'#e7c9c2',color:'#fff',opacity:busy?0.6:1}}>{busy?'Removing…':mode==='delete'?'Delete everything':'Archive domain'}</button>
+    </div>
   </Modal>);
 }
 
@@ -2464,8 +2513,19 @@ export default function EmailSection({initialTab='customers'}){
   const [modalData,setModalData]=useState({});
   const [domains,setDomains]=useState([]);
   const [domainsLoading,setDomainsLoading]=useState(false);
+  const [showArchived,setShowArchived]=useState(false);
+  const [archived,setArchived]=useState([]);
   const isDomainView   = initialTab==='domains';
   const isMailboxesView= initialTab==='mailboxes';
+
+  async function loadArchived(){
+    const a=await fetch('/api/email/clients?archived=1').then(r=>r.json());
+    setArchived(Array.isArray(a)?a:[]);
+  }
+  async function restoreClient(c){
+    await fetch(`/api/email/clients/${c.id}/restore`,{method:'POST'});
+    await loadArchived(); await loadAll();
+  }
 
   useEffect(()=>{
     if(isDomainView){loadDomains();}
@@ -2540,9 +2600,24 @@ export default function EmailSection({initialTab='customers'}){
       <div style={{width:240,background:CARD,borderRight:`0.5px solid ${BORDER}`,display:'flex',flexDirection:'column',flexShrink:0}}>
         <div style={{padding:'14px 12px',borderBottom:`0.5px solid ${BORDER}`}}>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search clients…" style={{width:'100%',padding:'7px 10px',border:`0.5px solid ${BORDER}`,borderRadius:7,fontSize:13,color:TEXT,background:BG,outline:'none',boxSizing:'border-box'}}/>
+          <button type="button" onClick={()=>{const n=!showArchived;setShowArchived(n);if(n)loadArchived();}} style={{marginTop:8,background:'none',border:'none',color:MUTED,fontSize:11,cursor:'pointer',padding:0}}>{showArchived?'← Back to active':'Show archived'}</button>
         </div>
         <div style={{flex:1,overflowY:'auto'}}>
-          {loading?<div style={{color:MUTED,textAlign:'center',padding:32,fontSize:13}}>Loading…</div>
+          {showArchived?(
+            archived.length===0?<div style={{color:MUTED,textAlign:'center',padding:32,fontSize:13}}>No archived domains</div>
+            :archived.map(c=>(
+              <div key={c.id} style={{padding:'10px 12px',borderBottom:`0.5px solid ${BORDER}`}}>
+                <div style={{display:'flex',alignItems:'center',gap:10}}>
+                  <div style={{width:30,height:30,borderRadius:7,background:'#bbb',display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontSize:11,fontWeight:600,flexShrink:0}}>{initials(c.name)}</div>
+                  <div style={{flex:1,minWidth:0}}><div style={{fontSize:13,color:MUTED,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{c.name}</div><div style={{fontSize:11,color:MUTED}}>archived</div></div>
+                </div>
+                <div style={{display:'flex',gap:8,marginTop:8}}>
+                  <button type="button" onClick={()=>restoreClient(c)} style={{flex:1,padding:'5px 0',border:`0.5px solid ${BORDER}`,borderRadius:6,background:CARD,color:TEXT,fontSize:12,cursor:'pointer'}}>Restore</button>
+                  <button type="button" onClick={()=>{setModalData(c);setModal('remove-client');}} style={{flex:1,padding:'5px 0',border:`0.5px solid #F0997B`,borderRadius:6,background:CARD,color:DANGER,fontSize:12,cursor:'pointer'}}>Delete</button>
+                </div>
+              </div>
+            ))
+          ):loading?<div style={{color:MUTED,textAlign:'center',padding:32,fontSize:13}}>Loading…</div>
           :filtered.length===0?<div style={{color:MUTED,textAlign:'center',padding:32,fontSize:13}}>{search?'No clients match':'No clients yet'}</div>
           :filtered.map(c=>(
             <div key={c.id} onClick={()=>setSelected(c.id)} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 12px',cursor:'pointer',borderBottom:`0.5px solid ${BORDER}`,background:selected===c.id?`${GREEN}12`:CARD,borderLeft:selected===c.id?`3px solid ${GREEN}`:'3px solid transparent'}}>
@@ -2566,7 +2641,8 @@ export default function EmailSection({initialTab='customers'}){
       )}
 
       {modal==='new-client'&&<ClientModal onClose={()=>setModal(null)} onSaved={loadAll}/>}
-      {modal==='edit-client'&&<ClientModal initial={modalData} onClose={()=>setModal(null)} onSaved={loadAll}/>}
+      {modal==='edit-client'&&<ClientModal initial={modalData} onClose={()=>setModal(null)} onSaved={loadAll} onRemove={c=>{setModalData(c);setModal('remove-client');}}/>}
+      {modal==='remove-client'&&<RemoveDomainModal client={modalData} onClose={()=>setModal(null)} onDone={()=>{setModal(null);setSelected(null);loadAll();if(showArchived)loadArchived();}}/>}
     </div>
   );
 }

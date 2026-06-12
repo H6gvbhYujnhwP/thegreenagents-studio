@@ -2007,3 +2007,19 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_crm_order_lines_order ON crm_order_lines(order_id);
 `);
+
+// ── 29. Domain removal — archive flag + re-import tombstone (Phase: delete domain) ─
+// email_clients.archived_at: NULL = active; set = archived (hidden from the
+// Customers list, mailboxes disconnected, all records KEPT, reversible).
+// email_client_removals: names that must NOT be auto-recreated by the
+// frontend's AWS verified-domain sync (which POSTs /api/email/clients per
+// verified domain). A "delete everything" drops a tombstone here; a manual
+// re-add (force) clears it. Belt-and-braces — the operator also removes the
+// SES identity in AWS, after which the domain stops appearing in the sync.
+try { db.exec(`ALTER TABLE email_clients ADD COLUMN archived_at TEXT`); } catch (e) { /* already added */ }
+db.exec(`
+  CREATE TABLE IF NOT EXISTS email_client_removals (
+    name TEXT PRIMARY KEY,
+    removed_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`);

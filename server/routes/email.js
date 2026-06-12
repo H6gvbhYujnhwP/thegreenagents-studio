@@ -538,25 +538,41 @@ router.get('/clients', (req, res) => {
   // the same table but should NOT show up here. The `source` column was added
   // and backfilled in db.js; see the migration block there for full rationale.
   //
-  // Defensive WHERE: rows with NULL source (shouldn't happen post-migration,
-  // but a fresh deploy and the loadAll AWS-sync race could in theory produce
-  // one) are still shown so the operator can fix them. New inserts always set
-  // source explicitly via the POST route below.
+  // Archived domains (archived_at set) are hidden by default; pass ?archived=1
+  // to list ONLY the archived ones (for the "Show archived" toggle).
+  const wantArchived = req.query.archived === '1';
+  const archiveClause = wantArchived ? 'ec.archived_at IS NOT NULL' : 'ec.archived_at IS NULL';
   const rows = db.prepare(`
     SELECT ec.*,
       (SELECT COUNT(*) FROM email_lists WHERE email_client_id=ec.id) as list_count,
       (SELECT COALESCE(SUM(s.cnt),0) FROM (SELECT COUNT(*) as cnt FROM email_subscribers es JOIN email_lists el ON es.list_id=el.id WHERE el.email_client_id=ec.id AND es.status='subscribed') s) as subscriber_count,
       (SELECT COUNT(*) FROM email_campaigns WHERE email_client_id=ec.id) as campaign_count
     FROM email_clients ec
-    WHERE ec.source IS NULL OR ec.source IN ('aws_domain', 'manual')
+    WHERE (ec.source IS NULL OR ec.source IN ('aws_domain', 'manual')) AND ${archiveClause}
     ORDER BY ec.name ASC
   `).all();
   res.json(rows);
 });
 
 router.post('/clients', async (req, res) => {
-  const { name, color } = req.body;
+  const { name, color, force } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
+  const trimmedName = name.trim();
+  const lower = trimmedName.toLowerCase();
+
+  // Don't let the frontend's AWS verified-domain auto-sync recreate a domain
+  // we deliberately removed. A manual re-add (force:true) clears the tombstone.
+  const tomb = db.prepare('SELECT name FROM email_client_removals WHERE LOWER(name)=?').get(lower);
+  if (tomb) {
+    if (force) db.prepare('DELETE FROM email_client_removals WHERE LOWER(name)=?').run(lower);
+    else return res.json({ skipped: true, reason: 'removed' });
+  }
+  // Never duplicate an existing row (active OR archived) — the auto-sync can't
+  // see archived rows via GET, so it would otherwise re-POST them. Return the
+  // existing row without un-archiving it.
+  const existing = db.prepare('SELECT * FROM email_clients WHERE LOWER(name)=?').get(lower);
+  if (existing) return res.json(existing);
+
   const id = uuid();
   // Auto-generate a URL-safe slug for the customer portal at /c/<slug>.
   // The helper (db._portalUniqueSlug) lives in db.js so the same algorithm
@@ -601,18 +617,60 @@ router.put('/clients/:id', (req, res) => {
   res.json(db.prepare('SELECT * FROM email_clients WHERE id=?').get(req.params.id));
 });
 
+// DELETE /api/email/clients/:id — DELETE EVERYTHING. Permanently purges every
+// record tied to this domain across all tables, then tombstones the name so
+// the AWS auto-sync can't recreate it. AWS/SES is NOT touched (operator removes
+// the identity manually). Irreversible — the UI puts a typed-confirm in front.
 router.delete('/clients/:id', (req, res) => {
-  const lists    = db.prepare('SELECT id FROM email_lists WHERE email_client_id=?').all(req.params.id);
-  const campaigns = db.prepare('SELECT id FROM email_campaigns WHERE email_client_id=?').all(req.params.id);
+  const c = db.prepare('SELECT * FROM email_clients WHERE id=?').get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  const id = req.params.id;
   db.transaction(() => {
-    for (const l of lists) db.prepare('DELETE FROM email_subscribers WHERE list_id=?').run(l.id);
-    for (const c of campaigns) db.prepare('DELETE FROM email_sends WHERE campaign_id=?').run(c.id);
-    db.prepare('DELETE FROM email_lists WHERE email_client_id=?').run(req.params.id);
-    db.prepare('DELETE FROM email_campaigns WHERE email_client_id=?').run(req.params.id);
-    db.prepare('DELETE FROM email_brands WHERE email_client_id=?').run(req.params.id);
-    db.prepare('DELETE FROM email_clients WHERE id=?').run(req.params.id);
+    // children keyed indirectly first
+    db.prepare('DELETE FROM email_subscribers WHERE list_id IN (SELECT id FROM email_lists WHERE email_client_id=?)').run(id);
+    db.prepare('DELETE FROM email_sends WHERE campaign_id IN (SELECT id FROM email_campaigns WHERE email_client_id=?)').run(id);
+    db.prepare('DELETE FROM client_sessions WHERE client_user_id IN (SELECT id FROM client_users WHERE email_client_id=?)').run(id);
+    // everything keyed directly by email_client_id
+    for (const t of [
+      'email_lists', 'email_campaigns', 'email_campaign_steps', 'email_outbound', 'email_brands',
+      'email_replies', 'email_inboxes', 'hot_prospects', 'campaign_unsubscribes', 'contact_unsubscribed_all',
+      'customer_services', 'facebook_pixels', 'facebook_ads', 'facebook_ad_creatives', 'client_post_regens',
+      'password_resets', 'client_login_attempts', 'client_users',
+    ]) {
+      try { db.prepare(`DELETE FROM ${t} WHERE email_client_id=?`).run(id); } catch (e) { /* table may not exist on older DBs */ }
+    }
+    db.prepare('DELETE FROM email_clients WHERE id=?').run(id);
+    db.prepare('INSERT OR REPLACE INTO email_client_removals (name) VALUES (?)').run(c.name);
   })();
-  res.json({ ok: true });
+  res.json({ ok: true, purged: true });
+});
+
+// POST /api/email/clients/:id/archive — keep all records, disconnect mailboxes,
+// hide from the active Customers list. Reversible via /restore.
+router.post('/clients/:id/archive', (req, res) => {
+  const c = db.prepare('SELECT * FROM email_clients WHERE id=?').get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  db.transaction(() => {
+    db.prepare("UPDATE email_clients SET archived_at=datetime('now') WHERE id=?").run(req.params.id);
+    db.prepare('UPDATE email_inboxes SET enabled=0 WHERE email_client_id=?').run(req.params.id);
+    db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id)
+                VALUES (?, 'system', 'archive_domain', 'email_client', ?)`).run(uuid(), req.params.id);
+  })();
+  res.json({ ok: true, archived: true });
+});
+
+// POST /api/email/clients/:id/restore — bring an archived domain back + re-enable its mailboxes.
+router.post('/clients/:id/restore', (req, res) => {
+  const c = db.prepare('SELECT * FROM email_clients WHERE id=?').get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  db.transaction(() => {
+    db.prepare('UPDATE email_clients SET archived_at=NULL WHERE id=?').run(req.params.id);
+    db.prepare('UPDATE email_inboxes SET enabled=1 WHERE email_client_id=?').run(req.params.id);
+    db.prepare('DELETE FROM email_client_removals WHERE LOWER(name)=LOWER(?)').run(c.name);
+    db.prepare(`INSERT INTO email_audit_log (id, actor, action, target_type, target_id)
+                VALUES (?, 'system', 'restore_domain', 'email_client', ?)`).run(uuid(), req.params.id);
+  })();
+  res.json({ ok: true, restored: true });
 });
 
 // ── BRANDS ────────────────────────────────────────────────────────────────────
