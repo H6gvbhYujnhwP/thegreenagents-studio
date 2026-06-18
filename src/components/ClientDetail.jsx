@@ -17,6 +17,8 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
   const [logoFile, setLogoFile]                 = useState(null);
   const [activeTab, setActiveTab]               = useState('campaigns');
   const [showCampaignModal, setShowCampaignModal] = useState(false);
+  // Number of posts to generate this run — chosen in the Run-campaign modal.
+  const [postCount, setPostCount] = useState(12);
 
   // Brand panel — three per-customer overrides for how the logo is
   // composited onto generated images. See decision-log entry for this
@@ -65,7 +67,7 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
     const res = await fetch(`/api/campaigns/start/${clientId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ includeImages })
+      body: JSON.stringify({ includeImages, postCount })
     });
     const data = await res.json();
     setStarting(false);
@@ -336,6 +338,78 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
                   </div>
                 )}
               </div>
+
+              {/* Brand kit — feeds the gpt-image-2 designed-ad engine */}
+              <div style={{ marginTop: 20, borderTop: '0.5px solid #f0f0ec', paddingTop: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <div style={{ fontSize: 12, color: '#555', fontWeight: 500 }}>Brand kit (designed-ad engine)</div>
+                  <div style={{ fontSize: 11, color: panelSaving ? '#888' : (panelSaved ? GREEN : 'transparent'), transition: 'color 0.3s' }}>
+                    {panelSaving ? 'Saving…' : (panelSaved ? '✓ Saved' : '·')}
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: '#888', marginBottom: 12, lineHeight: 1.5 }}>
+                  When the image engine is set to gpt-image-2, these fields shape the designed ad (colours, logo, typography). The logo above is also used. Leave on Gemini to keep the current plain-photo style.
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Image engine</div>
+                  <div style={{ display: 'inline-flex', border: '0.5px solid #d0d0cc', borderRadius: 6, overflow: 'hidden' }}>
+                    <button
+                      onClick={() => updateBrandPanel('image_engine', 'gemini')}
+                      style={{ padding: '7px 12px', fontSize: 12, border: 'none', cursor: 'pointer',
+                        background: (client.image_engine || 'gemini') === 'gemini' ? GREEN : '#fff',
+                        color: (client.image_engine || 'gemini') === 'gemini' ? '#fff' : '#555' }}
+                    >
+                      Gemini (plain)
+                    </button>
+                    <button
+                      onClick={() => updateBrandPanel('image_engine', 'gpt_image')}
+                      style={{ padding: '7px 12px', fontSize: 12, border: 'none', borderLeft: '0.5px solid #d0d0cc', cursor: 'pointer',
+                        background: client.image_engine === 'gpt_image' ? GREEN : '#fff',
+                        color: client.image_engine === 'gpt_image' ? '#fff' : '#555' }}
+                    >
+                      gpt-image-2 (designed)
+                    </button>
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Brand colours</div>
+                  <input
+                    value={client.brand_colors || ''}
+                    placeholder="primary #77A734, charcoal #2E2E2E, white #FFFFFF"
+                    onChange={e => updateBrandPanel('brand_colors', e.target.value)}
+                    style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '0.5px solid #d0d0cc', borderRadius: 6, background: '#fff', color: '#1a1a1a' }}
+                  />
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Logo description</div>
+                  <textarea
+                    value={client.logo_description || ''}
+                    rows={2}
+                    placeholder="Green circle with RGS in bold green letters, a green water droplet at the top, REGAN GROUP SERVICES beside it"
+                    onChange={e => updateBrandPanel('logo_description', e.target.value)}
+                    style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '0.5px solid #d0d0cc', borderRadius: 6, background: '#fff', color: '#1a1a1a', resize: 'vertical', fontFamily: 'inherit' }}
+                  />
+                </div>
+
+                <div>
+                  <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Typography style</div>
+                  <input
+                    value={client.type_style || ''}
+                    placeholder="bold condensed sans-serif headlines, clean modern body"
+                    onChange={e => updateBrandPanel('type_style', e.target.value)}
+                    style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '0.5px solid #d0d0cc', borderRadius: 6, background: '#fff', color: '#1a1a1a' }}
+                  />
+                </div>
+
+                {client.image_engine === 'gpt_image' && (
+                  <div style={{ marginTop: 10, fontSize: 11, color: '#185FA5', background: '#eaf2fb', border: '0.5px solid #b8d4f0', borderRadius: 6, padding: '7px 9px', lineHeight: 1.45 }}>
+                    This client's post images now generate as full designed ads via gpt-image-2 (higher cost per image). Requires OPENAI_AI_KEY and OpenAI org verification.
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -359,13 +433,27 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
           <div style={{ background: '#fff', borderRadius: 12, padding: 28, width: 360 }}>
             <div style={{ fontSize: 15, fontWeight: 500, color: '#1a1a1a', marginBottom: 8 }}>Run new campaign</div>
+            <div style={{ marginBottom: 18 }}>
+              <div style={{ fontSize: 13, color: '#666', marginBottom: 6, lineHeight: 1.6 }}>How many posts should this campaign generate?</div>
+              <select
+                value={postCount}
+                onChange={e => setPostCount(Number(e.target.value))}
+                style={{ width: '100%', fontSize: 13, padding: '8px 10px', border: '0.5px solid #d0d0cc', borderRadius: 8, background: '#fff', color: '#1a1a1a' }}
+              >
+                <option value={3}>3 posts</option>
+                <option value={6}>6 posts</option>
+                <option value={12}>12 posts</option>
+                <option value={18}>18 posts</option>
+                <option value={24}>24 posts</option>
+              </select>
+            </div>
             <div style={{ fontSize: 13, color: '#666', marginBottom: 24, lineHeight: 1.6 }}>
               Should this campaign include AI-generated images for each post?
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
               <button onClick={() => startCampaign(true)} style={{ padding: '11px 16px', background: '#1D9E75', color: '#fff', border: 'none', borderRadius: 8, fontWeight: 500, fontSize: 13, cursor: 'pointer', textAlign: 'left' }}>
                 ✓ Yes — generate images for each post
-                <div style={{ fontSize: 11, fontWeight: 400, marginTop: 2, opacity: 0.85 }}>Uses Gemini Nano Banana (~£0.03 per image)</div>
+                <div style={{ fontSize: 11, fontWeight: 400, marginTop: 2, opacity: 0.85 }}>{client.image_engine === 'gpt_image' ? 'Uses gpt-image-2 — designed ads, higher cost per image' : 'Uses Gemini Nano Banana (~£0.03 per image)'}</div>
               </button>
               <button onClick={() => startCampaign(false)} style={{ padding: '11px 16px', background: '#f5f5f3', color: '#1a1a1a', border: '0.5px solid #d0d0cc', borderRadius: 8, fontWeight: 500, fontSize: 13, cursor: 'pointer', textAlign: 'left' }}>
                 ✕ No — text posts only
