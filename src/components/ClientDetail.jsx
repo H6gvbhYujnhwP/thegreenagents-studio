@@ -20,6 +20,11 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
   // Number of posts to generate this run — chosen in the Run-campaign modal.
   const [postCount, setPostCount] = useState(12);
 
+  // "Pull brand from RAG" — re-extracts the brand block from the stored RAG on
+  // demand (auto-extraction already runs on every RAG upload server-side).
+  const [extractingBrand, setExtractingBrand] = useState(false);
+  const [extractMsg, setExtractMsg]           = useState('');
+
   // Brand panel — three per-customer overrides for how the logo is
   // composited onto generated images. See decision-log entry for this
   // feature in BLUEPRINT.md. The save is debounced (1s) so each dropdown
@@ -145,6 +150,32 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
     setNewRag(null);
     setUploadingRag(false);
     load();
+  }
+
+  // Manual re-pull of the brand block from the stored RAG. The brand fields are
+  // already auto-filled when a RAG is uploaded; this button lets the operator
+  // re-pull after editing the RAG wording, or after clearing a field by hand.
+  async function pullBrandFromRag() {
+    if (!client?.rag_content || extractingBrand) return;
+    setExtractingBrand(true);
+    setExtractMsg('');
+    try {
+      const res = await fetch(`/api/clients/${clientId}/extract-brand`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        if (data.client) setClient(c => ({ ...c, ...data.client }));
+        setExtractMsg(data.found
+          ? `✓ Pulled ${data.found} field${data.found === 1 ? '' : 's'} from the RAG`
+          : 'No visual branding found in the RAG');
+      } else {
+        setExtractMsg(data.error || 'Extraction failed');
+      }
+    } catch (_) {
+      setExtractMsg('Extraction failed');
+    } finally {
+      setExtractingBrand(false);
+      setTimeout(() => setExtractMsg(''), 4000);
+    }
   }
 
   if (loading) return <div style={{ padding: 40, color: '#888' }}>Loading...</div>;
@@ -339,16 +370,30 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
                 )}
               </div>
 
-              {/* Brand kit — feeds the gpt-image-2 designed-ad engine */}
+              {/* Brand kit — auto-pulled from the RAG, feeds every generated image */}
               <div style={{ marginTop: 20, borderTop: '0.5px solid #f0f0ec', paddingTop: 16 }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <div style={{ fontSize: 12, color: '#555', fontWeight: 500 }}>Brand kit (designed-ad engine)</div>
+                  <div style={{ fontSize: 12, color: '#555', fontWeight: 500 }}>Brand kit (used by all images)</div>
                   <div style={{ fontSize: 11, color: panelSaving ? '#888' : (panelSaved ? GREEN : 'transparent'), transition: 'color 0.3s' }}>
                     {panelSaving ? 'Saving…' : (panelSaved ? '✓ Saved' : '·')}
                   </div>
                 </div>
-                <div style={{ fontSize: 11, color: '#888', marginBottom: 12, lineHeight: 1.5 }}>
-                  When the image engine is set to gpt-image-2, these fields shape the designed ad (colours, logo, typography). The logo above is also used. Leave on Gemini to keep the current plain-photo style.
+                <div style={{ fontSize: 11, color: '#888', marginBottom: 10, lineHeight: 1.5 }}>
+                  These fields are pulled automatically from the uploaded RAG and feed every generated image, so LinkedIn posts match the brand colours. Edit any field by hand, or re-pull after you change the RAG. The uploaded logo is always added on top.
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+                  <button
+                    onClick={pullBrandFromRag}
+                    disabled={!client.rag_content || extractingBrand}
+                    style={{ padding: '6px 12px', fontSize: 12, border: `0.5px solid ${client.rag_content ? GREEN : '#d0d0cc'}`, borderRadius: 6,
+                      background: '#fff', color: client.rag_content ? GREEN : '#aaa', fontWeight: 500,
+                      cursor: (!client.rag_content || extractingBrand) ? 'not-allowed' : 'pointer' }}
+                  >
+                    {extractingBrand ? 'Pulling…' : 'Pull brand from RAG'}
+                  </button>
+                  {extractMsg && <span style={{ fontSize: 11, color: extractMsg.startsWith('✓') ? GREEN : '#888' }}>{extractMsg}</span>}
+                  {!client.rag_content && <span style={{ fontSize: 11, color: '#aaa' }}>Upload a RAG document first</span>}
                 </div>
 
                 <div style={{ marginBottom: 12 }}>
@@ -360,7 +405,7 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
                         background: (client.image_engine || 'gemini') === 'gemini' ? GREEN : '#fff',
                         color: (client.image_engine || 'gemini') === 'gemini' ? '#fff' : '#555' }}
                     >
-                      Gemini (plain)
+                      Gemini (plain photo)
                     </button>
                     <button
                       onClick={() => updateBrandPanel('image_engine', 'gpt_image')}
@@ -368,18 +413,19 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
                         background: client.image_engine === 'gpt_image' ? GREEN : '#fff',
                         color: client.image_engine === 'gpt_image' ? '#fff' : '#555' }}
                     >
-                      gpt-image-2 (designed)
+                      gpt-image-2 (designed ad)
                     </button>
                   </div>
                 </div>
 
                 <div style={{ marginBottom: 12 }}>
                   <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Brand colours</div>
-                  <input
+                  <textarea
                     value={client.brand_colors || ''}
-                    placeholder="primary #77A734, charcoal #2E2E2E, white #FFFFFF"
+                    rows={2}
+                    placeholder="graphite #1a1a1a background, vivid green #77A734 accent, white #FFFFFF text. Primary combination: graphite background + green accent + white text"
                     onChange={e => updateBrandPanel('brand_colors', e.target.value)}
-                    style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '0.5px solid #d0d0cc', borderRadius: 6, background: '#fff', color: '#1a1a1a' }}
+                    style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '0.5px solid #d0d0cc', borderRadius: 6, background: '#fff', color: '#1a1a1a', resize: 'vertical', fontFamily: 'inherit' }}
                   />
                 </div>
 
@@ -388,25 +434,36 @@ export default function ClientDetail({ clientId, onBack, onRefresh }) {
                   <textarea
                     value={client.logo_description || ''}
                     rows={2}
-                    placeholder="Green circle with RGS in bold green letters, a green water droplet at the top, REGAN GROUP SERVICES beside it"
+                    placeholder="Green circular emblem with RGS in bold white letters inside a vivid green ring"
                     onChange={e => updateBrandPanel('logo_description', e.target.value)}
                     style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '0.5px solid #d0d0cc', borderRadius: 6, background: '#fff', color: '#1a1a1a', resize: 'vertical', fontFamily: 'inherit' }}
                   />
                 </div>
 
-                <div>
+                <div style={{ marginBottom: 12 }}>
                   <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Typography style</div>
                   <input
                     value={client.type_style || ''}
-                    placeholder="bold condensed sans-serif headlines, clean modern body"
+                    placeholder="bold condensed all-caps headlines, clean sans-serif body"
                     onChange={e => updateBrandPanel('type_style', e.target.value)}
                     style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '0.5px solid #d0d0cc', borderRadius: 6, background: '#fff', color: '#1a1a1a' }}
                   />
                 </div>
 
+                <div>
+                  <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Visual style &amp; what to avoid</div>
+                  <textarea
+                    value={client.visual_style || ''}
+                    rows={3}
+                    placeholder="Dark canvas, fleet/job-site photo hero, green CTA button, headline max 8 words. Avoid white or pastel backgrounds and generic stock photos."
+                    onChange={e => updateBrandPanel('visual_style', e.target.value)}
+                    style={{ width: '100%', fontSize: 12, padding: '6px 8px', border: '0.5px solid #d0d0cc', borderRadius: 6, background: '#fff', color: '#1a1a1a', resize: 'vertical', fontFamily: 'inherit' }}
+                  />
+                </div>
+
                 {client.image_engine === 'gpt_image' && (
                   <div style={{ marginTop: 10, fontSize: 11, color: '#185FA5', background: '#eaf2fb', border: '0.5px solid #b8d4f0', borderRadius: 6, padding: '7px 9px', lineHeight: 1.45 }}>
-                    This client's post images now generate as full designed ads via gpt-image-2 (higher cost per image). Requires OPENAI_AI_KEY and OpenAI org verification.
+                    This client's post images generate as full designed ads via gpt-image-2 (higher cost per image). Requires OPENAI_AI_KEY and OpenAI org verification.
                   </div>
                 )}
               </div>

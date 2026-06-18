@@ -52,18 +52,25 @@ db.exec(`
 // ── Logo column migration (added for logo overlay feature) ──────────────────
 try { db.exec('ALTER TABLE clients ADD COLUMN logo_url TEXT'); } catch (_) {}
 
-// ── Brand kit + image engine columns (gpt-image-2 designed-ad pilot) ─────────
-// Additive, nullable. These feed the designed-ad prompt builder in
-// services/openai-image.js.
-//   brand_colors     — free text, e.g. "primary #77A734, charcoal #2E2E2E, white #FFFFFF"
-//   logo_description  — plain words describing the logo so the engine renders it
+// ── Brand kit + image engine columns ────────────────────────────────────────
+// Additive, nullable. These hold the client's visual brand and now feed BOTH
+// image engines: the plain Gemini path (services/gemini.js) and the designed-ad
+// gpt-image-2 path (services/openai-image.js). They are auto-populated from the
+// uploaded RAG document by services/brand-extract.js (and editable by hand), so
+// LinkedIn images follow the brand colours instead of inventing their own.
+//   brand_colors      — palette + how to use it, e.g. "graphite #1a1a1a background, vivid green #77A734 accent, white text"
+//   logo_description  — plain words describing the logo (context only — the real
+//                       uploaded logo file is always composited on top)
 //   type_style        — typography style description (no exact font names needed)
+//   visual_style      — overall creative direction (layout / photography / mood)
+//                       PLUS an explicit "avoid" list pulled from the RAG
 //   image_engine      — 'gemini' (default) | 'gpt_image'. NULL is treated as
 //                       'gemini' by the dispatcher in services/gemini.js, so
 //                       every existing client is completely unchanged.
 try { db.exec('ALTER TABLE clients ADD COLUMN brand_colors TEXT');    } catch (_) {}
 try { db.exec('ALTER TABLE clients ADD COLUMN logo_description TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE clients ADD COLUMN type_style TEXT');      } catch (_) {}
+try { db.exec('ALTER TABLE clients ADD COLUMN visual_style TEXT');    } catch (_) {}
 try { db.exec('ALTER TABLE clients ADD COLUMN image_engine TEXT');    } catch (_) {}
 
 // ── content_rules column migration ──────────────────────────────────────────

@@ -97,6 +97,27 @@ export async function generateImage(imagePrompt, client = {}, post = {}) {
     ? `7. NO BRAND MARK ANYWHERE: Do NOT include any logo, watermark, company name, brand signature, or text reading "${brandName}" anywhere in the image — not in any corner, not as a decorative element, not as part of any sign, screen, label, or background. The real logo will be added separately in post-processing. Keep your main subject and headline text away from the ${cornerLabel} corner so the logo placement lands cleanly there.`
     : `7. BRAND SIGNATURE: The text "${brandName}" MUST appear clearly at the bottom right in a clean professional font. If background is dark use white text; if light use dark text.`;
 
+  // ── Brand block (auto-extracted from the client's RAG, editable in the
+  // Brand kit panel) ─────────────────────────────────────────────────────────
+  // Pre-this-feature, the colour rule below told Gemini to pick "2 dominant
+  // colours" itself — which is exactly why generated images never matched a
+  // customer's brand. When brand colours exist we now order Gemini to lean the
+  // whole image into the brand palette so the output is recognisably on-brand
+  // and consistent with the customer's website + Facebook creative. When the
+  // fields are empty (a client with no brand info in their RAG) the original
+  // behaviour is kept unchanged.
+  const brandColours = (client.brand_colors || '').trim();
+  const visualStyle  = (client.visual_style || '').trim();
+  const brandType    = (client.type_style   || '').trim();
+
+  const colourRule = brandColours
+    ? `3. BRAND COLOURS (use these, do not substitute your own): ${brandColours}. Make these colours dominate the image so it is instantly recognisable as ${brandName}. Apply the stated primary combination.`
+    : `3. COLOUR: 2 dominant colours, high contrast, professional and relevant to ${audience}.`;
+
+  const brandStyleRule = (visualStyle || brandType)
+    ? `\n\n8. BRAND STYLE: Follow this creative direction and honour any "avoid" instructions in it — ${visualStyle}${brandType ? ` Typography feel: ${brandType}.` : ''}`
+    : '';
+
   const nanoBananaPrompt = `Generate a LinkedIn post visual in the NANO BANNA style for ${brandName}.
 
 BRAND: ${brandName}
@@ -114,7 +135,7 @@ NANO BANNA STYLE RULES:
 
 2. TEXT ALLOWED: Include bold text if it strengthens the visual (a short stat, a hook, or a title). Maximum 15 words. Large and mobile-legible.
 
-3. COLOUR: 2 dominant colours, high contrast, professional and relevant to ${audience}.
+${colourRule}
 
 4. ${aspectNote.toUpperCase()}: Fill the entire frame — no white borders or padding.
 
@@ -122,7 +143,7 @@ NANO BANNA STYLE RULES:
 
 6. AUDIENCE: Visually signals immediate relevance to ${audience}.
 
-${brandSignatureRule}`;
+${brandSignatureRule}${brandStyleRule}`;
 
   // gemini-2.5-flash-image is the current working model. The other two are
   // kept as fallbacks in case Google retires it again. Put the working model

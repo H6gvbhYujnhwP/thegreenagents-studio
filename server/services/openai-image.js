@@ -68,6 +68,7 @@ function shortHeadline(str, maxLen = 60) {
 function buildPrompt(imagePrompt, client = {}, post = {}) {
   const brandName = client.brand || client.name || 'the brand';
   const colors    = (client.brand_colors || '').trim();
+  const visualStyle = (client.visual_style || '').trim();
   const typeStyle = (client.type_style || '').trim()
     || 'bold condensed sans-serif headline, clean modern sans-serif supporting text';
   const audience  = post.buyer_segment || 'business decision-makers';
@@ -87,8 +88,15 @@ function buildPrompt(imagePrompt, client = {}, post = {}) {
   }[logoPosition] || 'bottom-right';
 
   const colourLine = colors
-    ? `BRAND COLOURS: ${colors}. Use these for the accent panel/band and the CTA button. White or near-white for clean space.`
+    ? `BRAND COLOURS (use these, do not substitute your own): ${colors}. Apply the stated primary combination across the background, accent panel/band and the CTA button so the ad is instantly recognisable as ${brandName}.`
     : `BRAND COLOURS: a clean, professional, high-contrast palette consistent across the set.`;
+
+  // Overall creative direction + the explicit "avoid" rules, straight from the
+  // RAG-extracted brand block. This is what makes the designed ad match the
+  // customer's website and Facebook creative rather than a generic look.
+  const styleLine = visualStyle
+    ? `BRAND STYLE: Follow this creative direction and honour any "avoid" instructions in it — ${visualStyle}`
+    : '';
 
   return [
     `A professional, polished, print-ready advertisement image for ${brandName}, aimed at ${audience}. It must look like a designed marketing creative, not a stock photo.`,
@@ -101,6 +109,7 @@ function buildPrompt(imagePrompt, client = {}, post = {}) {
     angle ? `TONE (guidance only, do not render as text): ${angle}` : ``,
     `CALL TO ACTION: one clear rounded-rectangle button in a brand colour containing exactly the text "Find out more". No other words on the button.`,
     colourLine,
+    styleLine,
     `TYPOGRAPHY: ${typeStyle}.`,
     ``,
     `NO LOGO: Do NOT draw any logo, watermark, brand mark, company name, monogram, emblem, or signature anywhere in the image. Keep the ${cornerLabel} corner clear of text and important subjects — a real logo will be added there afterwards. This is critical.`,
