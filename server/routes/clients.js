@@ -156,7 +156,8 @@ router.put('/:id', requireAuth, upload.single('rag'), async (req, res) => {
 
   const { name, brand, website, supergrow_workspace_name, supergrow_workspace_id,
     supergrow_api_key, timezone, cadence, posting_identity, approval_mode,
-    logo_position, logo_panel, logo_size } = req.body;
+    logo_position, logo_panel, logo_size,
+    brand_colors, logo_description, type_style, image_engine } = req.body;
 
   // Whitelist the three brand panel fields. If a value comes through that
   // isn't in the allowed set, fall back to the existing stored value rather
@@ -165,6 +166,7 @@ router.put('/:id', requireAuth, upload.single('rag'), async (req, res) => {
   const ALLOWED_POSITIONS = ['bottom-right', 'top-right', 'bottom-left', 'top-left'];
   const ALLOWED_PANELS    = ['white', 'none'];
   const ALLOWED_SIZES     = ['small', 'medium', 'large'];
+  const ALLOWED_ENGINES   = ['gemini', 'gpt_image'];
 
   const safePosition = logo_position !== undefined
     ? (ALLOWED_POSITIONS.includes(logo_position) ? logo_position : client.logo_position)
@@ -175,6 +177,16 @@ router.put('/:id', requireAuth, upload.single('rag'), async (req, res) => {
   const safeSize = logo_size !== undefined
     ? (ALLOWED_SIZES.includes(logo_size) ? logo_size : client.logo_size)
     : client.logo_size;
+
+  // Brand-kit fields (gpt-image-2 designed-ad pilot). Free-text fields take the
+  // submitted value as-is (including blank, to allow clearing); when omitted
+  // they keep the stored value. image_engine is whitelisted like the dropdowns.
+  const safeBrandColors = brand_colors    !== undefined ? brand_colors    : client.brand_colors;
+  const safeLogoDesc    = logo_description !== undefined ? logo_description : client.logo_description;
+  const safeTypeStyle   = type_style       !== undefined ? type_style       : client.type_style;
+  const safeEngine = image_engine !== undefined
+    ? (ALLOWED_ENGINES.includes(image_engine) ? image_engine : client.image_engine)
+    : client.image_engine;
 
   let rag_content = client.rag_content;
   let rag_filename = client.rag_filename;
@@ -193,12 +205,14 @@ router.put('/:id', requireAuth, upload.single('rag'), async (req, res) => {
       supergrow_api_key=?, timezone=?, cadence=?, posting_identity=?, approval_mode=?,
       rag_filename=?, rag_content=?,
       logo_position=?, logo_panel=?, logo_size=?,
+      brand_colors=?, logo_description=?, type_style=?, image_engine=?,
       updated_at=datetime('now')
     WHERE id=?
   `).run(name, brand, website, supergrow_workspace_name, supergrow_workspace_id,
     supergrow_api_key, timezone, cadence, posting_identity, approval_mode,
     rag_filename, rag_content,
     safePosition, safePanel, safeSize,
+    safeBrandColors, safeLogoDesc, safeTypeStyle, safeEngine,
     req.params.id);
 
   res.json({ ok: true });

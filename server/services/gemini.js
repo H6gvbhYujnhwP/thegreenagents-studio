@@ -24,10 +24,21 @@
 
 import { GoogleGenAI } from '@google/genai';
 import sharp from 'sharp';
+import { generateGptImage } from './openai-image.js';
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 export async function generateImage(imagePrompt, client = {}, post = {}) {
+  // ── Per-client image-engine dispatch ──────────────────────────────────────
+  // 'gpt_image' clients get the single-pass DESIGNED ad from
+  // services/openai-image.js (gpt-image-2). Every other client — image_engine
+  // NULL or 'gemini' — falls through to the existing Gemini generate +
+  // composite-logo pipeline below, completely unchanged. This is the only
+  // touch-point, so campaigns.js and portal.js need no changes.
+  if (client.image_engine === 'gpt_image') {
+    return generateGptImage(imagePrompt, client, post);
+  }
+
   const brandName  = client.brand || client.name || 'Brand';
   const audience   = post.buyer_segment || 'business professionals';
   const format     = (post.format || 'Text Post').toLowerCase();

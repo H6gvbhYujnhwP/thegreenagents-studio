@@ -283,7 +283,11 @@ Start your response with the { character and end with the } character.
 Any text outside the JSON object will cause the entire pipeline to fail.`;
 
 // ─── Generate posts using Claude with web search + prompt caching ─────────────
-export async function generatePosts(client, onProgress, contentDna = null, algorithmBrief = null) {
+export async function generatePosts(client, onProgress, contentDna = null, algorithmBrief = null, count = POSTS_PER_CAMPAIGN) {
+  // How many posts to generate this run. Defaults to POSTS_PER_CAMPAIGN (12).
+  // Clamped to 1–24 so a bad/missing value from the UI can never request 0 or
+  // an unreasonably large single-pass batch.
+  const postCount = Math.max(1, Math.min(24, Number(count) || POSTS_PER_CAMPAIGN));
   onProgress('Starting Claude — researching LinkedIn algorithm and industry trends...');
 
   const dnaSection = contentDna
@@ -329,7 +333,7 @@ CLIENT RAG DOCUMENT — THE ONLY SOURCE OF TRUTH FOR THIS CAMPAIGN:`,
 
 TASK:
 1. Use your web_search tool now to research: (a) current LinkedIn algorithm best practices and format performance for ${new Date().getFullYear()}, and (b) current trends and buyer pain points in this client's industry.
-2. Then generate exactly ${POSTS_PER_CAMPAIGN} LinkedIn posts for this client.
+2. Then generate exactly ${postCount} LinkedIn posts for this client.
 
 Every topic, angle, proof point, and voice detail MUST come from the RAG document above.
 Vary formats across the batch as instructed.
@@ -339,9 +343,9 @@ carousel_slides must always be null — no carousel format is used.
 Founder story posts: first person, specific, human — not polished.
 
 TOPIC DIVERSITY — MANDATORY:
-The ${POSTS_PER_CAMPAIGN} posts must cover genuinely different topics drawn from the RAG. Do not repeat the same core message or lesson in multiple posts.
+The ${postCount} posts must cover genuinely different topics drawn from the RAG. Do not repeat the same core message or lesson in multiple posts.
 
-Required content angle rotation — each post must use a different angle from this list:
+Required content angle rotation — spread the posts across the angles in this list as evenly as possible, and avoid clustering the same angle:
 - Myth-busting (challenge a wrong belief buyers hold)
 - How it works (explain a process or product mechanic the buyer doesn't know)
 - Objection handling (address a specific reason buyers hesitate)
@@ -355,12 +359,12 @@ Required content angle rotation — each post must use a different angle from th
 - FAQ / common question (answer what buyers always ask but rarely get a straight answer to)
 - Stakes (what happens if you don't act — specific and tangible, not vague)
 
-No two posts may share the same angle. No two posts may end with the same type of question.
+Where possible no two posts should share the same angle, and no two posts should end with the same type of question. If there are more posts than angles, reuse an angle only when the topic and core lesson are clearly different.
 
 ANTI-DUPLICATION GATE — CRITICAL:
 Before writing each post, state internally: "What is the single core lesson this post teaches that NONE of the previous posts teach?" If you cannot name a distinct lesson, pick a different topic.
 
-Before finalising your response, scan all ${POSTS_PER_CAMPAIGN} posts and check:
+Before finalising your response, scan all ${postCount} posts and check:
 - Does every post have a different core lesson?
 - Does every post have a different CTA or closing question?
 - Could a reader learn something new from post 8 that they did not learn from posts 1-7?

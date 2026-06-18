@@ -52,6 +52,20 @@ db.exec(`
 // ── Logo column migration (added for logo overlay feature) ──────────────────
 try { db.exec('ALTER TABLE clients ADD COLUMN logo_url TEXT'); } catch (_) {}
 
+// ── Brand kit + image engine columns (gpt-image-2 designed-ad pilot) ─────────
+// Additive, nullable. These feed the designed-ad prompt builder in
+// services/openai-image.js.
+//   brand_colors     — free text, e.g. "primary #77A734, charcoal #2E2E2E, white #FFFFFF"
+//   logo_description  — plain words describing the logo so the engine renders it
+//   type_style        — typography style description (no exact font names needed)
+//   image_engine      — 'gemini' (default) | 'gpt_image'. NULL is treated as
+//                       'gemini' by the dispatcher in services/gemini.js, so
+//                       every existing client is completely unchanged.
+try { db.exec('ALTER TABLE clients ADD COLUMN brand_colors TEXT');    } catch (_) {}
+try { db.exec('ALTER TABLE clients ADD COLUMN logo_description TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE clients ADD COLUMN type_style TEXT');      } catch (_) {}
+try { db.exec('ALTER TABLE clients ADD COLUMN image_engine TEXT');    } catch (_) {}
+
 // ── content_rules column migration ──────────────────────────────────────────
 // Customer-defined "refine my posts" rules — short numbered constraints the
 // customer types in their portal that override the LinkedIn algorithm and the

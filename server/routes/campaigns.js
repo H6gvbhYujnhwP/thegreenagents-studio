@@ -116,16 +116,18 @@ router.post('/start/:clientId', requireAuth, async (req, res) => {
   if (!client.rag_content) return res.status(400).json({ error: 'No RAG document uploaded for this client' });
 
   const campaignId = uuid();
+  // How many posts this run. From the Generate dropdown; clamped 1–24, default 12.
+  const postCount = Math.max(1, Math.min(24, Number(req.body?.postCount) || 12));
   db.prepare(`
     INSERT INTO campaigns (id, client_id, status, stage, progress, total_posts)
-    VALUES (?, ?, 'running', 'generating_posts', 0, 12)
-  `).run(campaignId, client.id);
+    VALUES (?, ?, 'running', 'generating_posts', 0, ?)
+  `).run(campaignId, client.id, postCount);
 
   const includeImages = req.body?.includeImages !== false; // default true
 
   res.json({ campaignId });
 
-  runCampaign(campaignId, client, includeImages).catch(err => {
+  runCampaign(campaignId, client, includeImages, postCount).catch(err => {
     console.error('Campaign error:', err);
     updateCampaign(campaignId, { status: 'failed', stage: 'error', error_log: err.message });
     sendSSE(campaignId, { type: 'error', message: err.message });
@@ -486,7 +488,7 @@ router.post('/:id/cancel', requireAuth, (req, res) => {
 
 // ─── Campaign pipeline ────────────────────────────────────────────────────────
 
-async function runCampaign(campaignId, client, includeImages = true) {
+async function runCampaign(campaignId, client, includeImages = true, postCount = 12) {
   try {
     // ── Fetch Content DNA ──────────────────────────────────────────────────────
     let contentDna = null;
@@ -517,7 +519,8 @@ async function runCampaign(campaignId, client, includeImages = true) {
       client,
       msg => sendSSE(campaignId, { type: 'log', message: msg }),
       contentDna,
-      algorithmBrief
+      algorithmBrief,
+      postCount
     );
 
     const posts = generated.posts;
