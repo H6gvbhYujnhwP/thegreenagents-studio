@@ -262,7 +262,15 @@ router.post('/:id/regenerate-image/:postIndex', requireAuth, async (req, res) =>
     posts[postIndex] = {
       ...post,
       image_url: imageUrl,
-      pre_logo_image_url: preLogoUrl || post.pre_logo_image_url || null,
+      // A fresh image was just generated, so its logo-less (pre-logo) copy MUST
+      // be the one stored here — NEVER fall back to a previous generation's
+      // pre-logo. The old fallback ( `|| post.pre_logo_image_url` ) let the
+      // displayed image and its pre-logo copy drift apart: a later logo-dropdown
+      // re-composite then pasted the logo onto the OLD copy and silently
+      // reverted the colours (RGS green → old blue). If the new pre-logo upload
+      // failed, store null — the logo dropdowns disable with a "click New image"
+      // hint, which is honest, rather than reverting the customer's brand colours.
+      pre_logo_image_url: preLogoUrl,
       // Reset any per-post overrides on a full regen — fresh image, fresh
       // dropdown state at the customer-level default.
       logo_position: null,
