@@ -2333,7 +2333,7 @@ function ClassifyBadge({ reply }) {
     case 'positive':      return mk(`${prefix}New prospect`,  BLUE_BG,        BLUE);
     case 'hard_negative': return mk(`${prefix}Negative`,      BADGE_NEG_BG,   BADGE_NEG_FG);
     case 'soft_negative': return mk(`${prefix}Soft negative`, BADGE_NEG_BG,   BADGE_NEG_FG);
-    case 'auto_reply':    return mk(`${prefix}Out of Office`, BADGE_GREY_BG,  BADGE_GREY_FG);
+    case 'auto_reply':    return mk(`${prefix}Out of Office`, '#FBEAF0',      '#72243E');
     case 'forwarding':    return mk(`${prefix}Forwarded`,     BADGE_FWD_BG,   BADGE_FWD_FG);
     case 'neutral':       return mk(`${prefix}Neutral`,       BADGE_GREY_BG,  BADGE_GREY_FG);
     default:              return mk('Classifying…',           BADGE_GREY_BG,  BADGE_GREY_FG);

@@ -13,7 +13,7 @@ function Input({label,value,onChange,placeholder,type='text',required,rows,style
   const base={width:'100%',padding:'8px 12px',border:`0.5px solid ${BORDER}`,borderRadius:7,fontSize:13,color:TEXT,background:CARD,outline:'none',boxSizing:'border-box',...style};
   return(<div style={{marginBottom:14}}>{label&&<label style={{display:'block',fontSize:12,color:MUTED,marginBottom:4}}>{label}{required&&' *'}</label>}{rows?<textarea value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} rows={rows} style={{...base,fontFamily:'monospace',resize:'vertical'}}/>:<input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} style={base}/>}</div>);
 }
-function Badge({label,color=GREEN,bg}){return <span style={{fontSize:11,padding:'2px 8px',borderRadius:20,fontWeight:500,background:bg||`${color}18`,color,whiteSpace:'nowrap'}}>{label}</span>;}
+function Badge({label,color=GREEN,bg,border}){return <span style={{fontSize:11,padding:'2px 8px',borderRadius:20,fontWeight:500,background:bg||`${color}18`,color,whiteSpace:'nowrap',border:border||undefined}}>{label}</span>;}
 function statusBadge(s){
   const m={draft:{l:'Draft',c:MUTED,b:'#f0f0ed'},scheduled:{l:'Scheduled',c:AMBER,b:'#fff3cd'},sending:{l:'Sending',c:GREEN,b:`${GREEN}15`},paused:{l:'Paused',c:AMBER,b:'#fff3cd'},sent:{l:'Sent',c:BLUE,b:'#e6f1fb'},failed:{l:'Failed',c:DANGER,b:'#fdecea'},cancelled:{l:'Cancelled',c:MUTED,b:'#f0f0ed'}};
   const x=m[s]||{l:s,c:MUTED,b:'#f0f0ed'};
@@ -2716,10 +2716,10 @@ function classifyBadge(reply){
     case 'positive':      return <Badge label={`${prefix}New prospect`}  color="#0C447C" bg="#E6F1FB"/>;
     case 'hard_negative': return <Badge label={`${prefix}Negative`}      color="#793F1F" bg="#FAECE7"/>;
     case 'soft_negative': return <Badge label={`${prefix}Soft negative`} color="#793F1F" bg="#FAECE7"/>;
-    case 'auto_reply':    return <Badge label={`${prefix}Out of Office`} color="#5F5E5A" bg="#F1EFE8"/>;
+    case 'auto_reply':    return <Badge label={`${prefix}Out of Office`} color="#72243E" bg="#FBEAF0"/>;
     case 'forwarding':    return <Badge label={`${prefix}Forwarded`}     color="#3C3489" bg="#EEEDFE"/>;
     case 'neutral':       return <Badge label={`${prefix}Neutral`}       color="#5F5E5A" bg="#F1EFE8"/>;
-    default:              return <Badge label={`${prefix}Unclassified`}  color="#5F5E5A" bg="#F1EFE8"/>;
+    default:              return <Badge label={`${prefix}Unclassified`}  color="#5F5E5A" bg="transparent" border="1px dashed #B4B2A9"/>;
   }
 }
 
