@@ -31,6 +31,7 @@ import { queuePost } from '../services/supergrow.js';
 import { sendEmail } from '../services/ses.js';
 import { resolveLinkedSet, resolveCrmCustomerId, buildSubscriptionsPanel, applySubscriptionsUpdate } from './hot-prospects.js';
 import { metaConfigured, getAdsOverview, getPixelStats } from '../services/meta-api.js';
+import { isFormspreeLeadRow } from '../services/formspree-flagger.js';
 import { v4 as uuid } from 'uuid';
 
 const router = Router();
@@ -1152,6 +1153,7 @@ router.get('/inbox', (req, res) => {
     hot_prospect_id:              r.hot_prospect_id              || null,
     hot_prospect_crm_customer_id: r.hot_prospect_crm_customer_id || null,
     contact_unsubscribed:         !!r.contact_unsubscribed,
+    is_website_prospect:          isFormspreeLeadRow(r),
   }));
 
   res.json({ replies, not_subscribed: false });
@@ -1202,6 +1204,7 @@ router.get('/replies/:id', (req, res) => {
     hot_prospect_id:              row.hot_prospect_id              || null,
     hot_prospect_crm_customer_id: row.hot_prospect_crm_customer_id || null,
     contact_unsubscribed:         !!row.contact_unsubscribed,
+    is_website_prospect:          isFormspreeLeadRow(row),
   });
 });
 

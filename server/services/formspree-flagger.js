@@ -153,6 +153,22 @@ export function isFormspreeLead(parsed) {
   }
 }
 
+/**
+ * Row adapter for isFormspreeLead. The poller works with mailparser `parsed`
+ * objects, but the inbox/portal routes work with email_replies DB rows
+ * ({ from_address, subject, body_text, body_html }). This wraps a row into the
+ * shape isFormspreeLead expects so the routes can stamp an `is_website_prospect`
+ * flag using the SAME single detection — no duplicated keyword lists in the UI.
+ */
+export function isFormspreeLeadRow(row) {
+  return isFormspreeLead({
+    from: { value: [{ address: row?.from_address || '' }] },
+    subject: row?.subject || '',
+    text: row?.body_text || '',
+    html: row?.body_html || '',
+  });
+}
+
 // ─── Body parsing ────────────────────────────────────────────────────────────
 
 // Email regex — kept simple; we strip surrounding punctuation when matching.

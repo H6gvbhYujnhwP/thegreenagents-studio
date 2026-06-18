@@ -2293,19 +2293,6 @@ function PortalActionBadges({ reply, onNavigateToCrm }) {
 // collapse soft_negative / hard_negative / forwarding all to "Neutral"
 // and OOO was shown as "OOO". Operator chose full parity with admin labels
 // 2026-05-20 fifth session, deliberately amending decisions #36 and #69.
-const FORMSPREE_SUBJECT_KEYWORDS = [
-  'catalogue download', 'website enquiry', 'website inquiry',
-  'contact form', 'form submission', 'new submission',
-  'new lead', 'new enquiry', 'new inquiry',
-];
-function isFormspreeWebsiteLead(reply) {
-  const from = String(reply?.from_address || '').toLowerCase();
-  if (!from.endsWith('@formspree.io')) return false;
-  const subj = String(reply?.subject || '').toLowerCase();
-  if (!subj) return false;
-  return FORMSPREE_SUBJECT_KEYWORDS.some(k => subj.includes(k));
-}
-
 // Admin Badge colour palette mirrored locally so the portal renders
 // the same chrome. Greens/blues come from the existing portal vars; the
 // negatives/forwarded/auto-unsub colours are admin-side and copied verbatim.
@@ -2324,10 +2311,11 @@ function ClassifyBadge({ reply }) {
   );
 
   // 1. Formspree website-form submission — own label, bypasses classifier.
-  //    Same gate as the auto-flagger in formspree-flagger.js. Shown on BOTH
-  //    portal and admin even though there's no campaign_title, because the
-  //    submission IS the prospect signal.
-  if (isFormspreeWebsiteLead(reply)) {
+  //    Driven by is_website_prospect from the backend (single source of truth
+  //    — see isFormspreeLeadRow in formspree-flagger.js). Shown on BOTH portal
+  //    and admin even with no campaign_title, because the submission IS the
+  //    prospect signal.
+  if (reply?.is_website_prospect) {
     return mk('Website Prospect', GREEN_BG, GREEN);
   }
 

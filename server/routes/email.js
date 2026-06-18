@@ -10,6 +10,7 @@ import { encrypt, selfTest as cryptoSelfTest } from '../services/crypto-vault.js
 import { testImapCredentials, pollSingleInbox } from '../services/imap-poller.js';
 import { parseFirstName, parseAndCacheList, templateUsesFirstName, renderTemplate } from '../services/name-parser.js';
 import { classifyPendingOnce, classifyOneReply } from '../services/classify-replies.js';
+import { isFormspreeLeadRow } from '../services/formspree-flagger.js';
 import { resolveLinkedSet, resolveCrmCustomerId, buildSubscriptionsPanel, applySubscriptionsUpdate } from './hot-prospects.js';
 import dns from 'dns';
 import { promisify } from 'util';
@@ -2046,6 +2047,10 @@ function attachInboxBadges(rows) {
     r.hot_prospect_id = null;
     r.hot_prospect_crm_customer_id = null;
     r.contact_unsubscribed = false;
+    // Single source of truth for the "Website Prospect" badge: the same
+    // Formspree detection the auto-flagger uses (sender + body form-fields),
+    // so the UI never drifts from the flagger via a stale keyword copy.
+    r.is_website_prospect = isFormspreeLeadRow(r);
   }
   if (!rows || rows.length === 0) return rows;
 

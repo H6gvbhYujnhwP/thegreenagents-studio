@@ -2697,21 +2697,12 @@ function relTime(iso){
 // just the bare label. Operator added the Campaign prefix + Website Prospect
 // label 2026-05-20 fifth session — see decisions #36, #69, and the amendment
 // in this session's blueprint addition.
-const FORMSPREE_SUBJECT_KEYWORDS = [
-  'catalogue download', 'website enquiry', 'website inquiry',
-  'contact form', 'form submission', 'new submission',
-  'new lead', 'new enquiry', 'new inquiry',
-];
-function isFormspreeWebsiteLead(reply){
-  const from = String(reply?.from_address || '').toLowerCase();
-  if (!from.endsWith('@formspree.io')) return false;
-  const subj = String(reply?.subject || '').toLowerCase();
-  if (!subj) return false;
-  return FORMSPREE_SUBJECT_KEYWORDS.some(k => subj.includes(k));
-}
 function classifyBadge(reply){
   // 1. Formspree website-form submission — own label, bypasses classifier.
-  if (isFormspreeWebsiteLead(reply)) {
+  //    Driven by is_website_prospect from the backend (single source of truth;
+  //    see isFormspreeLeadRow in formspree-flagger.js) so this badge can never
+  //    drift from the auto-flagger via a stale local keyword copy.
+  if (reply?.is_website_prospect) {
     return <Badge label="Website Prospect" color="#0F6E56" bg="#E1F5EE"/>;
   }
 
