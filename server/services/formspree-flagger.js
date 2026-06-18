@@ -83,21 +83,71 @@ const LEAD_SUBJECT_KEYWORDS = [
   'new lead',
   'new enquiry',
   'new inquiry',
+  'request a quote',
+  'quote request',
+  'get a quote',
+];
+
+// Formspree's OWN product/account/billing mail is NOT a lead. Exclude by
+// sender sub-address and by transactional subject keywords. These take
+// priority over everything — if any match, it's never treated as a lead.
+const FORMSPREE_NONLEAD_SENDER_RE =
+  /^(accounts|billing|receipts?|support|hello|team|news|newsletter|info|notifications?)@formspree\.io$/i;
+
+const NONLEAD_SUBJECT_KEYWORDS = [
+  'verify your email',
+  'email verification',
+  'verify your formspree',
+  'confirm your',
+  'welcome to formspree',
+  'your formspree',
+  'enrich your leads',
+  'newsletter',
+  'receipt',
+  'invoice',
+  'payment',
+  'password',
+  'plan',
+  'upgrade',
+  'trial',
+  'subscription',
 ];
 
 /**
  * Decide whether a parsed email is a Formspree lead worth flagging.
  * Returns true/false; never throws.
+ *
+ * Detection (robust — no longer subject-only):
+ *   1. Must be from @formspree.io.
+ *   2. NEVER a lead if it's Formspree's own product/account/billing mail
+ *      (sender sub-address or a transactional subject keyword).
+ *   3. It IS a lead if EITHER the subject matches a known lead keyword OR the
+ *      body parses out a genuine labelled submitter email (a real form field).
+ *      The body signal is what catches custom form subjects like
+ *      "Request a Quote" that don't contain any default keyword — the original
+ *      subject-only check missed those and left them unflagged.
  */
 export function isFormspreeLead(parsed) {
   try {
-    const fromAddr = parsed?.from?.value?.[0]?.address || '';
+    const fromAddr = (parsed?.from?.value?.[0]?.address || '').toLowerCase();
     if (!FORMSPREE_SENDER_RE.test(fromAddr)) return false;
 
-    const subject = (parsed?.subject || '').toLowerCase();
-    if (!subject) return false;
+    // Formspree's own product/account/billing senders are never leads.
+    if (FORMSPREE_NONLEAD_SENDER_RE.test(fromAddr)) return false;
 
-    return LEAD_SUBJECT_KEYWORDS.some(k => subject.includes(k));
+    const subject = (parsed?.subject || '').toLowerCase();
+
+    // Known transactional/product subjects are never leads, even from noreply@.
+    if (NONLEAD_SUBJECT_KEYWORDS.some(k => subject.includes(k))) return false;
+
+    // Strong allow: subject matches a known lead keyword.
+    if (subject && LEAD_SUBJECT_KEYWORDS.some(k => subject.includes(k))) return true;
+
+    // Robust signal: a real submission has a labelled submitter email in the
+    // body regardless of the (possibly custom) subject. parseFormspreeBody is
+    // a function declaration so it's hoisted — safe to call here.
+    const { email } = parseFormspreeBody(parsed?.text, parsed?.html);
+    return !!email;
   } catch {
     return false;
   }
