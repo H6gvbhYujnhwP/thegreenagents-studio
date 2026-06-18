@@ -5,50 +5,46 @@
  * The dispatcher lives at the top of services/gemini.js generateImage(), so
  * call sites (campaigns.js, portal.js) are unchanged.
  *
- * This is the OPPOSITE approach to gemini.js. Gemini makes a plain photo with
- * no text/logo and we composite the real logo afterwards. gpt-image-2 instead
- * renders the COMPLETE designed ad in a single pass — background, headline,
- * CTA, footer bar, brand colours and logo together — the same approach the
- * Manus ad sets use (gpt-image-2 is the model behind Manus's "Forge" wrapper).
+ * Approach (HYBRID — guarantees the real logo):
+ *   1. gpt-image-2 generates the COMPLETE designed ad — background, headline,
+ *      CTA, brand colours — in a single pass, but with NO logo and a corner
+ *      left clear. This is the opposite of Gemini's plain-photo output: the
+ *      design, layout and text are all the model's, like the Manus ad sets.
+ *   2. Studio then composites the customer's REAL uploaded logo into that
+ *      clear corner using the existing Sharp compositor in gemini.js — the
+ *      exact same one the Gemini path uses. The model is told never to draw a
+ *      logo, so it can't invent one; the only logo that ever appears is the
+ *      uploaded file, pixel-for-pixel, for every customer.
  *
  * Returns the SAME shape as gemini.js generateImage so it's a drop-in:
  *   { data, mimeType, preLogoData, preLogoMime }
- * gpt-image bakes the logo into the image, so there is no separate "pre-logo"
- * version — preLogoData mirrors data. NOTE: the portal's per-post logo
- * reposition dropdowns (recompositeLogoFromUrl) are a no-op for gpt_image
- * clients, because there is no clean logo-free base to re-stamp. That's
- * acceptable for the pilot; we can hide those controls for gpt_image clients
- * later if needed.
+ * preLogoData is the no-logo designed ad, so the per-post logo reposition
+ * dropdowns work for gpt_image clients too.
  *
- * FIRST CUT (this version): the logo is DESCRIBED in the prompt (from the
- * client's logo_description) rather than uploaded as a true reference image.
- * This uses the well-documented /v1/images/generations endpoint (JSON) and is
- * the safest way to get a working designed ad on the first live test. If logo
- * fidelity isn't good enough, the next step is to switch logo-bearing clients
- * to the /v1/images/edits endpoint and pass the real logo file as a reference
- * (Manus's approach) — banked as a follow-up, deliberately not in this cut.
+ * SPELLING: gpt-image-2 renders text well but not perfectly. We minimise
+ * errors by giving it short, exact text to render verbatim and few text
+ * elements. The reliable safety net is the per-post "regenerate image" button
+ * on the review screen.
  */
 
 const OPENAI_KEY = () =>
   process.env.OPENAI_AI_KEY || process.env.OPENAI_API_KEY || '';
 
-// Env-overridable so a future model bump (gpt-image-3, a dated snapshot, etc.)
-// needs no code change.
+// Env-overridable so a future model bump needs no code change.
 const MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2';
 
 // gpt-image-2 supports 1024x1024 (square), 1536x1024 (landscape) and
-// 1024x1536 (portrait). Square is the safe, universally-good default for both
-// LinkedIn and Facebook feeds and matches the Manus feed default.
+// 1024x1536 (portrait). Square is the safe, universally-good default.
 const IMAGE_SIZE = process.env.OPENAI_IMAGE_SIZE || '1024x1024';
 
-// Layout shells rotated across a set so 12+ images feel varied but on-brand.
+// Layout shells rotated across a set so many images feel varied but on-brand.
 // Picked by a stable hash of the post so the same post always gets the same
 // layout (no flicker on regenerate).
 const LAYOUTS = [
   'Split layout: a dramatic photo fills the left ~55%, a clean brand-colour panel on the right holds the headline and CTA.',
   'Full-bleed photo background with a strong dark-to-transparent gradient along the bottom third; headline and CTA sit over the gradient.',
-  'Top two-thirds is the photo; a solid brand-colour band across the bottom third carries the headline in large text with the CTA.',
-  'Bold colour-block design: minimal photo inset top-left, the rest a brand-colour field with an oversized headline and a clear CTA button.',
+  'Top two-thirds is the photo; a solid brand-colour band across the bottom third carries the headline with the CTA.',
+  'Bold colour-block design: a small photo inset, the rest a brand-colour field with an oversized headline and a clear CTA button.',
   'Diagonal split between a photo and a brand-colour field, headline spanning the join, CTA below.',
 ];
 
@@ -59,35 +55,40 @@ function pickLayout(seedStr) {
   return LAYOUTS[h % LAYOUTS.length];
 }
 
+// Trim a headline to a short, punchy length at a word boundary. Shorter text
+// = far fewer spelling mistakes from the model.
+function shortHeadline(str, maxLen = 60) {
+  const s = String(str || '').trim();
+  if (s.length <= maxLen) return s;
+  const cut = s.slice(0, maxLen);
+  const lastSpace = cut.lastIndexOf(' ');
+  return (lastSpace > 20 ? cut.slice(0, lastSpace) : cut).trim();
+}
+
 function buildPrompt(imagePrompt, client = {}, post = {}) {
   const brandName = client.brand || client.name || 'the brand';
   const colors    = (client.brand_colors || '').trim();
-  const logoDesc  = (client.logo_description || '').trim();
   const typeStyle = (client.type_style || '').trim()
     || 'bold condensed sans-serif headline, clean modern sans-serif supporting text';
-  const website   = (client.website || '').trim();
   const audience  = post.buyer_segment || 'business decision-makers';
   const topic     = (post.topic || '').trim();
   const angle     = (post.angle || '').trim();
 
-  // The on-image headline. Kept short and drawn from the post's topic (falling
-  // back to the angle). This is deliberately simple for the pilot; a dedicated
-  // AI-written image headline can be added to post generation later.
-  const headline = (topic || angle || brandName).toString().trim().slice(0, 90);
+  const headline = shortHeadline(topic || angle || brandName, 60);
+  const layout   = pickLayout(`${topic}|${angle}|${brandName}`);
 
-  const layout = pickLayout(`${topic}|${angle}|${brandName}`);
-
-  const logoLine = logoDesc
-    ? `LOGO: render the ${brandName} logo cleanly in one top corner, kept clear of the headline. The logo is: ${logoDesc}`
-    : `LOGO: render a clean, simple "${brandName}" wordmark in one top corner, kept clear of the headline.`;
+  // The corner to keep clear — matches where the real logo will be composited.
+  const logoPosition = client.logo_position || 'bottom-right';
+  const cornerLabel = {
+    'bottom-right': 'bottom-right',
+    'top-right':    'top-right',
+    'bottom-left':  'bottom-left',
+    'top-left':     'top-left',
+  }[logoPosition] || 'bottom-right';
 
   const colourLine = colors
-    ? `BRAND COLOURS: ${colors}. Use these for the accent panel/band, the CTA button and the footer bar. White or near-white for clean space.`
+    ? `BRAND COLOURS: ${colors}. Use these for the accent panel/band and the CTA button. White or near-white for clean space.`
     : `BRAND COLOURS: a clean, professional, high-contrast palette consistent across the set.`;
-
-  const footerLine = website
-    ? `FOOTER: a solid brand-colour bar across the full width at the very bottom, containing the website "${website}" in clean white text.`
-    : '';
 
   return [
     `A professional, polished, print-ready advertisement image for ${brandName}, aimed at ${audience}. It must look like a designed marketing creative, not a stock photo.`,
@@ -96,15 +97,17 @@ function buildPrompt(imagePrompt, client = {}, post = {}) {
     ``,
     `BACKGROUND IMAGERY: ${imagePrompt || `a relevant, high-quality photographic scene for ${brandName}`}`,
     ``,
-    `HEADLINE: large, bold, mobile-legible text reading exactly: "${headline}". Spelled correctly. Strong visual hierarchy.`,
-    angle ? `SUPPORTING ANGLE (do not render verbatim, let it guide tone): ${angle}` : ``,
-    `CALL TO ACTION: a clear rounded rectangle button in a brand colour with short white text such as "Find out more" or "Get in touch".`,
-    logoLine,
+    `HEADLINE TEXT — render these exact words, do not change, add or remove any word, and spell every word exactly as written: "${headline}". Large, bold, mobile-legible, with strong visual hierarchy.`,
+    angle ? `TONE (guidance only, do not render as text): ${angle}` : ``,
+    `CALL TO ACTION: one clear rounded-rectangle button in a brand colour containing exactly the text "Find out more". No other words on the button.`,
     colourLine,
     `TYPOGRAPHY: ${typeStyle}.`,
-    footerLine,
     ``,
-    `STYLE: clean, modern, corporate, high contrast, clear hierarchy. Fill the entire frame edge to edge — no white border or padding. Any text must be correctly spelled and legible.`,
+    `NO LOGO: Do NOT draw any logo, watermark, brand mark, company name, monogram, emblem, or signature anywhere in the image. Keep the ${cornerLabel} corner clear of text and important subjects — a real logo will be added there afterwards. This is critical.`,
+    ``,
+    `SPELLING IS CRITICAL: every word in the image must be spelled correctly and exactly as given. Do not invent extra text. If a word is hard to render, use simpler wording rather than risk a misspelling.`,
+    ``,
+    `STYLE: clean, modern, corporate, high contrast, clear hierarchy. Fill the entire frame edge to edge — no white border or padding.`,
   ].filter(Boolean).join('\n');
 }
 
@@ -118,9 +121,7 @@ async function generateViaApi(prompt) {
       'Authorization': `Bearer ${key}`,
       'Content-Type': 'application/json',
     },
-    // Intentionally minimal/safe params: model + prompt + size + n. No
-    // quality/response_format passed, so we don't risk an invalid-parameter
-    // error if gpt-image-2's secondary params differ. gpt-image returns
+    // Minimal/safe params: model + prompt + size + n. gpt-image returns
     // base64 (b64_json) by default.
     body: JSON.stringify({ model: MODEL, prompt, size: IMAGE_SIZE, n: 1 }),
   });
@@ -139,15 +140,31 @@ async function generateViaApi(prompt) {
 export async function generateGptImage(imagePrompt, client = {}, post = {}) {
   const prompt = buildPrompt(imagePrompt, client, post);
   console.log(`[gpt-image] Generating designed ad for: ${client.name || 'unknown'} (model ${MODEL})`);
-  const b64 = await generateViaApi(prompt);
-  console.log(`[gpt-image] Success for: ${client.name || 'unknown'}`);
+  const rawB64 = await generateViaApi(prompt);   // designed ad WITHOUT a logo
+  console.log(`[gpt-image] Base image generated for: ${client.name || 'unknown'}`);
 
-  // Logo is baked into the single-pass image, so there is no separate pre-logo
-  // version; mirror the bytes to keep the return shape identical to gemini.js.
+  let finalData = rawB64;
+  let finalMime = 'image/png';
+
+  // Composite the customer's REAL uploaded logo into the reserved corner,
+  // reusing the proven Sharp compositor in gemini.js. Dynamic import avoids a
+  // static circular dependency (gemini.js imports this module). Non-fatal: if
+  // compositing fails we still return the designed ad (just without the logo).
+  if (client.logo_url) {
+    try {
+      const { compositeLogo } = await import('./gemini.js');
+      finalData = await compositeLogo(rawB64, 'image/png', client);
+      finalMime = 'image/png';
+      console.log(`[gpt-image] Real uploaded logo composited for: ${client.name || 'unknown'}`);
+    } catch (err) {
+      console.warn(`[gpt-image] Logo composite failed (non-fatal): ${err.message}`);
+    }
+  }
+
   return {
-    data:        b64,
-    mimeType:    'image/png',
-    preLogoData: b64,
+    data:        finalData,
+    mimeType:    finalMime,
+    preLogoData: rawB64,        // no-logo designed ad — enables per-post recomposite
     preLogoMime: 'image/png',
   };
 }
