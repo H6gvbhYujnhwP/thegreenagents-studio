@@ -2345,7 +2345,7 @@ function ClassifyBadge({ reply }) {
     case 'positive':      return mk(`${prefix}New prospect`,  BLUE_BG,        BLUE);
     case 'hard_negative': return mk(`${prefix}Negative`,      BADGE_NEG_BG,   BADGE_NEG_FG);
     case 'soft_negative': return mk(`${prefix}Soft negative`, BADGE_NEG_BG,   BADGE_NEG_FG);
-    case 'auto_reply':    return mk(`${prefix}Out of office`, BADGE_GREY_BG,  BADGE_GREY_FG);
+    case 'auto_reply':    return mk(`${prefix}Out of Office`, BADGE_GREY_BG,  BADGE_GREY_FG);
     case 'forwarding':    return mk(`${prefix}Forwarded`,     BADGE_FWD_BG,   BADGE_FWD_FG);
     case 'neutral':       return mk(`${prefix}Neutral`,       BADGE_GREY_BG,  BADGE_GREY_FG);
     default:              return mk('Classifying…',           BADGE_GREY_BG,  BADGE_GREY_FG);
@@ -4660,7 +4660,7 @@ function ReplyClassifyChip({ cls }) {
     positive:      { label: 'Positive',      bg: GREEN_BG, color: GREEN  },
     soft_negative: { label: 'Soft negative', bg: AMBER_BG, color: AMBER  },
     hard_negative: { label: 'Hard negative', bg: '#fbe9e9', color: DANGER },
-    auto_reply:    { label: 'Auto-reply',    bg: BLUE_BG, color: BLUE   },
+    auto_reply:    { label: 'Out of Office', bg: BLUE_BG, color: BLUE   },
     neutral:       { label: 'Neutral',       bg: '#f1efe8', color: MUTED },
   }[cls];
   if (!cfg) return null;

@@ -24,6 +24,7 @@ import { v4 as uuid } from 'uuid';
 import db from '../db.js';
 import { decrypt } from './crypto-vault.js';
 import { processFormspreeLead } from './formspree-flagger.js';
+import { classifyImmediate } from './classify-replies.js';
 
 const POLL_INTERVAL_MS = 3 * 60 * 1000;   // 3 minutes
 const MAX_FETCH_PER_POLL = 200;           // cap per cycle; on backfill this can fill quickly
@@ -328,6 +329,14 @@ async function pollOneInbox(inbox) {
         // source row in even though its from_address is noreply@formspree.io
         // (doesn't match the prospect's actual email address).
         processFormspreeLead(parsed, inbox.email_client_id, replyId);
+
+        // Immediately classify the cheap, certain cases (out-of-office,
+        // clear opt-outs, Formspree) so they're marked straight away instead
+        // of sitting "Unclassified" while the every-minute cron works through
+        // its oldest-first backlog. Anything not matched is left for the AI
+        // cron. Fire-and-forget + .catch — must never block or break polling.
+        classifyImmediate(replyId).catch(err =>
+          console.error(`[poller] immediate classify failed for ${replyId}: ${err.message}`));
 
         stored++;
         highestUid = Math.max(highestUid, uid);

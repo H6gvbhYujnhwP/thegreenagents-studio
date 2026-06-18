@@ -2725,7 +2725,7 @@ function classifyBadge(reply){
     case 'positive':      return <Badge label={`${prefix}New prospect`}  color="#0C447C" bg="#E6F1FB"/>;
     case 'hard_negative': return <Badge label={`${prefix}Negative`}      color="#793F1F" bg="#FAECE7"/>;
     case 'soft_negative': return <Badge label={`${prefix}Soft negative`} color="#793F1F" bg="#FAECE7"/>;
-    case 'auto_reply':    return <Badge label={`${prefix}Out of office`} color="#5F5E5A" bg="#F1EFE8"/>;
+    case 'auto_reply':    return <Badge label={`${prefix}Out of Office`} color="#5F5E5A" bg="#F1EFE8"/>;
     case 'forwarding':    return <Badge label={`${prefix}Forwarded`}     color="#3C3489" bg="#EEEDFE"/>;
     case 'neutral':       return <Badge label={`${prefix}Neutral`}       color="#5F5E5A" bg="#F1EFE8"/>;
     default:              return <Badge label={`${prefix}Unclassified`}  color="#5F5E5A" bg="#F1EFE8"/>;
@@ -3088,7 +3088,7 @@ function MailboxDetail({inbox, onRefresh}){
         {k:'all',         l:'Inbox'},
         {k:'prospects',   l:'New prospects', count:inbox.new_prospect_count, color:BLUE},
         {k:'auto_unsubscribed', l:'Auto-unsubscribed', count:inbox.auto_unsub_count, color:'#633806'},
-        {k:'out_of_office',l:'Out of office'},
+        {k:'out_of_office',l:'Out of Office'},
       ].map(t=>(
         <button key={t.k} onClick={()=>setBucket(t.k)} style={{
           background:'transparent',border:'none',padding:'10px 0',marginBottom:-1,
@@ -3871,7 +3871,7 @@ function ReclassifyDropdown({current, onChoose, disabled}){
     {k:'positive',     l:'New prospect'},
     {k:'soft_negative',l:'Soft negative'},
     {k:'hard_negative',l:'Hard negative'},
-    {k:'auto_reply',   l:'Out of office'},
+    {k:'auto_reply',   l:'Out of Office'},
     {k:'forwarding',   l:'Forwarded'},
     {k:'neutral',      l:'Neutral'},
   ];

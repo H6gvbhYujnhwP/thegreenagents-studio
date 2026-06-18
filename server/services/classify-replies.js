@@ -88,6 +88,43 @@ export async function classifyOneReply(replyId, { force = false } = {}) {
   return { ok: true, ...updated };
 }
 
+/**
+ * Classify the CHEAP, CERTAIN cases for a single reply immediately, at ingest
+ * time — NO AI call. Called by the IMAP poller right after a reply is stored,
+ * so out-of-office auto-replies, clear opt-outs and Formspree mail are marked
+ * straight away instead of waiting their turn in the cron queue (which works
+ * oldest-first and so can lag behind a backlog). Anything the cheap passes
+ * don't match is left classification=NULL for the AI cron to handle as before.
+ * Self-guarded — never throws.
+ */
+export async function classifyImmediate(replyId) {
+  try {
+    const reply = db.prepare("SELECT * FROM email_replies WHERE id = ?").get(replyId);
+    if (!reply || reply.classification) return null;
+
+    // Formspree mail is never a campaign reply (mirror of classifyPending's pre-pass).
+    if ((reply.from_address || '').toLowerCase().endsWith('@formspree.io')) {
+      await applyClassification(reply, {
+        classification: 'neutral',
+        confidence: 1.0,
+        reason: 'Formspree mail — not a campaign reply (skipped classification)',
+      });
+      return 'neutral';
+    }
+
+    const r1 = classifyByRegex(reply);
+    if (r1) { await applyClassification(reply, r1); return r1.classification; }
+
+    const r2 = classifyByHeuristic(reply);
+    if (r2) { await applyClassification(reply, r2); return r2.classification; }
+
+    return null; // not a certain case — leave for the AI cron
+  } catch (err) {
+    console.error(`[classifier] immediate classify failed for ${replyId}: ${err.message}`);
+    return null;
+  }
+}
+
 // ── Cron worker ───────────────────────────────────────────────────────────────
 
 async function classifyPending() {
@@ -261,20 +298,20 @@ export function classifyByHeuristic(reply) {
   const subject = (reply.subject || '').toLowerCase();
   const body = normaliseBody(reply.body_text || stripHtml(reply.body_html || ''));
 
-  // Out-of-office — subject markers are by far the strongest signal
-  const OOO_SUBJECT = [
+  // Out of Office — subject markers are by far the strongest signal
+  const AUTO_REPLY_SUBJECT = [
     /^(re:\s*)?(out of (the )?office|automatic reply|auto-?reply|auto response|away from|on (vacation|holiday|leave|annual leave|maternity|paternity|parental))/i,
   ];
-  if (OOO_SUBJECT.some(re => re.test(reply.subject || ''))) {
+  if (AUTO_REPLY_SUBJECT.some(re => re.test(reply.subject || ''))) {
     return {
       classification: 'auto_reply',
       confidence: 0.95,
-      reason: 'Out-of-office subject prefix',
+      reason: 'Out of Office subject prefix',
     };
   }
 
-  // Body-based OOO markers — be fairly specific to avoid false positives
-  const OOO_BODY = [
+  // Body-based Out of Office markers — be fairly specific to avoid false positives
+  const AUTO_REPLY_BODY = [
     /\bI\s+am\s+(currently\s+)?out\s+of\s+(the\s+)?office\b/i,
     /\bI\s+am\s+(currently\s+)?on\s+(annual\s+)?(leave|vacation|holiday)\b/i,
     /\bI\s+will\s+be\s+(out\s+of\s+(the\s+)?office|away|unavailable)\b/i,
@@ -282,12 +319,12 @@ export function classifyByHeuristic(reply) {
     /\bthank\s+you\s+for\s+your\s+(email|message)\.?\s+I\s+am\s+(currently\s+)?(out|away|on\s+leave|unavailable)/i,
     /\b(returning|back\s+in\s+the\s+office)\s+on\b/i,
   ];
-  for (const re of OOO_BODY) {
+  for (const re of AUTO_REPLY_BODY) {
     if (re.test(body)) {
       return {
         classification: 'auto_reply',
         confidence: 0.9,
-        reason: 'Out-of-office phrasing in body',
+        reason: 'Out of Office phrasing in body',
       };
     }
   }
