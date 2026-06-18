@@ -486,6 +486,90 @@ router.post('/:id/cancel', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// ─── Add more posts to an existing campaign (admin only) ─────────────────────
+// Appends freshly-generated posts to a campaign that is STILL IN REVIEW
+// (stage 'awaiting_approval'). Blocked once deployed/approved (stage 'done').
+// The new posts are told which topics/angles already exist so there are no
+// duplicates, get images only if the campaign already has images, and use
+// whatever image engine the client is set to (so gpt_image clients get
+// designed ads). Synchronous — keep top-ups modest (3–6) for a snappy
+// response; large adds take a while because each image is generated in turn.
+router.post('/:id/add-posts', requireAuth, async (req, res) => {
+  const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(req.params.id);
+  if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+  if (campaign.stage !== 'awaiting_approval') {
+    return res.status(400).json({ error: `Posts can only be added while a campaign is in review (current stage: ${campaign.stage}).` });
+  }
+  const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(campaign.client_id);
+  if (!client) return res.status(404).json({ error: 'Client not found' });
+
+  const count = Math.max(1, Math.min(24, Number(req.body?.count) || 3));
+  const existing = JSON.parse(campaign.posts_json || '[]');
+  // Topics/angles already in the campaign → fed to the generator as a do-not-repeat list.
+  const existingTopics = existing
+    .map(p => [p.topic, p.angle].filter(Boolean).join(' — '))
+    .filter(Boolean);
+  // Match the existing set: images only if the campaign already has images.
+  const includeImages = (campaign.images_generated || 0) > 0;
+
+  try {
+    // Pull the same context the original run used, so added posts stay on-voice.
+    let contentDna = null;
+    try { contentDna = await getContentDna(client.supergrow_workspace_id, client.supergrow_api_key); } catch (_) {}
+    const algorithmBrief = getCurrentBrief();
+
+    const generated = await generatePosts(client, () => {}, contentDna, algorithmBrief, count, existingTopics);
+    // Give every new post a fresh id so its image R2 key can't collide with an
+    // existing post's. Posts are addressed by index in the UI, so appending is safe.
+    let newPosts = (generated.posts || []).map(p => ({ ...p, id: p.id || uuid() }));
+
+    if (includeImages) {
+      // gpt-image-2 tolerates a faster cadence than Gemini's free tier.
+      const delay = client.image_engine === 'gpt_image' ? 1000 : 7000;
+      for (let i = 0; i < newPosts.length; i++) {
+        const post = newPosts[i];
+        try {
+          const imageData = await generateImage(
+            post.image_prompt || `Professional LinkedIn image for: ${post.topic}`,
+            client,
+            post
+          );
+          const imageUrl = await uploadImageToR2(imageData.data, imageData.mimeType, client.id, post.id);
+          let preLogoUrl = null;
+          if (imageData.preLogoData) {
+            try {
+              preLogoUrl = await uploadImageToR2(imageData.preLogoData, imageData.preLogoMime, client.id, `${post.id}-prelogo`);
+            } catch (e) {
+              console.warn(`[campaigns] add-posts pre-logo upload failed (non-fatal): ${e.message}`);
+            }
+          }
+          newPosts[i] = { ...post, image_url: imageUrl, pre_logo_image_url: preLogoUrl };
+        } catch (err) {
+          console.error(`[campaigns] add-posts image failed:`, err.message);
+          newPosts[i] = { ...post, image_url: null, image_error: err.message };
+        }
+        if (i < newPosts.length - 1) await sleep(delay);
+      }
+    } else {
+      newPosts = newPosts.map(p => ({ ...p, image_url: null }));
+    }
+
+    const combined = existing.concat(newPosts);
+    const imagesGenerated = combined.filter(p => p.image_url).length;
+    updateCampaign(campaign.id, {
+      posts_json: JSON.stringify(combined),
+      posts_generated: combined.length,
+      total_posts: combined.length,
+      images_generated: imagesGenerated,
+    });
+
+    res.json({ ok: true, added: newPosts.length, total: combined.length });
+  } catch (err) {
+    console.error('[campaigns] add-posts failed:', err.message);
+    res.status(500).json({ error: err.message || 'Failed to add posts' });
+  }
+});
+
 // ─── Campaign pipeline ────────────────────────────────────────────────────────
 
 async function runCampaign(campaignId, client, includeImages = true, postCount = 12) {

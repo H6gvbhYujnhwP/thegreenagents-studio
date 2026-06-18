@@ -22,6 +22,9 @@ export default function CampaignProgress({ campaignId, onComplete }) {
   const [cancelling, setCancelling] = useState(false);
   const [expandedPost, setExpanded] = useState(null);
   const [cardState, setCardState]   = useState({});
+  // Add-more-posts control (admin only, while in review)
+  const [addCount, setAddCount]       = useState(3);
+  const [addingPosts, setAddingPosts] = useState(false);
 
   function parsePosts(c) {
     if (c?.posts_json) {
@@ -190,6 +193,31 @@ export default function CampaignProgress({ campaignId, onComplete }) {
       setLogs(l => [...l, `Cancel failed: ${err.message}`]);
     }
     setCancelling(false);
+  }
+
+  async function handleAddPosts() {
+    setAddingPosts(true);
+    try {
+      const res = await fetch(`/api/campaigns/${campaignId}/add-posts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count: addCount })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || 'Failed to add posts');
+      } else {
+        // Refresh the campaign + posts so the new ones appear in the grid.
+        const r = await fetch(`/api/campaigns/${campaignId}`);
+        const d = await r.json();
+        setCampaign(d);
+        parsePosts(d);
+      }
+    } catch (err) {
+      alert('Failed to add posts');
+    } finally {
+      setAddingPosts(false);
+    }
   }
 
   async function handleRegenImage(postIndex) {
@@ -387,6 +415,36 @@ export default function CampaignProgress({ campaignId, onComplete }) {
       {/* Post grid — awaiting approval or done */}
       {(isAwaiting || isDone) && posts.length > 0 && (
         <div style={{ marginBottom: 24 }}>
+
+          {/* Add more posts — admin only, while in review */}
+          {isAwaiting && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', background: '#fff', border: '0.5px solid #e0e0dc', borderRadius: 10, padding: '12px 16px', marginBottom: 16 }}>
+              <div style={{ fontSize: 12, color: '#888' }}>
+                <strong style={{ color: '#1a1a1a', fontWeight: 600 }}>Add more posts</strong> — fresh topics, no duplicates. Images and engine match this set.
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <select
+                  value={addCount}
+                  onChange={e => setAddCount(Number(e.target.value))}
+                  disabled={addingPosts}
+                  style={{ fontSize: 13, padding: '7px 10px', border: '0.5px solid #d0d0cc', borderRadius: 7, background: '#fff', color: '#1a1a1a' }}
+                >
+                  <option value={3}>3 posts</option>
+                  <option value={6}>6 posts</option>
+                  <option value={12}>12 posts</option>
+                  <option value={18}>18 posts</option>
+                  <option value={24}>24 posts</option>
+                </select>
+                <button
+                  onClick={handleAddPosts}
+                  disabled={addingPosts}
+                  style={{ fontSize: 13, padding: '7px 16px', border: '0.5px solid #d0d0cc', borderRadius: 7, background: addingPosts ? '#f5f5f3' : '#fff', color: '#1a1a1a', cursor: addingPosts ? 'not-allowed' : 'pointer', fontWeight: 500 }}
+                >
+                  {addingPosts ? 'Adding…' : '+ Add'}
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Deploy banner — two-button flow (decision #72).
               State A: not yet sent → two buttons.

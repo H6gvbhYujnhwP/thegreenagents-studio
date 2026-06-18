@@ -283,11 +283,18 @@ Start your response with the { character and end with the } character.
 Any text outside the JSON object will cause the entire pipeline to fail.`;
 
 // ─── Generate posts using Claude with web search + prompt caching ─────────────
-export async function generatePosts(client, onProgress, contentDna = null, algorithmBrief = null, count = POSTS_PER_CAMPAIGN) {
+export async function generatePosts(client, onProgress, contentDna = null, algorithmBrief = null, count = POSTS_PER_CAMPAIGN, existingTopics = []) {
   // How many posts to generate this run. Defaults to POSTS_PER_CAMPAIGN (12).
   // Clamped to 1–24 so a bad/missing value from the UI can never request 0 or
   // an unreasonably large single-pass batch.
   const postCount = Math.max(1, Math.min(24, Number(count) || POSTS_PER_CAMPAIGN));
+
+  // When topping up an existing campaign, the caller passes the topics/angles
+  // already used so the new posts are genuinely different (no duplicates).
+  const avoidBlock = (Array.isArray(existingTopics) && existingTopics.length)
+    ? `\n\nALREADY COVERED IN THIS CAMPAIGN — DO NOT REPEAT:\nThese topics/angles are already used in this campaign. Your ${postCount} new posts must cover genuinely DIFFERENT topics, lessons and angles. Do not restate or lightly reword any of these:\n${existingTopics.map((t, i) => `${i + 1}. ${t}`).join('\n')}\n`
+    : '';
+
   onProgress('Starting Claude — researching LinkedIn algorithm and industry trends...');
 
   const dnaSection = contentDna
@@ -342,6 +349,7 @@ Text post bodies must be minimum 1,200 characters.
 carousel_slides must always be null — no carousel format is used.
 Founder story posts: first person, specific, human — not polished.
 
+${avoidBlock}
 TOPIC DIVERSITY — MANDATORY:
 The ${postCount} posts must cover genuinely different topics drawn from the RAG. Do not repeat the same core message or lesson in multiple posts.
 
