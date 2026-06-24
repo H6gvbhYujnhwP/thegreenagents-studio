@@ -282,26 +282,37 @@ async function getPageAccessToken(pageId) {
   const id = String(pageId || '').replace(/\D/g, '');
   if (!id) return null;
   try {
-    const j = await metaRequest('me/accounts', { params: { fields: 'id,access_token', limit: 200 } });
+    const j = await metaRequest('me/accounts', { params: { fields: 'id,name,access_token', limit: 200 } });
+    const ids = (j.data || []).map(p => String(p.id));
     const hit = (j.data || []).find(p => String(p.id) === id);
+    console.log(`[fb-forms] me/accounts returned ${ids.length} page(s): [${ids.join(', ')}]; match for ${id}: ${hit ? 'yes' : 'no'}; page token: ${hit && hit.access_token ? 'yes' : 'no'}`);
     return hit && hit.access_token ? hit.access_token : null;
-  } catch (_) { return null; }
+  } catch (e) { console.log(`[fb-forms] me/accounts error: ${e.message}`); return null; }
 }
 
 // List the instant Lead forms on a Page, for the Lead-form picker. Reads with
 // the Page's own access token when available (so Sharing=Restricted forms are
-// visible too); falls back to the system token. Empty list → typed-ID fallback
-// on the screen. Throws on hard error (route catches).
+// visible too); falls back to the system token. Logs the outcome so the render
+// log shows whether the page token / forms call succeeded. Empty list → typed-ID
+// fallback on the screen. Throws on hard error (route catches).
 export async function listLeadForms(pageId) {
   const id = String(pageId || '').replace(/\D/g, '');
   if (!id) return [];
   const pageToken = await getPageAccessToken(id);
+  const which = pageToken ? 'page token' : 'system token';
   const opts = { params: { fields: 'id,name,status', limit: 200 } };
   if (pageToken) opts.token = pageToken;
-  const json = await metaRequest(`${id}/leadgen_forms`, opts);
-  return Array.isArray(json.data)
-    ? json.data.map(f => ({ id: String(f.id), name: f.name || '(unnamed form)', status: f.status || null }))
-    : [];
+  try {
+    const json = await metaRequest(`${id}/leadgen_forms`, opts);
+    const forms = Array.isArray(json.data)
+      ? json.data.map(f => ({ id: String(f.id), name: f.name || '(unnamed form)', status: f.status || null }))
+      : [];
+    console.log(`[fb-forms] page ${id}: leadgen_forms returned ${forms.length} form(s) via ${which}`);
+    return forms;
+  } catch (e) {
+    console.log(`[fb-forms] page ${id}: leadgen_forms error via ${which}: ${e.message}`);
+    throw e;
+  }
 }
 
 // Upload one ad image to the ad account and return its image_hash. The creative
