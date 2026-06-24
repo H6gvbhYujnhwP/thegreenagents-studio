@@ -19,7 +19,7 @@ import multer from 'multer';
 import { v4 as uuid } from 'uuid';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
-import { metaConfigured, testConnection, getAdsOverview, checkCreatePermission, META } from '../services/meta-api.js';
+import { metaConfigured, testConnection, getAdsOverview, checkCreatePermission, listPages, listLeadForms, pushAdsToFacebook, META } from '../services/meta-api.js';
 import { extractTextFromBuffer } from '../utils/extractText.js';
 import { prepareLogoForStorage } from '../services/logo-prep.js';
 import { extractBrandFromRag } from '../services/brand-extract.js';
@@ -211,6 +211,16 @@ router.get('/:emailClientId/overview', (req, res) => {
     logo_panel: row.logo_panel,
     logo_size: row.logo_size,
     ad_count: row.ad_count || 6,
+    // Push-stage setup + last-push reference.
+    page_id: row.page_id,
+    page_name: row.page_name,
+    lead_form_id: row.lead_form_id,
+    lead_form_name: row.lead_form_name,
+    daily_budget_pence: row.daily_budget_pence,
+    target_countries: row.target_countries || 'GB',
+    pushed_campaign_id: row.pushed_campaign_id,
+    pushed_adset_id: row.pushed_adset_id,
+    pushed_at: row.pushed_at,
     creatives,
   });
 });
@@ -240,6 +250,19 @@ router.put('/:emailClientId/overview', upload.single('rag'), async (req, res) =>
   const logo_panel    = b.logo_panel    !== undefined ? b.logo_panel    : row.logo_panel;
   const logo_size     = b.logo_size     !== undefined ? b.logo_size     : row.logo_size;
 
+  // Push-stage setup. Each saved independently (the screen auto-saves a single
+  // field at a time), so only keys actually present in the body are changed.
+  const page_id         = b.page_id         !== undefined ? (b.page_id || null)         : row.page_id;
+  const page_name       = b.page_name       !== undefined ? (b.page_name || null)       : row.page_name;
+  const lead_form_id    = b.lead_form_id    !== undefined ? (b.lead_form_id || null)    : row.lead_form_id;
+  const lead_form_name  = b.lead_form_name  !== undefined ? (b.lead_form_name || null)  : row.lead_form_name;
+  const target_countries = b.target_countries !== undefined ? (b.target_countries || 'GB') : (row.target_countries || 'GB');
+  let daily_budget_pence = row.daily_budget_pence;
+  if (b.daily_budget_pence !== undefined) {
+    const n = parseInt(b.daily_budget_pence, 10);
+    daily_budget_pence = (Number.isFinite(n) && n > 0) ? n : null;
+  }
+
   let rag_filename = row.rag_filename;
   let rag_content  = row.rag_content;
   if (req.file) {
@@ -261,10 +284,14 @@ router.put('/:emailClientId/overview', upload.single('rag'), async (req, res) =>
       rag_filename=?, rag_content=?,
       brand_colors=?, logo_description=?, type_style=?, visual_style=?,
       ad_count=?, logo_position=?, logo_panel=?, logo_size=?,
+      page_id=?, page_name=?, lead_form_id=?, lead_form_name=?,
+      daily_budget_pence=?, target_countries=?,
       updated_at=datetime('now')
     WHERE email_client_id=?
   `).run(rag_filename, rag_content, brand_colors, logo_description, type_style, visual_style,
-         ad_count, logo_position, logo_panel, logo_size, id);
+         ad_count, logo_position, logo_panel, logo_size,
+         page_id, page_name, lead_form_id, lead_form_name,
+         daily_budget_pence, target_countries, id);
   res.json({ ok: true });
 });
 
@@ -411,6 +438,111 @@ router.post('/:emailClientId/creatives/:id/approve', (req, res) => {
 router.delete('/:emailClientId/creatives/:id', (req, res) => {
   db.prepare('DELETE FROM facebook_ad_creatives WHERE id = ? AND email_client_id = ?').run(req.params.id, req.params.emailClientId);
   res.json({ ok: true });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUSH TO FACEBOOK — create approved ads as PAUSED drafts (campaign→ad-set→ad).
+// Studio creates everything PAUSED; the operator publishes in Ads Manager.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Page picker — the Facebook Pages the system user can see. Best-effort; falls
+// back to a typed Page ID on the screen if this returns empty / errors.
+router.get('/pages', async (req, res) => {
+  if (!metaConfigured()) return res.json({ ok: false, error: 'Meta API is not configured.' });
+  try { res.json({ ok: true, pages: await listPages() }); }
+  catch (e) { res.json({ ok: false, error: e.message }); }
+});
+
+// Lead-form picker — the instant Lead forms on this customer's saved Page (or a
+// ?page_id= override). May come back empty even when a form exists if the system
+// user lacks page-level leads access; the screen offers a typed form ID then.
+router.get('/:emailClientId/lead-forms', async (req, res) => {
+  if (!metaConfigured()) return res.json({ ok: false, error: 'Meta API is not configured.' });
+  let pageId = req.query.page_id ? String(req.query.page_id) : null;
+  if (!pageId) {
+    const row = db.prepare('SELECT page_id FROM facebook_ads WHERE email_client_id = ?').get(req.params.emailClientId);
+    pageId = row && row.page_id;
+  }
+  if (!pageId) return res.json({ ok: true, forms: [], no_page: true });
+  try { res.json({ ok: true, forms: await listLeadForms(pageId) }); }
+  catch (e) { res.json({ ok: false, error: e.message }); }
+});
+
+// Push all APPROVED, not-yet-pushed creatives to Facebook as PAUSED drafts.
+// Creates one Leads campaign + one ad set + one ad per creative. Stamps each
+// creative with its Facebook ad id (so it won't be pushed twice) or its error.
+router.post('/:emailClientId/push', async (req, res) => {
+  if (!metaConfigured()) return res.status(400).json({ error: 'Meta API is not configured.' });
+  const id = req.params.emailClientId;
+  const row = db.prepare(`
+    SELECT fa.*, ec.name AS customer_name
+    FROM facebook_ads fa JOIN email_clients ec ON ec.id = fa.email_client_id
+    WHERE fa.email_client_id = ?
+  `).get(id);
+  if (!row) return res.status(404).json({ error: 'Not a Facebook Ads customer' });
+
+  // Required setup — refuse honestly rather than invent defaults (no silent
+  // fallbacks; budget in particular must be set deliberately).
+  if (!row.ad_account_id) return res.status(400).json({ error: 'Set this customer’s ad account ID first.' });
+  if (!row.page_id)       return res.status(400).json({ error: 'Choose a Facebook Page first.' });
+  if (!row.lead_form_id)  return res.status(400).json({ error: 'Choose a Lead form first.' });
+  if (!(Number(row.daily_budget_pence) > 0)) return res.status(400).json({ error: 'Set a daily budget first.' });
+
+  const creatives = db.prepare(`
+    SELECT * FROM facebook_ad_creatives
+    WHERE email_client_id = ? AND status = 'approved' AND (fb_ad_id IS NULL OR fb_ad_id = '')
+    ORDER BY created_at ASC, rowid ASC
+  `).all(id);
+  if (!creatives.length) return res.status(400).json({ error: 'No approved ads waiting to be pushed.' });
+
+  const countries = String(row.target_countries || 'GB').split(',').map(s => s.trim()).filter(Boolean);
+  const campaignName = `${row.customer_name} — Leads (Studio ${new Date().toISOString().slice(0, 10)})`;
+
+  let result;
+  try {
+    result = await pushAdsToFacebook({
+      adAccountId: row.ad_account_id,
+      pageId: row.page_id,
+      leadFormId: row.lead_form_id,
+      dailyBudgetPence: row.daily_budget_pence,
+      countries,
+      campaignName,
+      creatives: creatives.map(c => ({
+        id: c.id, hook_label: c.hook_label, headline: c.headline,
+        primary_text: c.primary_text, cta: c.cta, image_url: c.image_url,
+      })),
+    });
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+
+  // Persist: stamp pushed creatives with their ad id, failures with the reason,
+  // and record the campaign/ad-set on the customer row.
+  const stampOk  = db.prepare(`UPDATE facebook_ad_creatives SET status='pushed', fb_ad_id=?, fb_creative_id=?, push_error=NULL, pushed_at=datetime('now'), updated_at=datetime('now') WHERE id=?`);
+  const stampErr = db.prepare(`UPDATE facebook_ad_creatives SET push_error=?, updated_at=datetime('now') WHERE id=?`);
+  const tx = db.transaction(() => {
+    for (const r of result.results) {
+      if (r.ok) stampOk.run(r.ad_id, r.creative_id, r.id);
+      else stampErr.run(r.error || 'push failed', r.id);
+    }
+    if (result.campaign_id) {
+      db.prepare(`UPDATE facebook_ads SET pushed_campaign_id=?, pushed_adset_id=?, pushed_at=datetime('now'), status='paused', updated_at=datetime('now') WHERE email_client_id=?`)
+        .run(result.campaign_id, result.adset_id, id);
+    }
+  });
+  tx();
+
+  const labelById = new Map(creatives.map(c => [c.id, c.hook_label || 'Untitled ad']));
+  const results = result.results.map(r => ({ id: r.id, label: labelById.get(r.id) || 'Ad', ok: r.ok, ad_id: r.ad_id, error: r.error }));
+  const pushed = results.filter(r => r.ok).length;
+  const failed = results.length - pushed;
+  res.json({
+    ok: true,
+    campaign_id: result.campaign_id,
+    adset_id: result.adset_id,
+    campaign_name: campaignName,
+    top_error: result.error || null,
+    failed_step: result.failed_step || null,
+    pushed, failed, results,
+  });
 });
 
 export default router;

@@ -1283,6 +1283,30 @@ try { db.exec("ALTER TABLE facebook_ads ADD COLUMN visual_style TEXT"); } catch 
 try { db.exec("ALTER TABLE facebook_ads ADD COLUMN ad_count INTEGER"); } catch (_) {}
 try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN image_brief TEXT"); } catch (_) {}
 
+// 15-fa-push. Push-to-Facebook stage (campaign→ad-set→ad as PAUSED drafts).
+// Per-customer push setup that the creative generation didn't need:
+//   page_id / page_name       — the Facebook Page the ad posts "as" (required)
+//   lead_form_id / _name       — the instant Lead form the CTA opens (required)
+//   target_countries           — CSV of country codes for ad-set targeting (default GB)
+//   pushed_campaign_id/_adset_id/_at — what the last push created (for reference)
+// daily_budget_pence already exists on facebook_ads (reused as the ad-set budget).
+// All additive ALTERs wrapped in try/catch so they're no-ops once present.
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN page_id TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN page_name TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN lead_form_id TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN lead_form_name TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN target_countries TEXT DEFAULT 'GB'"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN pushed_campaign_id TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN pushed_adset_id TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN pushed_at TEXT"); } catch (_) {}
+// Per-creative push result. status gains a 'pushed' value (no schema change —
+// it's a free-text column). fb_ad_id non-null = already on Facebook (paused),
+// so it won't be pushed again; push_error holds the last failure reason.
+try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN fb_ad_id TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN fb_creative_id TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN pushed_at TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN push_error TEXT"); } catch (_) {}
+
 // 14m. Backfill customer_services from the legacy columns. Idempotent — uses
 // INSERT OR IGNORE on the unique (email_client_id, service_key) index, so
 // re-running on every boot doesn't double-up existing subscriptions.

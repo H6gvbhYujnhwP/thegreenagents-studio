@@ -323,6 +323,68 @@ function AdApprovals({ customerId, customerName }) {
   const [brand, setBrand] = useState({ brand_colors:'', logo_description:'', type_style:'', visual_style:'' });
   const saveTimer = useRef(null);
 
+  // ── Push-to-Facebook setup state ──────────────────────────────────────────
+  const [pagePick, setPagePick] = useState({ loading:false, ok:null, pages:[], error:null });
+  const [formPick, setFormPick] = useState({ loading:false, ok:null, forms:[], error:null, no_page:false });
+  const [manualPage, setManualPage] = useState(false);
+  const [manualForm, setManualForm] = useState(false);
+  const [budget, setBudget] = useState('');
+  const [pushing, setPushing] = useState(false);
+  const [pushResult, setPushResult] = useState(null);
+  const [mPage, setMPage] = useState('');
+  const [mForm, setMForm] = useState('');
+  const budgetTimer = useRef(null);
+
+  async function loadPages() {
+    setPagePick(p=>({ ...p, loading:true, error:null }));
+    try {
+      const r = await fetch('/api/facebook-ads/pages');
+      const j = await r.json().catch(()=>({}));
+      setPagePick({ loading:false, ok:!!j.ok, pages:j.pages||[], error:j.ok?null:(j.error||'Could not list Pages') });
+    } catch { setPagePick({ loading:false, ok:false, pages:[], error:'Could not reach Studio.' }); }
+  }
+  async function loadForms(pageId) {
+    if (!pageId) { setFormPick({ loading:false, ok:null, forms:[], error:null, no_page:true }); return; }
+    setFormPick(p=>({ ...p, loading:true, error:null }));
+    try {
+      const r = await fetch(`/api/facebook-ads/${customerId}/lead-forms?page_id=${encodeURIComponent(pageId)}`);
+      const j = await r.json().catch(()=>({}));
+      setFormPick({ loading:false, ok:!!j.ok, forms:j.forms||[], error:j.ok?null:(j.error||'Could not list forms'), no_page:!!j.no_page });
+    } catch { setFormPick({ loading:false, ok:false, forms:[], error:'Could not reach Studio.', no_page:false }); }
+  }
+
+  function saveSetup(patch) {
+    setOv(o=>o?({ ...o, ...patch }):o);
+    saveOverview(patch);
+  }
+  function onPickPage(id, name) {
+    saveSetup({ page_id:id, page_name:name, lead_form_id:null, lead_form_name:null });
+    setManualForm(false);
+    loadForms(id);
+  }
+  function onManualPageInput(id) {
+    saveSetup({ page_id:id||null, page_name:null, lead_form_id:null, lead_form_name:null });
+  }
+  function onBudgetChange(v) {
+    setBudget(v);
+    clearTimeout(budgetTimer.current);
+    budgetTimer.current = setTimeout(()=>{
+      const pounds = parseFloat(String(v).replace(/[^0-9.]/g,''));
+      const pence = Number.isFinite(pounds) && pounds>0 ? Math.round(pounds*100) : null;
+      saveSetup({ daily_budget_pence: pence });
+    }, 700);
+  }
+  async function doPush() {
+    setPushing(true); setErr(null); setPushResult(null);
+    try {
+      const r = await fetch(`/api/facebook-ads/${customerId}/push`, { method:'POST' });
+      const j = await r.json().catch(()=>({}));
+      if (!r.ok) throw new Error(j.error || 'Push failed');
+      setPushResult(j);
+      await load();
+    } catch(e){ setErr(e.message); } finally { setPushing(false); }
+  }
+
   async function load() {
     setLoading(true); setErr(null);
     try {
@@ -332,10 +394,13 @@ function AdApprovals({ customerId, customerName }) {
       setOv(j);
       setCount(j.ad_count || 6);
       setBrand({ brand_colors:j.brand_colors||'', logo_description:j.logo_description||'', type_style:j.type_style||'', visual_style:j.visual_style||'' });
+      setBudget(j.daily_budget_pence ? (j.daily_budget_pence/100).toFixed(2) : '');
+      if (j.page_id) loadForms(j.page_id); else setFormPick({ loading:false, ok:null, forms:[], error:null, no_page:true });
     } catch(e){ setErr(e.message); setOv(null); }
     finally { setLoading(false); }
   }
   useEffect(()=>{ load(); }, [customerId]);
+  useEffect(()=>{ loadPages(); }, []);
 
   function saveOverview(patch) {
     fetch(`/api/facebook-ads/${customerId}/overview`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(patch) }).catch(()=>{});
@@ -523,6 +588,7 @@ function AdApprovals({ customerId, customerName }) {
           const logoEnabled = !!c.pre_logo_image_url;
           const isEditing = editId===c.id;
           const approved = c.status==='approved';
+          const pushed = c.status==='pushed';
           const pos = c.logo_position || (ov && ov.logo_position) || 'bottom-right';
           const size = c.logo_size || (ov && ov.logo_size) || 'small';
           const panel = c.logo_panel || (ov && ov.logo_panel) || 'white';
@@ -542,7 +608,7 @@ function AdApprovals({ customerId, customerName }) {
               <div style={{ padding:'12px 14px', flex:1, display:'flex', flexDirection:'column' }}>
                 <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, marginBottom:8 }}>
                   <span style={{ fontSize:11, padding:'2px 8px', borderRadius:6, background:GREY_BG, color:GREY, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{c.hook_label || 'Ad'}</span>
-                  <span style={{ fontSize:11, padding:'3px 8px', borderRadius:6, flex:'none', background: approved?GREEN_BG:GREY_BG, color: approved?GREEN_HI:GREY }}>{approved?'Approved':'Draft'}</span>
+                  <span style={{ fontSize:11, padding:'3px 8px', borderRadius:6, flex:'none', background: pushed?BLUE_BG:(approved?GREEN_BG:GREY_BG), color: pushed?BLUE:(approved?GREEN_HI:GREY) }}>{pushed?'Pushed · paused':(approved?'Approved':'Draft')}</span>
                 </div>
 
                 {isEditing ? (
@@ -558,6 +624,18 @@ function AdApprovals({ customerId, customerName }) {
                   <>
                     <div style={{ fontSize:14, fontWeight:600, color:TEXT, marginBottom:4 }}>{c.headline || '—'}</div>
                     <div style={{ fontSize:12, color:MUTED, lineHeight:1.5, whiteSpace:'pre-wrap', flex:1 }}>{c.primary_text || ''}</div>
+
+                    {pushed ? (
+                      <div style={{ marginTop:10, borderTop:'1px solid #f0f0ec', paddingTop:10, fontSize:11, color:BLUE }}>
+                        On Facebook as a paused draft. Finish in Ads Manager.{c.fb_ad_id ? ` · ad ${c.fb_ad_id}` : ''}
+                      </div>
+                    ) : (
+                    <>
+                    {c.push_error && (
+                      <div style={{ marginTop:10, fontSize:11, color:RED, background:RED_BG, borderRadius:6, padding:'6px 8px' }}>
+                        Last push failed — {c.push_error}
+                      </div>
+                    )}
 
                     {/* Logo controls */}
                     <div style={{ marginTop:10 }}>
@@ -597,6 +675,8 @@ function AdApprovals({ customerId, customerName }) {
                     <button onClick={()=>creativeAction(c.id,'approve','approve',{ approved: !approved })} disabled={isBusy} style={btn(approved?GREY_BG:GREEN_HI, approved?GREY:'#fff', { marginTop:6, width:'100%', border: approved?`1px solid ${BORDER}`:'none' })}>
                       {approved ? '✓ Approved — click to unapprove' : 'Approve'}
                     </button>
+                    </>
+                    )}
                   </>
                 )}
               </div>
@@ -604,6 +684,133 @@ function AdApprovals({ customerId, customerName }) {
           );
         })}
       </div>
+
+      {/* ── PUSH TO FACEBOOK ──────────────────────────────────────────────── */}
+      {creatives.length > 0 && (() => {
+        const canPush = !!(ov && ov.page_id && ov.lead_form_id && Number(ov.daily_budget_pence) > 0 && approvedCount > 0 && !pushing);
+        const pushedCount = creatives.filter(c=>c.status==='pushed').length;
+        const COUNTRIES = [ ['GB','United Kingdom'], ['IE','Ireland'], ['US','United States'] ];
+        const country = (ov && ov.target_countries) || 'GB';
+        const pageVal = pagePick.pages.find(p=>p.id===(ov&&ov.page_id)) ? ov.page_id : '';
+        const formVal = formPick.forms.find(f=>f.id===(ov&&ov.lead_form_id)) ? ov.lead_form_id : '';
+        return (
+          <div style={{ ...cardStyle, marginTop:18 }}>
+            <div style={{ fontSize:14, fontWeight:600, color:TEXT, marginBottom:2 }}>Push to Facebook</div>
+            <div style={{ fontSize:12, color:MUTED, marginBottom:14 }}>Creates one Leads campaign with all approved ads inside it. Everything lands <strong>paused</strong> — you publish in Ads Manager.</div>
+
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginBottom:12 }}>
+              {/* Facebook Page */}
+              <div>
+                <div style={{ fontSize:11, color:TERTIARY, marginBottom:4 }}>Facebook Page</div>
+                {manualPage ? (
+                  <div style={{ display:'flex', gap:6 }}>
+                    <input value={mPage} onChange={e=>setMPage(e.target.value)} placeholder="Page ID" style={fieldStyle} />
+                    <button onClick={()=>onManualPageInput(mPage.trim())} style={btn(GREEN_HI,'#fff')}>Save</button>
+                    <button onClick={()=>setManualPage(false)} style={btn('#fff',MUTED,{border:`1px solid ${BORDER}`})}>×</button>
+                  </div>
+                ) : (
+                  <select value={pageVal} onChange={e=>{ const p=pagePick.pages.find(x=>x.id===e.target.value); if(p) onPickPage(p.id,p.name); }} style={fieldStyle}>
+                    <option value="">{pagePick.loading?'Loading Pages…':(pagePick.pages.length?'Choose a Page…':'No Pages found')}</option>
+                    {pagePick.pages.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                )}
+                <div style={{ fontSize:10, color:TERTIARY, marginTop:3 }}>
+                  {ov && ov.page_id ? <span style={{ color:GREEN_HI }}>Set: {ov.page_name || ov.page_id}</span> : 'Required.'}
+                  {' · '}
+                  <span onClick={()=>{ setManualPage(m=>!m); setMPage((ov&&ov.page_id)||''); }} style={{ color:BLUE, cursor:'pointer' }}>{manualPage?'pick from list':'type an ID instead'}</span>
+                </div>
+                {pagePick.error && !manualPage && <div style={{ fontSize:10, color:AMBER, marginTop:3 }}>{pagePick.error} — type the ID instead.</div>}
+              </div>
+
+              {/* Lead form */}
+              <div>
+                <div style={{ fontSize:11, color:TERTIARY, marginBottom:4 }}>Lead form</div>
+                {manualForm ? (
+                  <div style={{ display:'flex', gap:6 }}>
+                    <input value={mForm} onChange={e=>setMForm(e.target.value)} placeholder="Lead form ID" style={fieldStyle} />
+                    <button onClick={()=>saveSetup({ lead_form_id:mForm.trim()||null, lead_form_name:null })} style={btn(GREEN_HI,'#fff')}>Save</button>
+                    <button onClick={()=>setManualForm(false)} style={btn('#fff',MUTED,{border:`1px solid ${BORDER}`})}>×</button>
+                  </div>
+                ) : (
+                  <select value={formVal} disabled={!(ov&&ov.page_id)} onChange={e=>{ const f=formPick.forms.find(x=>x.id===e.target.value); if(f) saveSetup({ lead_form_id:f.id, lead_form_name:f.name }); }} style={{ ...fieldStyle, ...(!(ov&&ov.page_id)?{background:'#f5f5f3',color:'#aaa'}:{}) }}>
+                    <option value="">{!(ov&&ov.page_id)?'Choose a Page first':(formPick.loading?'Loading forms…':(formPick.forms.length?'Choose a form…':'No forms found'))}</option>
+                    {formPick.forms.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
+                  </select>
+                )}
+                <div style={{ fontSize:10, color:TERTIARY, marginTop:3 }}>
+                  {ov && ov.lead_form_id ? <span style={{ color:GREEN_HI }}>Set: {ov.lead_form_name || ov.lead_form_id}</span> : 'Required.'}
+                  {' · '}
+                  <span onClick={()=>{ setManualForm(m=>!m); setMForm((ov&&ov.lead_form_id)||''); }} style={{ color:BLUE, cursor:'pointer' }}>{manualForm?'pick from list':'type an ID instead'}</span>
+                </div>
+                {formPick.ok && !manualForm && (ov&&ov.page_id) && formPick.forms.length===0 && <div style={{ fontSize:10, color:AMBER, marginTop:3 }}>No forms came back for this Page — type the form ID instead.</div>}
+              </div>
+
+              {/* Daily budget */}
+              <div>
+                <div style={{ fontSize:11, color:TERTIARY, marginBottom:4 }}>Daily budget (paused)</div>
+                <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                  <span style={{ fontSize:13, color:MUTED }}>£</span>
+                  <input value={budget} onChange={e=>onBudgetChange(e.target.value)} placeholder="10.00" inputMode="decimal" style={fieldStyle} />
+                </div>
+                <div style={{ fontSize:10, color: (Number(ov&&ov.daily_budget_pence)>0)?TERTIARY:RED, marginTop:3 }}>
+                  {Number(ov&&ov.daily_budget_pence)>0 ? 'Per day. Won’t spend while paused.' : 'Required — set a daily budget.'}
+                </div>
+              </div>
+
+              {/* Target location */}
+              <div>
+                <div style={{ fontSize:11, color:TERTIARY, marginBottom:4 }}>Target location</div>
+                <select value={country} onChange={e=>saveSetup({ target_countries:e.target.value })} style={fieldStyle}>
+                  {COUNTRIES.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+                </select>
+                <div style={{ fontSize:10, color:TERTIARY, marginTop:3 }}>Broad targeting — location + age 18–65.</div>
+              </div>
+            </div>
+
+            <div style={{ display:'flex', gap:8, fontSize:12, color:AMBER, background:AMBER_BG, borderRadius:6, padding:'9px 11px', marginBottom:14 }}>
+              <span>⏸</span><span>Everything is created <strong>paused</strong>. No spend and nothing live until you activate it yourself in Ads Manager.</span>
+            </div>
+
+            <button onClick={doPush} disabled={!canPush} style={btn(canPush?BLUE:'#ccc','#fff',{ width:'100%', padding:'10px 0', fontSize:14, cursor:canPush?'pointer':'not-allowed' })}>
+              {pushing ? 'Pushing to Facebook…' : `Push ${approvedCount} approved ad${approvedCount===1?'':'s'} to Facebook (paused)`}
+            </button>
+            <div style={{ fontSize:11, color:TERTIARY, textAlign:'center', marginTop:8 }}>
+              {creatives.length} generated · {approvedCount} approved {approvedCount>0?'(ready)':''} · {pushedCount} already pushed
+            </div>
+
+            {pushResult && (
+              <div style={{ marginTop:16, borderTop:`1px solid ${BORDER}`, paddingTop:14 }}>
+                {pushResult.top_error ? (
+                  <div style={{ ...cardStyle, background:RED_BG, border:`1px solid ${RED}`, color:RED, fontSize:13 }}>
+                    Couldn’t create the campaign — {pushResult.top_error}
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:8 }}>
+                      <span style={{ fontSize:13, fontWeight:600, color:TEXT }}>Push result</span>
+                      <span style={{ fontSize:12, padding:'3px 9px', borderRadius:6, background: pushResult.failed?AMBER_BG:GREEN_BG, color: pushResult.failed?AMBER:GREEN_HI }}>{pushResult.pushed} pushed{pushResult.failed?` · ${pushResult.failed} failed`:''}</span>
+                    </div>
+                    <div style={{ fontSize:12, color:MUTED, marginBottom:10 }}>Campaign “{pushResult.campaign_name}” created paused in Ads Manager. Finish there.</div>
+                    <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                      {(pushResult.results||[]).map(r=>(
+                        <div key={r.id} style={{ display:'flex', alignItems:'flex-start', gap:8, padding:'8px 10px', border:`1px solid ${r.ok?BORDER:RED}`, borderRadius:6, background:r.ok?'#fff':RED_BG }}>
+                          <span style={{ flex:'none' }}>{r.ok?'✅':'⚠️'}</span>
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontSize:12, color: r.ok?TEXT:RED }}>{r.label}</div>
+                            {r.ok
+                              ? <div style={{ fontSize:11, color:TERTIARY }}>Pushed · paused · ad {r.ad_id}</div>
+                              : <div style={{ fontSize:11, color:RED }}>Failed at {r.error}</div>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

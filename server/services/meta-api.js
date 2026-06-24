@@ -234,6 +234,185 @@ export async function checkCreatePermission(adAccountId = cfg().adAccountId) {
   return result;
 }
 
+// ── Push stage: pickers + create campaign→ad-set→ad (all PAUSED) ─────────────
+//
+// Studio creates the ad structure on the customer's ad account as PAUSED drafts;
+// the operator does the final publish in Ads Manager. The Bulk-Import SOP's
+// shell-campaign / spreadsheet dance exists only to dodge Meta's spreadsheet
+// (ODAX) import bug — going API-direct we create the campaign objective straight
+// (already proven by checkCreatePermission) and attach the image + lead form
+// programmatically, so none of that workaround applies.
+
+// List the Facebook Pages the system user can see, for the Page picker. Merges
+// owned + client pages and de-dupes. Throws on hard error (route catches).
+export async function listPages() {
+  const c = cfg();
+  if (!c.businessId) throw new Error('META_BUSINESS_ID is not set');
+  const out = [];
+  const seen = new Set();
+  for (const edge of ['owned_pages', 'client_pages']) {
+    try {
+      const json = await metaRequest(`${c.businessId}/${edge}`, { params: { fields: 'id,name', limit: 200 } });
+      for (const p of (json.data || [])) {
+        if (p && p.id && !seen.has(p.id)) { seen.add(p.id); out.push({ id: String(p.id), name: p.name || '(unnamed page)' }); }
+      }
+    } catch (_) { /* one edge failing is fine — try the other */ }
+  }
+  return out;
+}
+
+// List the instant Lead forms on a Page, for the Lead-form picker. May come back
+// empty if the system user lacks page-level leads access even when forms exist —
+// the screen falls back to a typed form ID in that case. Throws on hard error.
+export async function listLeadForms(pageId) {
+  const id = String(pageId || '').replace(/\D/g, '');
+  if (!id) return [];
+  const json = await metaRequest(`${id}/leadgen_forms`, { params: { fields: 'id,name,status', limit: 200 } });
+  return Array.isArray(json.data)
+    ? json.data.map(f => ({ id: String(f.id), name: f.name || '(unnamed form)', status: f.status || null }))
+    : [];
+}
+
+// Upload one ad image to the ad account and return its image_hash. The creative
+// references the hash (the reliable way — object_story_spec image_url is flaky).
+// `imageUrl` is the public R2 URL of the final (logo-composited) ad image.
+async function uploadAdImage(adAccountId, imageUrl) {
+  const id = String(adAccountId).replace(/^act_/, '');
+  if (!imageUrl) throw new Error('this ad has no image — click New image first');
+  let bytes;
+  try {
+    const resp = await fetch(imageUrl);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const ab = await resp.arrayBuffer();
+    bytes = Buffer.from(ab).toString('base64');
+  } catch (e) {
+    throw new Error(`could not read the ad image (${e && e.message ? e.message : e})`);
+  }
+  const json = await metaRequest(`act_${id}/adimages`, { method: 'POST', body: { bytes } });
+  const images = (json && json.images) ? json.images : {};
+  const first = Object.values(images)[0];
+  if (!first || !first.hash) throw new Error('Facebook did not return an image hash');
+  return first.hash;
+}
+
+// The orchestrator the push route calls. Creates ONE Leads campaign (PAUSED) →
+// ONE ad set (PAUSED, broad location+age targeting, optimised for lead-form
+// submissions, tied to the Page, with the daily budget) → ONE ad per creative
+// (PAUSED), each with an instant Lead form attached. Takes plain data only (no
+// DB) so this module stays the single Facebook-only layer; the route reads the
+// DB, calls this, and writes the results back.
+//
+// Never throws — returns a structured result the route can persist + show:
+//   { ok, campaign_id, adset_id, error, failed_step,
+//     results: [{ id, ok, ad_id, creative_id, error, step }] }
+// `ok` is true if at least one ad was created. A campaign/ad-set level failure
+// comes back with `error` + `failed_step` set and no ads created.
+export async function pushAdsToFacebook({
+  adAccountId, pageId, leadFormId, dailyBudgetPence,
+  countries = ['GB'], ageMin = 18, ageMax = 65, campaignName, creatives = [],
+}) {
+  const id = String(adAccountId || '').replace(/^act_/, '');
+  const out = { ok: false, campaign_id: null, adset_id: null, error: null, failed_step: null, results: [] };
+
+  if (!id)         { out.error = 'no ad account set'; out.failed_step = 'setup'; return out; }
+  if (!pageId)     { out.error = 'no Facebook Page set'; out.failed_step = 'setup'; return out; }
+  if (!leadFormId) { out.error = 'no Lead form set'; out.failed_step = 'setup'; return out; }
+  if (!(Number(dailyBudgetPence) > 0)) { out.error = 'no daily budget set'; out.failed_step = 'setup'; return out; }
+
+  // 1) Campaign — Leads, PAUSED. Exact call proven by checkCreatePermission.
+  let campaign;
+  try {
+    campaign = await metaRequest(`act_${id}/campaigns`, {
+      method: 'POST',
+      body: {
+        name: campaignName,
+        objective: 'OUTCOME_LEADS',
+        status: 'PAUSED',
+        special_ad_categories: '[]',
+        is_adset_budget_sharing_enabled: 'false',
+      },
+    });
+  } catch (e) { out.error = e.message; out.failed_step = 'campaign'; return out; }
+  out.campaign_id = campaign.id || null;
+
+  // 2) Ad set — PAUSED, daily budget, broad targeting, lead-form optimisation.
+  let adset;
+  try {
+    adset = await metaRequest(`act_${id}/adsets`, {
+      method: 'POST',
+      body: {
+        name: `${campaignName} — Ad set 1`,
+        campaign_id: out.campaign_id,
+        status: 'PAUSED',
+        daily_budget: String(Math.round(Number(dailyBudgetPence))),
+        billing_event: 'IMPRESSIONS',
+        optimization_goal: 'LEAD_GENERATION',
+        bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
+        promoted_object: JSON.stringify({ page_id: String(pageId) }),
+        targeting: JSON.stringify({
+          geo_locations: { countries: countries.length ? countries : ['GB'] },
+          age_min: ageMin, age_max: ageMax,
+        }),
+      },
+    });
+  } catch (e) {
+    out.error = e.message; out.failed_step = 'adset';
+    out.results = creatives.map(c => ({ id: c.id, ok: false, ad_id: null, creative_id: null, error: 'ad set was not created', step: 'adset' }));
+    return out;
+  }
+  out.adset_id = adset.id || null;
+
+  // 3) One ad per creative — image → creative → ad, all PAUSED. Per-ad failures
+  // are recorded and the loop continues to the next ad.
+  const link = `https://www.facebook.com/${String(pageId)}`;
+  for (const c of creatives) {
+    const r = { id: c.id, ok: false, ad_id: null, creative_id: null, error: null, step: null };
+    try {
+      r.step = 'image';
+      const imageHash = await uploadAdImage(id, c.image_url);
+
+      r.step = 'creative';
+      const oss = {
+        page_id: String(pageId),
+        link_data: {
+          image_hash: imageHash,
+          message: c.primary_text || '',
+          name: c.headline || '',
+          link,
+          call_to_action: {
+            type: c.cta || 'LEARN_MORE',
+            value: { lead_gen_form_id: String(leadFormId) },
+          },
+        },
+      };
+      const creative = await metaRequest(`act_${id}/adcreatives`, {
+        method: 'POST',
+        body: { name: (c.hook_label || 'Ad creative').slice(0, 80), object_story_spec: JSON.stringify(oss) },
+      });
+      r.creative_id = creative.id || null;
+
+      r.step = 'ad';
+      const ad = await metaRequest(`act_${id}/ads`, {
+        method: 'POST',
+        body: {
+          name: (c.hook_label || 'Ad').slice(0, 80),
+          adset_id: out.adset_id,
+          creative: JSON.stringify({ creative_id: r.creative_id }),
+          status: 'PAUSED',
+        },
+      });
+      r.ad_id = ad.id || null;
+      r.ok = !!r.ad_id;
+    } catch (e) {
+      r.error = `${r.step}: ${e && e.message ? e.message : e}`;
+    }
+    out.results.push(r);
+  }
+
+  out.ok = out.results.some(r => r.ok);
+  return out;
+}
+
 // ── Reading ads + stats (Stage 2: read) ──────────────────────────────────────
 
 // The date windows the admin screen offers, mapped to Meta's date_preset values.
