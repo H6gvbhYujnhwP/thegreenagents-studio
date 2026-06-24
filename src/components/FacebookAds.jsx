@@ -215,6 +215,7 @@ export default function FacebookAds() {
         <div style={{ display:'flex', gap:4, borderBottom:`1px solid ${BORDER}`, marginBottom:16 }}>
           {tabBtn('results','Results')}
           {tabBtn('approvals','Ad approvals')}
+          {tabBtn('setup','Setup')}
         </div>
       )}
 
@@ -286,9 +287,9 @@ export default function FacebookAds() {
         </>
       )}
 
-      {/* ── AD APPROVALS TAB ────────────────────────────────────────────────── */}
-      {selected && tab==='approvals' && (
-        <AdApprovals key={selId} customerId={selId} customerName={selected.name} />
+      {/* ── AD APPROVALS / SETUP TABS ───────────────────────────────────────── */}
+      {selected && (tab==='approvals' || tab==='setup') && (
+        <AdApprovals key={selId} customerId={selId} customerName={selected.name} view={tab} />
       )}
     </div>
   );
@@ -304,7 +305,7 @@ const LOGO_SIZES = [ ['small','Small'], ['medium','Medium'], ['large','Large'] ]
 const LOGO_PANELS = [ ['white','White panel'], ['none','No panel'] ];
 const AD_COUNTS = [3,4,5,6,8,10];
 
-function AdApprovals({ customerId, customerName }) {
+function AdApprovals({ customerId, customerName, view='approvals' }) {
   const [ov, setOv] = useState(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
@@ -487,8 +488,9 @@ function AdApprovals({ customerId, customerName }) {
     <div>
       {err && <div style={{ ...cardStyle, background:RED_BG, border:`1px solid ${RED}`, color:RED, marginBottom:14, fontSize:13 }}>{err}</div>}
 
-      {/* Setup strip */}
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(240px, 1fr))', gap:12, marginBottom:12 }}>
+      {/* ── SETUP VIEW ──────────────────────────────────────────────────── */}
+      {view==='setup' && (<>
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginBottom:12 }}>
         {/* RAG */}
         <div style={cardStyle}>
           <div style={{ fontSize:12, fontWeight:500, color:MUTED, marginBottom:8 }}>Facebook RAG document</div>
@@ -529,20 +531,31 @@ function AdApprovals({ customerId, customerName }) {
           <div style={{ fontSize:11, color:TERTIARY, marginTop:8 }}>Added on top of every generated ad image.</div>
         </div>
 
-        {/* Generate */}
-        <div style={cardStyle}>
-          <div style={{ fontSize:12, fontWeight:500, color:MUTED, marginBottom:8 }}>Generate ads</div>
-          <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
-            <span style={{ fontSize:12, color:TERTIARY }}>How many:</span>
-            <select value={count} onChange={e=>setCountAndSave(parseInt(e.target.value,10))} style={{ fontSize:12, padding:'5px 8px', border:`1px solid ${BORDER}`, borderRadius:6, background:'#fff', color:TEXT }}>
-              {AD_COUNTS.map(n=><option key={n} value={n}>{n}</option>)}
+      </div>
+
+      {/* Default logo placement — the default for every newly generated ad */}
+      <div style={{ ...cardStyle, marginBottom:12 }}>
+        <div style={{ fontSize:12, fontWeight:500, color:MUTED, marginBottom:3 }}>Default logo placement</div>
+        <div style={{ fontSize:11, color:TERTIARY, marginBottom:10 }}>Applied to every newly generated ad. You can still adjust any single ad on the Ad approvals tab.</div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:10, maxWidth:480 }}>
+          <div>
+            <div style={{ fontSize:11, color:TERTIARY, marginBottom:3 }}>Position</div>
+            <select value={(ov&&ov.logo_position)||'bottom-right'} onChange={e=>saveSetup({ logo_position:e.target.value })} style={fieldStyle}>
+              {LOGO_POSITIONS.map(([v,l])=><option key={v} value={v}>{l}</option>)}
             </select>
-            <span style={{ fontSize:11, padding:'3px 8px', borderRadius:999, background:BLUE_BG, color:BLUE }}>Leads</span>
           </div>
-          <button onClick={generate} disabled={generating || !hasRag} style={btn(hasRag?GREEN_HI:'#ccc','#fff', { width:'100%', padding:'8px 0', cursor:(generating||!hasRag)?'not-allowed':'pointer', ...(generating?{opacity:0.7}:{}) })}>
-            {generating ? 'Generating…' : 'Generate ads from RAG'}
-          </button>
-          {generating && <div style={{ fontSize:11, color:TERTIARY, marginTop:6 }}>Writing copy and designing images — this can take a minute.</div>}
+          <div>
+            <div style={{ fontSize:11, color:TERTIARY, marginBottom:3 }}>Size</div>
+            <select value={(ov&&ov.logo_size)||'small'} onChange={e=>saveSetup({ logo_size:e.target.value })} style={fieldStyle}>
+              {LOGO_SIZES.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+            </select>
+          </div>
+          <div>
+            <div style={{ fontSize:11, color:TERTIARY, marginBottom:3 }}>Background</div>
+            <select value={(ov&&ov.logo_panel)||'white'} onChange={e=>saveSetup({ logo_panel:e.target.value })} style={fieldStyle}>
+              {LOGO_PANELS.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+            </select>
+          </div>
         </div>
       </div>
 
@@ -575,11 +588,31 @@ function AdApprovals({ customerId, customerName }) {
           </div>
         </div>
       </div>
+      </>)}
+
+      {/* ── AD APPROVALS VIEW ───────────────────────────────────────────── */}
+      {view!=='setup' && (<>
+
+      {/* Generate */}
+      <div style={{ ...cardStyle, marginBottom:14, display:'flex', alignItems:'center', gap:12, flexWrap:'wrap' }}>
+        <div style={{ fontSize:12, fontWeight:500, color:MUTED }}>Generate ads</div>
+        <span style={{ fontSize:12, color:TERTIARY }}>How many:</span>
+        <select value={count} onChange={e=>setCountAndSave(parseInt(e.target.value,10))} style={{ fontSize:12, padding:'5px 8px', border:`1px solid ${BORDER}`, borderRadius:6, background:'#fff', color:TEXT }}>
+          {AD_COUNTS.map(n=><option key={n} value={n}>{n}</option>)}
+        </select>
+        <span style={{ fontSize:11, padding:'3px 8px', borderRadius:999, background:BLUE_BG, color:BLUE }}>Leads</span>
+        <span style={{ flex:1 }} />
+        <button onClick={generate} disabled={generating || !hasRag} style={btn(hasRag?GREEN_HI:'#ccc','#fff', { padding:'8px 18px', cursor:(generating||!hasRag)?'not-allowed':'pointer', ...(generating?{opacity:0.7}:{}) })}>
+          {generating ? 'Generating…' : 'Generate ads from RAG'}
+        </button>
+        {!hasRag && <div style={{ fontSize:11, color:RED, width:'100%' }}>Upload a Facebook RAG in the Setup tab to start.</div>}
+        {generating && <div style={{ fontSize:11, color:TERTIARY, width:'100%' }}>Writing copy and designing images — this can take a minute.</div>}
+      </div>
 
       {/* Generated ads */}
       {creatives.length > 0 && <div style={{ fontSize:13, color:MUTED, margin:'4px 0 10px' }}>{creatives.length} {creatives.length===1?'ad':'ads'} · {approvedCount} approved</div>}
       {creatives.length === 0 && (
-        <div style={{ ...cardStyle, color:MUTED, fontSize:13 }}>{hasRag ? 'No ads yet — choose how many and click “Generate ads from RAG”.' : 'Upload a Facebook RAG document to start generating ads.'}</div>
+        <div style={{ ...cardStyle, color:MUTED, fontSize:13 }}>{hasRag ? 'No ads yet — choose how many and click “Generate ads from RAG”.' : 'Upload a Facebook RAG in the Setup tab to start generating ads.'}</div>
       )}
 
       <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(340px, 1fr))', gap:16 }}>
@@ -811,6 +844,7 @@ function AdApprovals({ customerId, customerName }) {
           </div>
         );
       })()}
+      </>)}
     </div>
   );
 }
