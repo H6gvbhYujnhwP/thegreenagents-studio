@@ -72,16 +72,20 @@ export function appsecretProof(token, appSecret) {
 //   method — 'GET' (default), 'POST', 'DELETE'
 //   params — object of query-string params (merged with token + proof)
 //   body   — object sent as form-encoded body for POST (Meta expects form, not JSON)
-export async function metaRequest(path, { method = 'GET', params = {}, body = null } = {}) {
+//   token  — optional override access token (e.g. a Page token); when given it's
+//            used instead of the system token and the appsecret_proof is signed
+//            with it. Defaults to the configured system-user token.
+export async function metaRequest(path, { method = 'GET', params = {}, body = null, token = null } = {}) {
   const c = cfg();
-  if (!c.accessToken) throw new Error('META_ACCESS_TOKEN is not set');
+  const accessToken = token || c.accessToken;
+  if (!accessToken) throw new Error('META_ACCESS_TOKEN is not set');
 
   const base = `https://graph.facebook.com/${c.apiVersion}/`;
   const url = new URL(path.replace(/^\//, ''), base);
 
   // Auth params on every request.
-  const query = { access_token: c.accessToken, ...params };
-  const proof = appsecretProof(c.accessToken, c.appSecret);
+  const query = { access_token: accessToken, ...params };
+  const proof = appsecretProof(accessToken, c.appSecret);
   if (proof) query.appsecret_proof = proof;
   for (const [k, v] of Object.entries(query)) {
     if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
@@ -271,13 +275,30 @@ export async function listPages() {
   return out;
 }
 
-// List the instant Lead forms on a Page, for the Lead-form picker. May come back
-// empty if the system user lacks page-level leads access even when forms exist —
-// the screen falls back to a typed form ID in that case. Throws on hard error.
+// Fetch a Page access token for the given page from the pages this token can
+// see (/me/accounts). Used so the form list reads with the Page's own token,
+// which can see restricted forms the system-user token can't. Null if not found.
+async function getPageAccessToken(pageId) {
+  const id = String(pageId || '').replace(/\D/g, '');
+  if (!id) return null;
+  try {
+    const j = await metaRequest('me/accounts', { params: { fields: 'id,access_token', limit: 200 } });
+    const hit = (j.data || []).find(p => String(p.id) === id);
+    return hit && hit.access_token ? hit.access_token : null;
+  } catch (_) { return null; }
+}
+
+// List the instant Lead forms on a Page, for the Lead-form picker. Reads with
+// the Page's own access token when available (so Sharing=Restricted forms are
+// visible too); falls back to the system token. Empty list → typed-ID fallback
+// on the screen. Throws on hard error (route catches).
 export async function listLeadForms(pageId) {
   const id = String(pageId || '').replace(/\D/g, '');
   if (!id) return [];
-  const json = await metaRequest(`${id}/leadgen_forms`, { params: { fields: 'id,name,status', limit: 200 } });
+  const pageToken = await getPageAccessToken(id);
+  const opts = { params: { fields: 'id,name,status', limit: 200 } };
+  if (pageToken) opts.token = pageToken;
+  const json = await metaRequest(`${id}/leadgen_forms`, opts);
   return Array.isArray(json.data)
     ? json.data.map(f => ({ id: String(f.id), name: f.name || '(unnamed form)', status: f.status || null }))
     : [];
