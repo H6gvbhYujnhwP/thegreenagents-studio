@@ -1,13 +1,18 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// FacebookAds.jsx — Admin Facebook Ads screen (decision #107): READ-ONLY.
+// FacebookAds.jsx — Admin Facebook Ads screen.
 //
-// Studio doesn't create or manage ads (Manus AI does). This screen is a window
-// onto Facebook performance, one ad account per customer:
-//   • pick a customer (or add one) and set their ad account id
-//   • see that account's totals + a card per live ad (image/copy/status/stats)
-// Nothing here writes to Facebook.
+// Two tabs:
+//   • Results      — READ-ONLY live performance from Facebook (one account / customer)
+//   • Ad approvals — generate ad copy + designed-ad images from the customer's
+//                    FACEBOOK RAG (gpt-image-2, on-brand), review with the same
+//                    controls as LinkedIn (text/image regen, logo position/size/
+//                    background, approve). Nothing here writes to Facebook yet —
+//                    pushing approved drafts is the next stage.
+//
+// Facebook is standalone: its RAG, brand colours, logo and ads are all separate
+// from the LinkedIn side.
 // ─────────────────────────────────────────────────────────────────────────────
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 const GREEN_HI='#0F6E56', GREEN_BG='#E1F5EE';
 const TEXT='#1a1a1a', MUTED='#666', TERTIARY='#999', BORDER='#e0e0dc', BG='#f5f5f3', CARD='#ffffff';
@@ -20,6 +25,7 @@ const GREEN='#1D9E75';
 const WINDOWS = [ {key:'7d',label:'Last 7 days'}, {key:'30d',label:'Last 30 days'}, {key:'lifetime',label:'Lifetime'} ];
 const cardStyle = { background:CARD, border:`1px solid ${BORDER}`, borderRadius:10, padding:'14px 16px' };
 const btn = (bg, fg, extra={}) => ({ background:bg, color:fg, border:'none', borderRadius:6, padding:'6px 12px', fontSize:12, fontWeight:500, cursor:'pointer', ...extra });
+const fieldStyle = { width:'100%', fontSize:12, padding:'6px 8px', border:`1px solid ${BORDER}`, borderRadius:6, background:'#fff', color:TEXT, fontFamily:'inherit', boxSizing:'border-box' };
 
 function statusPill(eff, status) {
   const s = (eff || status || '').toUpperCase();
@@ -36,6 +42,7 @@ export default function FacebookAds() {
   const [customers, setCustomers] = useState([]);
   const [available, setAvailable] = useState([]);
   const [selId, setSelId] = useState('');
+  const [tab, setTab] = useState('results');
   const [window, setWindow] = useState('30d');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -48,7 +55,6 @@ export default function FacebookAds() {
   const [acctInput, setAcctInput] = useState('');
   const [savingAcct, setSavingAcct] = useState(false);
 
-  // Phase-2 pre-flight: "Test create-ad permission" button result.
   const [permTest, setPermTest] = useState(null);
   const [permLoading, setPermLoading] = useState(false);
 
@@ -66,7 +72,7 @@ export default function FacebookAds() {
   }
 
   useEffect(() => { loadCustomers(); loadAvailable(); }, []);
-  useEffect(() => { loadAds(selId, window); }, [selId, window]);
+  useEffect(() => { if (tab === 'results') loadAds(selId, window); }, [selId, window, tab]);
 
   async function saveAccount(id, acct) {
     setSavingAcct(true); setError(null);
@@ -92,7 +98,6 @@ export default function FacebookAds() {
     if (okSaved) { setEditAcct(false); loadAds(selId, window); }
   }
 
-  // Run the create-ad permission test for the selected customer's account.
   async function runPermTest() {
     if (!selId) return;
     setPermLoading(true); setPermTest(null);
@@ -117,11 +122,15 @@ export default function FacebookAds() {
   const noAccount = data && data.no_account;
   const statCell = (label, value) => (<div><div style={{ fontSize:11, color:TERTIARY }}>{label}</div><div style={{ fontSize:14, fontWeight:500, color:TEXT }}>{value}</div></div>);
 
+  const tabBtn = (key, label) => (
+    <button onClick={()=>setTab(key)} style={{ padding:'8px 16px', fontSize:13, cursor:'pointer', border:'none', background:'none', color: tab===key?GREEN_HI:MUTED, fontWeight: tab===key?600:400, borderBottom: tab===key?`2px solid ${GREEN_HI}`:'2px solid transparent' }}>{label}</button>
+  );
+
   return (
     <div style={{ flex:1, overflow:'auto', padding:28, background:BG }}>
       <div style={{ marginBottom:16 }}>
         <h1 style={{ fontSize:20, fontWeight:500, color:TEXT, margin:0 }}>Facebook Ads</h1>
-        <div style={{ fontSize:13, color:MUTED, marginTop:3 }}>Live performance from Facebook. Read-only — campaigns are managed outside Studio.</div>
+        <div style={{ fontSize:13, color:MUTED, marginTop:3 }}>Live performance plus ad generation and approvals — one ad account per customer.</div>
       </div>
 
       {/* Customer selector */}
@@ -137,14 +146,9 @@ export default function FacebookAds() {
           </button>
         )}
         <div style={{ flex:1 }} />
-        {selected && (connected
+        {selected && tab==='results' && (connected
           ? <span style={{ fontSize:12, padding:'5px 10px', borderRadius:6, background:GREEN_BG, color:GREEN_HI }}>● Connected</span>
           : (!noAccount && data && data.ok===false ? <span style={{ fontSize:12, padding:'5px 10px', borderRadius:6, background:RED_BG, color:RED }}>● Not connected</span> : null))}
-        <div style={{ display:'inline-flex', border:`1px solid ${BORDER}`, borderRadius:6, overflow:'hidden' }}>
-          {WINDOWS.map((w,i)=>(
-            <button key={w.key} onClick={()=>setWindow(w.key)} style={{ padding:'6px 12px', fontSize:12, cursor:'pointer', border:'none', borderLeft:i===0?'none':`1px solid ${BORDER}`, background:window===w.key?GREEN_HI:'#fff', color:window===w.key?'#fff':MUTED, fontWeight:window===w.key?500:400 }}>{w.label}</button>
-          ))}
-        </div>
       </div>
 
       {/* Create-ad permission test result */}
@@ -165,6 +169,7 @@ export default function FacebookAds() {
           </div>
         );
       })()}
+
       {addOpen && (
         <div style={{ ...cardStyle, marginBottom:14 }}>
           <div style={{ fontSize:13, fontWeight:500, marginBottom:8 }}>Add a Facebook Ads customer</div>
@@ -183,9 +188,9 @@ export default function FacebookAds() {
 
       {error && <div style={{ ...cardStyle, background:RED_BG, border:`1px solid ${RED}`, color:RED, marginBottom:14, fontSize:13 }}>{error}</div>}
 
-      {!selected && !addOpen && <div style={{ ...cardStyle, color:MUTED, fontSize:13 }}>Select a customer to see their Facebook Ads performance, or add one.</div>}
+      {!selected && !addOpen && <div style={{ ...cardStyle, color:MUTED, fontSize:13 }}>Select a customer to see their Facebook Ads performance and approvals, or add one.</div>}
 
-      {/* Selected customer: account line */}
+      {/* Selected customer: account line (shared) */}
       {selected && (
         <div style={{ ...cardStyle, marginBottom:14, display:'flex', alignItems:'center', gap:12, flexWrap:'wrap' }}>
           <div style={{ fontSize:13, color:MUTED }}>Ad account:</div>
@@ -199,68 +204,406 @@ export default function FacebookAds() {
             <>
               <span style={{ fontSize:13, color:TEXT }}>{selected.ad_account_id ? `act_${selected.ad_account_id}` : <span style={{ color:RED }}>not set</span>}</span>
               <button onClick={()=>{ setAcctInput(selected.ad_account_id||''); setEditAcct(true); }} style={btn(GREY_BG, GREY, { border:`1px solid ${BORDER}` })}>{selected.ad_account_id?'Edit':'Set account'}</button>
-              {data && data.account && <span style={{ fontSize:12, color:TERTIARY }}>· {data.account.name} · {currency}</span>}
+              {data && data.account && tab==='results' && <span style={{ fontSize:12, color:TERTIARY }}>· {data.account.name} · {currency}</span>}
             </>
           )}
         </div>
       )}
 
-      {/* Meta failure (not the "no account" case) */}
-      {selected && data && data.ok===false && !noAccount && (
-        <div style={{ ...cardStyle, background:AMBER_BG, border:`1px solid ${AMBER}`, color:AMBER, marginBottom:14 }}>
-          <div style={{ fontWeight:500, marginBottom:4 }}>Couldn't load ads from Facebook</div>
-          <div style={{ fontSize:13 }}>{data.error || 'Unknown error from the Meta API.'}</div>
+      {/* Tabs */}
+      {selected && (
+        <div style={{ display:'flex', gap:4, borderBottom:`1px solid ${BORDER}`, marginBottom:16 }}>
+          {tabBtn('results','Results')}
+          {tabBtn('approvals','Ad approvals')}
         </div>
       )}
 
-      {selected && noAccount && !editAcct && (
-        <div style={{ ...cardStyle, color:MUTED, fontSize:13 }}>Set this customer's ad account ID above to see their performance.</div>
-      )}
-
-      {/* Performance */}
-      {selected && selected.ad_account_id && !noAccount && (
+      {/* ── RESULTS TAB ─────────────────────────────────────────────────────── */}
+      {selected && tab==='results' && (
         <>
-          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(150px, 1fr))', gap:12, marginBottom:12 }}>
-            <div style={cardStyle}><div style={{ fontSize:13, color:MUTED }}>Total spent</div><div style={{ fontSize:24, fontWeight:500 }}>{loading?'…':fmtMoney(totals.spend)}</div></div>
-            <div style={cardStyle}><div style={{ fontSize:13, color:MUTED }}>Reach</div><div style={{ fontSize:24, fontWeight:500 }}>{loading?'…':fmtNum(totals.reach)}</div></div>
-            <div style={cardStyle}><div style={{ fontSize:13, color:MUTED }}>Leads</div><div style={{ fontSize:24, fontWeight:500 }}>{loading?'…':fmtNum(totals.leads)}</div></div>
-            <div style={cardStyle}><div style={{ fontSize:13, color:MUTED }}>Cost per lead</div><div style={{ fontSize:24, fontWeight:500 }}>{loading?'…':fmtMoney(totals.cost_per_lead)}</div></div>
+          <div style={{ display:'flex', justifyContent:'flex-end', marginBottom:12 }}>
+            <div style={{ display:'inline-flex', border:`1px solid ${BORDER}`, borderRadius:6, overflow:'hidden' }}>
+              {WINDOWS.map((w,i)=>(
+                <button key={w.key} onClick={()=>setWindow(w.key)} style={{ padding:'6px 12px', fontSize:12, cursor:'pointer', border:'none', borderLeft:i===0?'none':`1px solid ${BORDER}`, background:window===w.key?GREEN_HI:'#fff', color:window===w.key?'#fff':MUTED, fontWeight:window===w.key?500:400 }}>{w.label}</button>
+              ))}
+            </div>
           </div>
 
-          {!loading && nothingSpent && (
-            <div style={{ display:'flex', gap:8, fontSize:12, color:BLUE, background:BLUE_BG, borderRadius:6, padding:'8px 12px', marginBottom:18 }}>
-              <span>ℹ️</span><span>No spend in this window yet, so the numbers are zero. Leads start counting once an ad is running and the pixel's lead event is live.</span>
+          {data && data.ok===false && !noAccount && (
+            <div style={{ ...cardStyle, background:AMBER_BG, border:`1px solid ${AMBER}`, color:AMBER, marginBottom:14 }}>
+              <div style={{ fontWeight:500, marginBottom:4 }}>Couldn't load ads from Facebook</div>
+              <div style={{ fontSize:13 }}>{data.error || 'Unknown error from the Meta API.'}</div>
             </div>
           )}
 
-          {!loading && connected && <div style={{ fontSize:13, color:MUTED, margin:'6px 0 8px' }}>{ads.length} {ads.length===1?'ad':'ads'}</div>}
-          {loading && <div style={{ fontSize:13, color:TERTIARY, padding:'12px 0' }}>Loading ads from Facebook…</div>}
-          {!loading && connected && ads.length===0 && <div style={{ ...cardStyle, color:MUTED, fontSize:13 }}>No ads in this account yet.</div>}
+          {noAccount && !editAcct && (
+            <div style={{ ...cardStyle, color:MUTED, fontSize:13 }}>Set this customer's ad account ID above to see their performance.</div>
+          )}
 
-          <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
-            {!loading && ads.map(ad => {
-              const pill = statusPill(ad.effective_status, ad.status); const s = ad.stats || {};
-              return (
-                <div key={ad.id} style={{ ...cardStyle, display:'flex', gap:14 }}>
-                  <div style={{ width:120, height:120, flex:'none', borderRadius:8, background:GREY_BG, overflow:'hidden', display:'flex', alignItems:'center', justifyContent:'center' }}>
-                    {ad.image_url ? <img src={ad.image_url} alt="" style={{ width:'100%', height:'100%', objectFit:'cover' }} onError={(e)=>{e.target.style.display='none';}} /> : <span style={{ color:TERTIARY, fontSize:11 }}>No image</span>}
-                  </div>
-                  <div style={{ flex:1, minWidth:0 }}>
-                    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
-                      <div style={{ fontWeight:500, fontSize:15, color:TEXT, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{ad.title || ad.name}</div>
-                      <span style={{ fontSize:11, padding:'3px 8px', borderRadius:6, background:pill.bg, color:pill.fg, flex:'none' }}>{pill.label}</span>
-                    </div>
-                    {(ad.body || ad.title) && <div style={{ fontSize:13, color:MUTED, margin:'4px 0 10px', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>{ad.body || ad.name}</div>}
-                    <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:8 }}>
-                      {statCell('Spend', fmtMoney(s.spend))}{statCell('Reach', fmtNum(s.reach))}{statCell('Leads', fmtNum(s.leads))}{statCell('Cost / lead', fmtMoney(s.cost_per_lead))}
-                    </div>
-                  </div>
+          {selected.ad_account_id && !noAccount && (
+            <>
+              <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(150px, 1fr))', gap:12, marginBottom:12 }}>
+                <div style={cardStyle}><div style={{ fontSize:13, color:MUTED }}>Total spent</div><div style={{ fontSize:24, fontWeight:500 }}>{loading?'…':fmtMoney(totals.spend)}</div></div>
+                <div style={cardStyle}><div style={{ fontSize:13, color:MUTED }}>Reach</div><div style={{ fontSize:24, fontWeight:500 }}>{loading?'…':fmtNum(totals.reach)}</div></div>
+                <div style={cardStyle}><div style={{ fontSize:13, color:MUTED }}>Leads</div><div style={{ fontSize:24, fontWeight:500 }}>{loading?'…':fmtNum(totals.leads)}</div></div>
+                <div style={cardStyle}><div style={{ fontSize:13, color:MUTED }}>Cost per lead</div><div style={{ fontSize:24, fontWeight:500 }}>{loading?'…':fmtMoney(totals.cost_per_lead)}</div></div>
+              </div>
+
+              {!loading && nothingSpent && (
+                <div style={{ display:'flex', gap:8, fontSize:12, color:BLUE, background:BLUE_BG, borderRadius:6, padding:'8px 12px', marginBottom:18 }}>
+                  <span>ℹ️</span><span>No spend in this window yet, so the numbers are zero. Leads start counting once an ad is running and the pixel's lead event is live.</span>
                 </div>
-              );
-            })}
-          </div>
+              )}
+
+              {!loading && connected && <div style={{ fontSize:13, color:MUTED, margin:'6px 0 8px' }}>{ads.length} {ads.length===1?'ad':'ads'}</div>}
+              {loading && <div style={{ fontSize:13, color:TERTIARY, padding:'12px 0' }}>Loading ads from Facebook…</div>}
+              {!loading && connected && ads.length===0 && <div style={{ ...cardStyle, color:MUTED, fontSize:13 }}>No ads in this account yet.</div>}
+
+              <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+                {!loading && ads.map(ad => {
+                  const pill = statusPill(ad.effective_status, ad.status); const s = ad.stats || {};
+                  return (
+                    <div key={ad.id} style={{ ...cardStyle, display:'flex', gap:14 }}>
+                      <div style={{ width:120, height:120, flex:'none', borderRadius:8, background:GREY_BG, overflow:'hidden', display:'flex', alignItems:'center', justifyContent:'center' }}>
+                        {ad.image_url ? <img src={ad.image_url} alt="" style={{ width:'100%', height:'100%', objectFit:'cover' }} onError={(e)=>{e.target.style.display='none';}} /> : <span style={{ color:TERTIARY, fontSize:11 }}>No image</span>}
+                      </div>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
+                          <div style={{ fontWeight:500, fontSize:15, color:TEXT, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{ad.title || ad.name}</div>
+                          <span style={{ fontSize:11, padding:'3px 8px', borderRadius:6, background:pill.bg, color:pill.fg, flex:'none' }}>{pill.label}</span>
+                        </div>
+                        {(ad.body || ad.title) && <div style={{ fontSize:13, color:MUTED, margin:'4px 0 10px', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>{ad.body || ad.name}</div>}
+                        <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:8 }}>
+                          {statCell('Spend', fmtMoney(s.spend))}{statCell('Reach', fmtNum(s.reach))}{statCell('Leads', fmtNum(s.leads))}{statCell('Cost / lead', fmtMoney(s.cost_per_lead))}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
         </>
       )}
+
+      {/* ── AD APPROVALS TAB ────────────────────────────────────────────────── */}
+      {selected && tab==='approvals' && (
+        <AdApprovals key={selId} customerId={selId} customerName={selected.name} />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ad approvals tab — the Facebook overview (RAG + brand + logo + generate) and
+// the generated ad cards. Self-contained; owns its own data for the selected
+// customer. Card layout mirrors the LinkedIn post cards.
+// ─────────────────────────────────────────────────────────────────────────────
+const LOGO_POSITIONS = [ ['bottom-right','Bottom right'], ['bottom-left','Bottom left'], ['top-right','Top right'], ['top-left','Top left'] ];
+const LOGO_SIZES = [ ['small','Small'], ['medium','Medium'], ['large','Large'] ];
+const LOGO_PANELS = [ ['white','White panel'], ['none','No panel'] ];
+const AD_COUNTS = [3,4,5,6,8,10];
+
+function AdApprovals({ customerId, customerName }) {
+  const [ov, setOv] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+  const [count, setCount] = useState(6);
+  const [generating, setGenerating] = useState(false);
+  const [newRag, setNewRag] = useState(null);
+  const [uploadingRag, setUploadingRag] = useState(false);
+  const [newLogo, setNewLogo] = useState(null);
+  const [uploadingLogo, setUploadingLogo] = useState(false);
+  const [extractMsg, setExtractMsg] = useState('');
+  const [extracting, setExtracting] = useState(false);
+  const [busyId, setBusyId] = useState(null);
+  const [busyKind, setBusyKind] = useState(null);
+  const [editId, setEditId] = useState(null);
+  const [editDraft, setEditDraft] = useState({ headline:'', primary_text:'' });
+  const [brand, setBrand] = useState({ brand_colors:'', logo_description:'', type_style:'', visual_style:'' });
+  const saveTimer = useRef(null);
+
+  async function load() {
+    setLoading(true); setErr(null);
+    try {
+      const r = await fetch(`/api/facebook-ads/${customerId}/overview`);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'Could not load this customer.');
+      setOv(j);
+      setCount(j.ad_count || 6);
+      setBrand({ brand_colors:j.brand_colors||'', logo_description:j.logo_description||'', type_style:j.type_style||'', visual_style:j.visual_style||'' });
+    } catch(e){ setErr(e.message); setOv(null); }
+    finally { setLoading(false); }
+  }
+  useEffect(()=>{ load(); }, [customerId]);
+
+  function saveOverview(patch) {
+    fetch(`/api/facebook-ads/${customerId}/overview`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(patch) }).catch(()=>{});
+  }
+  function onBrandChange(field, value) {
+    setBrand(b=>({ ...b, [field]: value }));
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(()=>saveOverview({ [field]: value }), 800);
+  }
+  function setCountAndSave(v){ setCount(v); saveOverview({ ad_count: v }); }
+
+  async function uploadRag() {
+    if (!newRag) return; setUploadingRag(true); setErr(null);
+    try {
+      const fd = new FormData(); fd.append('rag', newRag);
+      const r = await fetch(`/api/facebook-ads/${customerId}/overview`, { method:'PUT', body:fd });
+      if (!r.ok){ const j=await r.json().catch(()=>({})); throw new Error(j.error||'RAG upload failed'); }
+      setNewRag(null); await load();
+    } catch(e){ setErr(e.message); } finally { setUploadingRag(false); }
+  }
+  async function uploadLogo() {
+    if (!newLogo) return; setUploadingLogo(true); setErr(null);
+    try {
+      const fd = new FormData(); fd.append('logo', newLogo);
+      const r = await fetch(`/api/facebook-ads/${customerId}/logo`, { method:'POST', body:fd });
+      if (!r.ok){ const j=await r.json().catch(()=>({})); throw new Error(j.error||'Logo upload failed'); }
+      setNewLogo(null); await load();
+    } catch(e){ setErr(e.message); } finally { setUploadingLogo(false); }
+  }
+  async function pullBrand() {
+    if (extracting) return; setExtracting(true); setExtractMsg('');
+    try {
+      const r = await fetch(`/api/facebook-ads/${customerId}/extract-brand`, { method:'POST' });
+      const j = await r.json().catch(()=>({}));
+      if (r.ok){ setExtractMsg(j.found?`✓ Pulled ${j.found} field${j.found===1?'':'s'} from the RAG`:'No branding found in the RAG'); await load(); }
+      else setExtractMsg(j.error||'Extraction failed');
+    } catch { setExtractMsg('Extraction failed'); }
+    finally { setExtracting(false); setTimeout(()=>setExtractMsg(''),4000); }
+  }
+  async function generate() {
+    setGenerating(true); setErr(null);
+    try {
+      const r = await fetch(`/api/facebook-ads/${customerId}/generate`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ count }) });
+      const j = await r.json().catch(()=>({}));
+      if (!r.ok) throw new Error(j.error||'Generation failed');
+      await load();
+    } catch(e){ setErr(e.message); } finally { setGenerating(false); }
+  }
+
+  async function creativeAction(id, kind, path, body) {
+    setBusyId(id); setBusyKind(kind); setErr(null);
+    try {
+      const opts = body!==undefined
+        ? { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) }
+        : { method:'POST' };
+      const r = await fetch(`/api/facebook-ads/${customerId}/creatives/${id}/${path}`, opts);
+      const j = await r.json().catch(()=>({}));
+      if (!r.ok) throw new Error(j.error||j.message||'Action failed');
+      if (j.creative) setOv(o=>({ ...o, creatives: o.creatives.map(c=>c.id===id?j.creative:c) }));
+      else if (j.status) setOv(o=>({ ...o, creatives: o.creatives.map(c=>c.id===id?{...c, status:j.status}:c) }));
+      return j;
+    } catch(e){ setErr(e.message); return null; }
+    finally { setBusyId(null); setBusyKind(null); }
+  }
+
+  function startEdit(c){ setEditId(c.id); setEditDraft({ headline:c.headline||'', primary_text:c.primary_text||'' }); }
+  async function saveEdit(id){
+    setBusyId(id); setBusyKind('save');
+    try {
+      await fetch(`/api/facebook-ads/${customerId}/creatives/${id}/text`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(editDraft) });
+      setOv(o=>({ ...o, creatives: o.creatives.map(c=>c.id===id?{...c, ...editDraft}:c) }));
+      setEditId(null);
+    } catch(e){ setErr(e.message); } finally { setBusyId(null); setBusyKind(null); }
+  }
+
+  const creatives = (ov && Array.isArray(ov.creatives)) ? ov.creatives : [];
+  const approvedCount = creatives.filter(c=>c.status==='approved').length;
+  const hasRag = ov && ov.has_rag;
+  const ctrl = { width:'100%', fontSize:11, padding:'5px 4px', border:'1px solid #ddd', borderRadius:5, background:'#fff', color:'#333', cursor:'pointer' };
+
+  if (loading && !ov) return <div style={{ ...cardStyle, color:TERTIARY, fontSize:13 }}>Loading…</div>;
+
+  return (
+    <div>
+      {err && <div style={{ ...cardStyle, background:RED_BG, border:`1px solid ${RED}`, color:RED, marginBottom:14, fontSize:13 }}>{err}</div>}
+
+      {/* Setup strip */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(240px, 1fr))', gap:12, marginBottom:12 }}>
+        {/* RAG */}
+        <div style={cardStyle}>
+          <div style={{ fontSize:12, fontWeight:500, color:MUTED, marginBottom:8 }}>Facebook RAG document</div>
+          {ov && ov.rag_filename ? (
+            <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+              <span style={{ fontSize:12, color:GREEN_HI, fontWeight:500, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{ov.rag_filename}</span>
+              <span style={{ flex:1 }} />
+              <label style={{ fontSize:11, color:MUTED, cursor:'pointer' }}>Replace<input type="file" accept=".md,.txt,.pdf" onChange={e=>setNewRag(e.target.files[0])} style={{ display:'none' }} /></label>
+            </div>
+          ) : (
+            <label style={{ ...btn(GREEN_BG, GREEN_HI, { border:`1px solid ${GREEN}`, display:'inline-block' }) }}>Upload RAG document<input type="file" accept=".md,.txt,.pdf" onChange={e=>setNewRag(e.target.files[0])} style={{ display:'none' }} /></label>
+          )}
+          {newRag && (
+            <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:8 }}>
+              <span style={{ fontSize:12, color:GREEN_HI, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{newRag.name}</span>
+              <button onClick={uploadRag} disabled={uploadingRag} style={btn(GREEN_HI,'#fff', uploadingRag?{opacity:0.6}:{})}>{uploadingRag?'Saving…':'Save'}</button>
+            </div>
+          )}
+          <div style={{ fontSize:11, color:TERTIARY, marginTop:8 }}>Separate from LinkedIn. Drives this customer's ad text and brand colours.</div>
+          {!hasRag && !newRag && <div style={{ fontSize:11, color:RED, marginTop:6 }}>A RAG document is required before generating ads.</div>}
+        </div>
+
+        {/* Logo */}
+        <div style={cardStyle}>
+          <div style={{ fontSize:12, fontWeight:500, color:MUTED, marginBottom:8 }}>Logo (Facebook)</div>
+          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            <div style={{ width:48, height:48, flex:'none', borderRadius:6, background:GREY_BG, overflow:'hidden', display:'flex', alignItems:'center', justifyContent:'center' }}>
+              {ov && ov.logo_url ? <img src={ov.logo_url} alt="" style={{ width:'100%', height:'100%', objectFit:'contain' }} /> : <span style={{ fontSize:9, color:TERTIARY }}>None</span>}
+            </div>
+            <label style={{ fontSize:11, color:GREEN_HI, cursor:'pointer', fontWeight:500 }}>{ov && ov.logo_url ? 'Replace logo' : 'Upload logo'}<input type="file" accept="image/*" onChange={e=>setNewLogo(e.target.files[0])} style={{ display:'none' }} /></label>
+          </div>
+          {newLogo && (
+            <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:8 }}>
+              <span style={{ fontSize:12, color:GREEN_HI, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{newLogo.name}</span>
+              <button onClick={uploadLogo} disabled={uploadingLogo} style={btn(GREEN_HI,'#fff', uploadingLogo?{opacity:0.6}:{})}>{uploadingLogo?'Saving…':'Save'}</button>
+            </div>
+          )}
+          <div style={{ fontSize:11, color:TERTIARY, marginTop:8 }}>Added on top of every generated ad image.</div>
+        </div>
+
+        {/* Generate */}
+        <div style={cardStyle}>
+          <div style={{ fontSize:12, fontWeight:500, color:MUTED, marginBottom:8 }}>Generate ads</div>
+          <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
+            <span style={{ fontSize:12, color:TERTIARY }}>How many:</span>
+            <select value={count} onChange={e=>setCountAndSave(parseInt(e.target.value,10))} style={{ fontSize:12, padding:'5px 8px', border:`1px solid ${BORDER}`, borderRadius:6, background:'#fff', color:TEXT }}>
+              {AD_COUNTS.map(n=><option key={n} value={n}>{n}</option>)}
+            </select>
+            <span style={{ fontSize:11, padding:'3px 8px', borderRadius:999, background:BLUE_BG, color:BLUE }}>Leads</span>
+          </div>
+          <button onClick={generate} disabled={generating || !hasRag} style={btn(hasRag?GREEN_HI:'#ccc','#fff', { width:'100%', padding:'8px 0', cursor:(generating||!hasRag)?'not-allowed':'pointer', ...(generating?{opacity:0.7}:{}) })}>
+            {generating ? 'Generating…' : 'Generate ads from RAG'}
+          </button>
+          {generating && <div style={{ fontSize:11, color:TERTIARY, marginTop:6 }}>Writing copy and designing images — this can take a minute.</div>}
+        </div>
+      </div>
+
+      {/* Brand block */}
+      <div style={{ ...cardStyle, marginBottom:16 }}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6 }}>
+          <div style={{ fontSize:12, fontWeight:500, color:MUTED }}>Brand kit (from the Facebook RAG)</div>
+          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            {extractMsg && <span style={{ fontSize:11, color: extractMsg.startsWith('✓')?GREEN_HI:MUTED }}>{extractMsg}</span>}
+            <button onClick={pullBrand} disabled={!hasRag || extracting} style={btn('#fff', hasRag?GREEN_HI:'#aaa', { border:`1px solid ${hasRag?GREEN:'#d0d0cc'}`, cursor:(!hasRag||extracting)?'not-allowed':'pointer' })}>{extracting?'Pulling…':'Pull brand from RAG'}</button>
+          </div>
+        </div>
+        <div style={{ fontSize:11, color:TERTIARY, marginBottom:10 }}>Pulled automatically when you upload a RAG. Edit any field by hand; it feeds every generated image.</div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+          <div>
+            <div style={{ fontSize:11, color:TERTIARY, marginBottom:3 }}>Brand colours</div>
+            <textarea rows={2} value={brand.brand_colors} placeholder="graphite #1a1a1a background, vivid green #77A734 accent, white text" onChange={e=>onBrandChange('brand_colors', e.target.value)} style={{ ...fieldStyle, resize:'vertical' }} />
+          </div>
+          <div>
+            <div style={{ fontSize:11, color:TERTIARY, marginBottom:3 }}>Typography style</div>
+            <input value={brand.type_style} placeholder="bold condensed all-caps headlines, clean sans body" onChange={e=>onBrandChange('type_style', e.target.value)} style={fieldStyle} />
+          </div>
+          <div>
+            <div style={{ fontSize:11, color:TERTIARY, marginBottom:3 }}>Logo description</div>
+            <textarea rows={2} value={brand.logo_description} placeholder="green circular emblem with RGS in white letters" onChange={e=>onBrandChange('logo_description', e.target.value)} style={{ ...fieldStyle, resize:'vertical' }} />
+          </div>
+          <div>
+            <div style={{ fontSize:11, color:TERTIARY, marginBottom:3 }}>Visual style &amp; what to avoid</div>
+            <textarea rows={2} value={brand.visual_style} placeholder="dark canvas, fleet/job-site hero, green CTA. Avoid white/pastel backgrounds." onChange={e=>onBrandChange('visual_style', e.target.value)} style={{ ...fieldStyle, resize:'vertical' }} />
+          </div>
+        </div>
+      </div>
+
+      {/* Generated ads */}
+      {creatives.length > 0 && <div style={{ fontSize:13, color:MUTED, margin:'4px 0 10px' }}>{creatives.length} {creatives.length===1?'ad':'ads'} · {approvedCount} approved</div>}
+      {creatives.length === 0 && (
+        <div style={{ ...cardStyle, color:MUTED, fontSize:13 }}>{hasRag ? 'No ads yet — choose how many and click “Generate ads from RAG”.' : 'Upload a Facebook RAG document to start generating ads.'}</div>
+      )}
+
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(340px, 1fr))', gap:16 }}>
+        {creatives.map(c => {
+          const isBusy = busyId===c.id;
+          const logoEnabled = !!c.pre_logo_image_url;
+          const isEditing = editId===c.id;
+          const approved = c.status==='approved';
+          const pos = c.logo_position || (ov && ov.logo_position) || 'bottom-right';
+          const size = c.logo_size || (ov && ov.logo_size) || 'small';
+          const panel = c.logo_panel || (ov && ov.logo_panel) || 'white';
+          return (
+            <div key={c.id} style={{ background:CARD, border:`1px solid ${BORDER}`, borderRadius:10, overflow:'hidden', display:'flex', flexDirection:'column' }}>
+              <div style={{ position:'relative' }}>
+                {c.image_url
+                  ? <img src={c.image_url} alt="" style={{ width:'100%', height:'auto', maxHeight:340, objectFit:'contain', background:'#f5f5f3', display:'block' }} onError={e=>{e.target.style.display='none';}} />
+                  : <div style={{ height:120, background:'#f5f5f3', display:'flex', alignItems:'center', justifyContent:'center' }}><span style={{ fontSize:11, color:'#bbb' }}>No image generated</span></div>}
+                {isBusy && (busyKind==='regenerate-image') && (
+                  <div style={{ position:'absolute', inset:0, background:'rgba(255,255,255,0.80)', display:'flex', alignItems:'center', justifyContent:'center' }}>
+                    <span style={{ fontSize:12, color:GREEN_HI }}>Designing image…</span>
+                  </div>
+                )}
+              </div>
+
+              <div style={{ padding:'12px 14px', flex:1, display:'flex', flexDirection:'column' }}>
+                <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, marginBottom:8 }}>
+                  <span style={{ fontSize:11, padding:'2px 8px', borderRadius:6, background:GREY_BG, color:GREY, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{c.hook_label || 'Ad'}</span>
+                  <span style={{ fontSize:11, padding:'3px 8px', borderRadius:6, flex:'none', background: approved?GREEN_BG:GREY_BG, color: approved?GREEN_HI:GREY }}>{approved?'Approved':'Draft'}</span>
+                </div>
+
+                {isEditing ? (
+                  <div style={{ display:'flex', flexDirection:'column', gap:6, flex:1 }}>
+                    <input value={editDraft.headline} onChange={e=>setEditDraft(d=>({...d, headline:e.target.value}))} placeholder="Headline" style={{ ...fieldStyle, fontWeight:600 }} />
+                    <textarea value={editDraft.primary_text} onChange={e=>setEditDraft(d=>({...d, primary_text:e.target.value}))} placeholder="Primary text" rows={5} style={{ ...fieldStyle, resize:'vertical', flex:1 }} />
+                    <div style={{ display:'flex', gap:6 }}>
+                      <button onClick={()=>saveEdit(c.id)} disabled={isBusy} style={btn(GREEN_HI,'#fff',{ flex:1 })}>{isBusy&&busyKind==='save'?'Saving…':'✓ Save'}</button>
+                      <button onClick={()=>setEditId(null)} style={btn(GREY_BG,GREY,{ border:`1px solid ${BORDER}` })}>Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ fontSize:14, fontWeight:600, color:TEXT, marginBottom:4 }}>{c.headline || '—'}</div>
+                    <div style={{ fontSize:12, color:MUTED, lineHeight:1.5, whiteSpace:'pre-wrap', flex:1 }}>{c.primary_text || ''}</div>
+
+                    {/* Logo controls */}
+                    <div style={{ marginTop:10 }}>
+                      <div style={{ fontSize:10, color:TERTIARY, marginBottom:4, fontWeight:500 }}>LOGO ON THIS IMAGE</div>
+                      {logoEnabled ? (
+                        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:6 }}>
+                          <div>
+                            <div style={{ fontSize:10, color:'#999', marginBottom:3 }}>Position</div>
+                            <select value={pos} disabled={isBusy} onChange={e=>creativeAction(c.id,'recomposite-logo','recomposite-logo',{ logo_position:e.target.value })} style={{ ...ctrl, cursor:isBusy?'not-allowed':'pointer' }}>
+                              {LOGO_POSITIONS.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <div style={{ fontSize:10, color:'#999', marginBottom:3 }}>Size</div>
+                            <select value={size} disabled={isBusy} onChange={e=>creativeAction(c.id,'recomposite-logo','recomposite-logo',{ logo_size:e.target.value })} style={{ ...ctrl, cursor:isBusy?'not-allowed':'pointer' }}>
+                              {LOGO_SIZES.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <div style={{ fontSize:10, color:'#999', marginBottom:3 }}>Background</div>
+                            <select value={panel} disabled={isBusy} onChange={e=>creativeAction(c.id,'recomposite-logo','recomposite-logo',{ logo_panel:e.target.value })} style={{ ...ctrl, cursor:isBusy?'not-allowed':'pointer' }}>
+                              {LOGO_PANELS.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+                            </select>
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ fontSize:11, color:TERTIARY, fontStyle:'italic' }}>Click <span style={{ fontWeight:500, fontStyle:'normal' }}>New image</span> to enable these controls.</div>
+                      )}
+                    </div>
+
+                    {/* Actions */}
+                    <div style={{ display:'flex', gap:6, marginTop:10, borderTop:'1px solid #f0f0ec', paddingTop:10 }}>
+                      <button onClick={()=>startEdit(c)} disabled={isBusy} style={{ flex:1, fontSize:11, padding:'5px 0', background:'#f5f5f3', border:'1px solid #ddd', borderRadius:6, cursor:isBusy?'not-allowed':'pointer', color:'#333' }}>✏️ Edit text</button>
+                      <button onClick={()=>creativeAction(c.id,'regenerate-text','regenerate-text')} disabled={isBusy} style={{ flex:1, fontSize:11, padding:'5px 0', background:'#f5f5f3', border:'1px solid #ddd', borderRadius:6, cursor:isBusy?'not-allowed':'pointer', color:'#333' }}>{isBusy&&busyKind==='regenerate-text'?'Writing…':'🔄 Rewrite'}</button>
+                      <button onClick={()=>creativeAction(c.id,'regenerate-image','regenerate-image')} disabled={isBusy} style={{ flex:1, fontSize:11, padding:'5px 0', background:'#f5f5f3', border:'1px solid #ddd', borderRadius:6, cursor:isBusy?'not-allowed':'pointer', color:'#333' }}>{isBusy&&busyKind==='regenerate-image'?'Imaging…':'🖼️ New image'}</button>
+                    </div>
+                    <button onClick={()=>creativeAction(c.id,'approve','approve',{ approved: !approved })} disabled={isBusy} style={btn(approved?GREY_BG:GREEN_HI, approved?GREY:'#fff', { marginTop:6, width:'100%', border: approved?`1px solid ${BORDER}`:'none' })}>
+                      {approved ? '✓ Approved — click to unapprove' : 'Approve'}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
