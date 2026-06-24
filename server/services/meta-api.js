@@ -243,20 +243,30 @@ export async function checkCreatePermission(adAccountId = cfg().adAccountId) {
 // (already proven by checkCreatePermission) and attach the image + lead form
 // programmatically, so none of that workaround applies.
 
-// List the Facebook Pages the system user can see, for the Page picker. Merges
-// owned + client pages and de-dupes. Throws on hard error (route catches).
+// List the Facebook Pages Studio can see, for the Page picker. Tries the pages
+// this token can manage directly (/me/accounts — works WITHOUT a business id, so
+// it's the reliable path when META_BUSINESS_ID isn't set), then, if a business
+// id is configured, the business's owned + client pages too. Merges + de-dupes.
+// Never hard-fails on a missing business id; returns whatever it can find.
 export async function listPages() {
   const c = cfg();
-  if (!c.businessId) throw new Error('META_BUSINESS_ID is not set');
   const out = [];
   const seen = new Set();
-  for (const edge of ['owned_pages', 'client_pages']) {
-    try {
-      const json = await metaRequest(`${c.businessId}/${edge}`, { params: { fields: 'id,name', limit: 200 } });
-      for (const p of (json.data || [])) {
-        if (p && p.id && !seen.has(p.id)) { seen.add(p.id); out.push({ id: String(p.id), name: p.name || '(unnamed page)' }); }
-      }
-    } catch (_) { /* one edge failing is fine — try the other */ }
+  const add = (arr) => {
+    for (const p of (arr || [])) {
+      if (p && p.id && !seen.has(p.id)) { seen.add(p.id); out.push({ id: String(p.id), name: p.name || '(unnamed page)' }); }
+    }
+  };
+
+  // 1) Pages this token can manage directly — no business id required.
+  try { const j = await metaRequest('me/accounts', { params: { fields: 'id,name', limit: 200 } }); add(j.data); } catch (_) {}
+
+  // 2) If a business id is set, also pull its owned + client pages (covers pages
+  //    assigned to the business but not directly to the token).
+  if (c.businessId) {
+    for (const edge of ['owned_pages', 'client_pages']) {
+      try { const j = await metaRequest(`${c.businessId}/${edge}`, { params: { fields: 'id,name', limit: 200 } }); add(j.data); } catch (_) {}
+    }
   }
   return out;
 }

@@ -747,12 +747,13 @@ function AdApprovals({ customerId, customerName, view='approvals' }) {
                     {pagePick.pages.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
                   </select>
                 )}
-                <div style={{ fontSize:10, color:TERTIARY, marginTop:3 }}>
-                  {ov && ov.page_id ? <span style={{ color:GREEN_HI }}>Set: {ov.page_name || ov.page_id}</span> : 'Required.'}
-                  {' · '}
-                  <span onClick={()=>{ setManualPage(m=>!m); setMPage((ov&&ov.page_id)||''); }} style={{ color:BLUE, cursor:'pointer' }}>{manualPage?'pick from list':'type an ID instead'}</span>
+                <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:5 }}>
+                  <span style={{ fontSize:10, color:(ov&&ov.page_id)?GREEN_HI:RED }}>{ov && ov.page_id ? `Set: ${ov.page_name || ov.page_id}` : 'Required'}</span>
+                  <span style={{ flex:1 }} />
+                  <button onClick={()=>{ setManualPage(m=>!m); setMPage((ov&&ov.page_id)||''); }} style={{ fontSize:10, padding:'3px 9px', border:`1px solid ${BORDER}`, borderRadius:5, background:'#fff', color:BLUE, cursor:'pointer' }}>{manualPage?'↩ Pick from list':'⌨ Enter ID manually'}</button>
                 </div>
-                {pagePick.error && !manualPage && <div style={{ fontSize:10, color:AMBER, marginTop:3 }}>{pagePick.error} — type the ID instead.</div>}
+                {pagePick.error && !manualPage && <div style={{ fontSize:10, color:AMBER, marginTop:3 }}>{pagePick.error} — enter the ID manually.</div>}
+                {!manualPage && pagePick.ok && pagePick.pages.length===0 && <div style={{ fontSize:10, color:TERTIARY, marginTop:3 }}>No Pages visible to Studio yet — use “Enter ID manually”.</div>}
               </div>
 
               {/* Lead form */}
@@ -770,12 +771,12 @@ function AdApprovals({ customerId, customerName, view='approvals' }) {
                     {formPick.forms.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
                   </select>
                 )}
-                <div style={{ fontSize:10, color:TERTIARY, marginTop:3 }}>
-                  {ov && ov.lead_form_id ? <span style={{ color:GREEN_HI }}>Set: {ov.lead_form_name || ov.lead_form_id}</span> : 'Required.'}
-                  {' · '}
-                  <span onClick={()=>{ setManualForm(m=>!m); setMForm((ov&&ov.lead_form_id)||''); }} style={{ color:BLUE, cursor:'pointer' }}>{manualForm?'pick from list':'type an ID instead'}</span>
+                <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:5 }}>
+                  <span style={{ fontSize:10, color:(ov&&ov.lead_form_id)?GREEN_HI:RED }}>{ov && ov.lead_form_id ? `Set: ${ov.lead_form_name || ov.lead_form_id}` : 'Required'}</span>
+                  <span style={{ flex:1 }} />
+                  <button onClick={()=>{ setManualForm(m=>!m); setMForm((ov&&ov.lead_form_id)||''); }} style={{ fontSize:10, padding:'3px 9px', border:`1px solid ${BORDER}`, borderRadius:5, background:'#fff', color:BLUE, cursor:'pointer' }}>{manualForm?'↩ Pick from list':'⌨ Enter ID manually'}</button>
                 </div>
-                {formPick.ok && !manualForm && (ov&&ov.page_id) && formPick.forms.length===0 && <div style={{ fontSize:10, color:AMBER, marginTop:3 }}>No forms came back for this Page — type the form ID instead.</div>}
+                {formPick.ok && !manualForm && (ov&&ov.page_id) && formPick.forms.length===0 && <div style={{ fontSize:10, color:AMBER, marginTop:3 }}>No forms came back for this Page — enter the form ID manually.</div>}
               </div>
 
               {/* Daily budget */}
