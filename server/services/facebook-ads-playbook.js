@@ -28,10 +28,21 @@ THE AD COPY FORMULA (use this structure for the primary text):
 5. Light scarcity or a reason to act now (only if it's honest — no fake urgency).
 6. A clear call to action.
 
-CREATIVE DIVERSITY:
-Each variation must take a genuinely DIFFERENT angle/hook — a different pain, a
-different moment, a different framing. Do not produce three rewrites of the same
-sentence. Variety is what lowers cost per lead.
+CREATIVE DIVERSITY (THE ENTITY-ID TRAP):
+In 2026 Meta groups visually-similar ads together and treats them as ONE ad — so
+near-identical variations waste budget. Each variation must be a genuinely
+DIFFERENT concept: a different pain, a different moment, a different framing AND a
+different visual idea — not three rewrites of one sentence over the same picture.
+Variety is what lowers cost per lead. Spread the set across distinct angles
+(problem, benefit, social proof, emergency, backup/alternative) and distinct
+visual scenes.
+
+HOOK FRAMEWORKS (vary the opening line across the set — use several of these):
+- Question: "Struggling to get [outcome]?"
+- Problem/agitation: "If you're dealing with [pain], here's why it gets worse."
+- Contrarian: "Stop [common practice]. Here's what actually works."
+- Stat: "Most [audience] don't know [surprising fact]."
+- Social proof: "How [type of customer] fixed [problem]."
 
 VOICE & QUALITY:
 - Match the client's brand voice from their RAG below. If the RAG lists banned

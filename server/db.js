@@ -1208,6 +1208,7 @@ db.exec(`
     updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (email_client_id) REFERENCES email_clients(id)
   );
+
   CREATE UNIQUE INDEX IF NOT EXISTS idx_facebook_ads_customer
     ON facebook_ads(email_client_id);
 `);
@@ -1263,6 +1264,24 @@ db.exec(`
 try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN logo_position TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN logo_panel TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN logo_size TEXT"); } catch (_) {}
+
+// REVIVAL (decision #106 reborn): Facebook ad generation is back in Studio,
+// upgraded to gpt-image-2 + brand colours pulled from the Facebook RAG. These
+// additive columns extend the dormant #106 schema. Facebook stays a fully
+// standalone service — its brand block is its own, never shared with the
+// LinkedIn `clients` table.
+//   facebook_ads.brand_colors/logo_description/type_style/visual_style
+//        — brand block auto-extracted from the Facebook RAG (services/brand-extract.js)
+//   facebook_ads.ad_count        — preferred number of ads per run (the dropdown)
+//   facebook_ad_creatives.image_brief
+//        — the visual brief that produced the image, stored so "Regenerate
+//          image" keeps the same visual intent
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN brand_colors TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN logo_description TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN type_style TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN visual_style TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN ad_count INTEGER"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN image_brief TEXT"); } catch (_) {}
 
 // 14m. Backfill customer_services from the legacy columns. Idempotent — uses
 // INSERT OR IGNORE on the unique (email_client_id, service_key) index, so

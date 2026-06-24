@@ -15,13 +15,49 @@
 // Mounted at /api/facebook-ads, behind requireAuth.
 // ─────────────────────────────────────────────────────────────────────────────
 import express from 'express';
+import multer from 'multer';
 import { v4 as uuid } from 'uuid';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { metaConfigured, testConnection, getAdsOverview, checkCreatePermission, META } from '../services/meta-api.js';
+import { extractTextFromBuffer } from '../utils/extractText.js';
+import { prepareLogoForStorage } from '../services/logo-prep.js';
+import { extractBrandFromRag } from '../services/brand-extract.js';
+import { recompositeLogoFromUrl } from '../services/gemini.js';
+import { uploadImageToR2 } from '../services/r2.js';
+import { normalizeCta } from '../services/facebook-ads-playbook.js';
+import { generateAdCreatives, regenerateAdCopy, regenerateAdImage } from '../services/facebook-ads-gen.js';
 
 const router = express.Router();
 router.use(requireAuth);
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+
+// Build the customer object the generation engine expects, from the customer's
+// Facebook row (its own RAG + brand block + logo) joined to their name.
+function fbCustomer(emailClientId) {
+  const row = db.prepare(`
+    SELECT fa.*, ec.name AS customer_name
+    FROM facebook_ads fa JOIN email_clients ec ON ec.id = fa.email_client_id
+    WHERE fa.email_client_id = ?
+  `).get(emailClientId);
+  if (!row) return null;
+  return {
+    id: emailClientId,
+    name: row.customer_name,
+    brand: row.customer_name,
+    rag_content: row.rag_content,
+    brand_colors: row.brand_colors,
+    type_style: row.type_style,
+    visual_style: row.visual_style,
+    logo_description: row.logo_description,
+    logo_url: row.logo_url,
+    logo_position: row.logo_position,
+    logo_panel: row.logo_panel,
+    logo_size: row.logo_size,
+    ad_count: row.ad_count,
+  };
+}
 
 // ── CONNECTION STATUS ────────────────────────────────────────────────────────
 router.get('/connection-status', async (req, res) => {
@@ -142,6 +178,239 @@ router.post('/:emailClientId/account', (req, res) => {
     db.prepare(`INSERT OR IGNORE INTO customer_services (email_client_id, service_key, linked_external_id, enabled_by) VALUES (?, 'facebook_ads', NULL, 'admin')`).run(id);
   }
   res.json({ ok: true, ad_account_id: acct });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AD APPROVALS — generation, RAG/brand setup, per-creative controls (decision
+// #106 revived + upgraded to gpt-image-2). All admin, behind requireAuth.
+// Nothing here writes to Facebook — pushing approved drafts is the next stage.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Overview: the setup (RAG/brand/logo/ad-count) + the current generated set.
+router.get('/:emailClientId/overview', (req, res) => {
+  const row = db.prepare(`
+    SELECT fa.*, ec.name AS customer_name
+    FROM facebook_ads fa JOIN email_clients ec ON ec.id = fa.email_client_id
+    WHERE fa.email_client_id = ?
+  `).get(req.params.emailClientId);
+  if (!row) return res.status(404).json({ error: 'Not a Facebook Ads customer' });
+  const creatives = db.prepare(
+    `SELECT * FROM facebook_ad_creatives WHERE email_client_id = ? ORDER BY created_at DESC, rowid DESC`
+  ).all(req.params.emailClientId);
+  res.json({
+    customer_name: row.customer_name,
+    ad_account_id: row.ad_account_id,
+    rag_filename: row.rag_filename,
+    has_rag: !!row.rag_content,
+    brand_colors: row.brand_colors,
+    logo_description: row.logo_description,
+    type_style: row.type_style,
+    visual_style: row.visual_style,
+    logo_url: row.logo_url,
+    logo_position: row.logo_position,
+    logo_panel: row.logo_panel,
+    logo_size: row.logo_size,
+    ad_count: row.ad_count || 6,
+    creatives,
+  });
+});
+
+// Save the setup. Optional RAG file upload auto-extracts the brand block. A plain
+// save (no file) leaves brand fields as sent / unchanged.
+router.put('/:emailClientId/overview', upload.single('rag'), async (req, res) => {
+  const id = req.params.emailClientId;
+  const ec = db.prepare('SELECT id FROM email_clients WHERE id = ?').get(id);
+  if (!ec) return res.status(404).json({ error: 'Customer not found' });
+
+  let row = db.prepare('SELECT * FROM facebook_ads WHERE email_client_id = ?').get(id);
+  if (!row) {
+    db.prepare(`INSERT INTO facebook_ads (id, email_client_id, status) VALUES (?, ?, 'not_connected')`).run(uuid(), id);
+    db.prepare(`INSERT OR IGNORE INTO customer_services (email_client_id, service_key, linked_external_id, enabled_by) VALUES (?, 'facebook_ads', NULL, 'admin')`).run(id);
+    row = db.prepare('SELECT * FROM facebook_ads WHERE email_client_id = ?').get(id);
+  }
+
+  const b = req.body || {};
+  const pick = (k) => (b[k] !== undefined ? b[k] : row[k]);
+  let brand_colors     = pick('brand_colors');
+  let logo_description = pick('logo_description');
+  let type_style       = pick('type_style');
+  let visual_style     = pick('visual_style');
+  const ad_count     = b.ad_count !== undefined ? (parseInt(b.ad_count, 10) || row.ad_count || 6) : (row.ad_count || 6);
+  const logo_position = b.logo_position !== undefined ? b.logo_position : row.logo_position;
+  const logo_panel    = b.logo_panel    !== undefined ? b.logo_panel    : row.logo_panel;
+  const logo_size     = b.logo_size     !== undefined ? b.logo_size     : row.logo_size;
+
+  let rag_filename = row.rag_filename;
+  let rag_content  = row.rag_content;
+  if (req.file) {
+    rag_filename = req.file.originalname;
+    try { rag_content = await extractTextFromBuffer(req.file.buffer, req.file.originalname); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+    // Auto-pull the brand block from the new Facebook RAG (null fields keep prior).
+    try {
+      const ex = await extractBrandFromRag(rag_content);
+      brand_colors     = ex.brand_colors     ?? brand_colors;
+      logo_description = ex.logo_description  ?? logo_description;
+      type_style       = ex.type_style        ?? type_style;
+      visual_style     = ex.visual_style      ?? visual_style;
+    } catch (e) { console.warn('[fb-ads] brand auto-extract failed (non-fatal):', e.message); }
+  }
+
+  db.prepare(`
+    UPDATE facebook_ads SET
+      rag_filename=?, rag_content=?,
+      brand_colors=?, logo_description=?, type_style=?, visual_style=?,
+      ad_count=?, logo_position=?, logo_panel=?, logo_size=?,
+      updated_at=datetime('now')
+    WHERE email_client_id=?
+  `).run(rag_filename, rag_content, brand_colors, logo_description, type_style, visual_style,
+         ad_count, logo_position, logo_panel, logo_size, id);
+  res.json({ ok: true });
+});
+
+// Re-pull the brand block from the stored Facebook RAG (the "Pull brand" button).
+router.post('/:emailClientId/extract-brand', async (req, res) => {
+  const row = db.prepare('SELECT * FROM facebook_ads WHERE email_client_id = ?').get(req.params.emailClientId);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  if (!row.rag_content) return res.status(400).json({ error: 'No Facebook RAG document uploaded yet.' });
+  try {
+    const ex = await extractBrandFromRag(row.rag_content);
+    const found = Object.values(ex).filter(Boolean).length;
+    db.prepare(`
+      UPDATE facebook_ads SET
+        brand_colors=COALESCE(?,brand_colors), logo_description=COALESCE(?,logo_description),
+        type_style=COALESCE(?,type_style), visual_style=COALESCE(?,visual_style),
+        updated_at=datetime('now')
+      WHERE email_client_id=?
+    `).run(ex.brand_colors, ex.logo_description, ex.type_style, ex.visual_style, req.params.emailClientId);
+    const updated = db.prepare('SELECT * FROM facebook_ads WHERE email_client_id = ?').get(req.params.emailClientId);
+    res.json({ ok: true, found, overview: updated });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Upload the customer's Facebook logo (its own — not the LinkedIn one).
+router.post('/:emailClientId/logo', upload.single('logo'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No logo file uploaded.' });
+  const id = req.params.emailClientId;
+  const row = db.prepare('SELECT id FROM facebook_ads WHERE email_client_id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Not a Facebook Ads customer' });
+  try {
+    const prepped = await prepareLogoForStorage(req.file.buffer, req.file.mimetype);
+    const b64  = prepped.buffer.toString('base64');
+    const mime = prepped.mimetype || req.file.mimetype || 'image/png';
+    const logo_url = await uploadImageToR2(b64, mime, id, 'fblogo');
+    db.prepare(`UPDATE facebook_ads SET logo_url=?, updated_at=datetime('now') WHERE email_client_id=?`).run(logo_url, id);
+    res.json({ ok: true, logo_url });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Generate `count` ad concepts from the Facebook RAG and store them as drafts.
+router.post('/:emailClientId/generate', async (req, res) => {
+  const cust = fbCustomer(req.params.emailClientId);
+  if (!cust) return res.status(404).json({ error: 'Not a Facebook Ads customer' });
+  if (!cust.rag_content) return res.status(400).json({ error: 'Upload a Facebook RAG document first.' });
+  const count = Math.max(1, Math.min(12, parseInt(req.body?.count, 10) || cust.ad_count || 6));
+  try {
+    const creatives = await generateAdCreatives(cust, cust.rag_content, { count });
+    const batch_id = uuid();
+    const insert = db.prepare(`
+      INSERT INTO facebook_ad_creatives
+        (id, email_client_id, batch_id, hook_label, primary_text, headline, cta, image_brief, image_url, pre_logo_image_url, status)
+      VALUES (?,?,?,?,?,?,?,?,?,?, 'draft')
+    `);
+    const rows = [];
+    const tx = db.transaction(() => {
+      for (const c of creatives) {
+        const cid = uuid();
+        insert.run(cid, req.params.emailClientId, batch_id, c.hook_label, c.primary_text, c.headline, c.cta, c.image_brief, c.image_url, c.pre_logo_image_url);
+        rows.push(db.prepare('SELECT * FROM facebook_ad_creatives WHERE id = ?').get(cid));
+      }
+    });
+    tx();
+    res.json({ ok: true, batch_id, creatives: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Rewrite one creative's copy (keeps the image).
+router.post('/:emailClientId/creatives/:id/regenerate-text', async (req, res) => {
+  const cust = fbCustomer(req.params.emailClientId);
+  if (!cust) return res.status(404).json({ error: 'Not found' });
+  if (!cust.rag_content) return res.status(400).json({ error: 'No Facebook RAG document.' });
+  const cr = db.prepare('SELECT * FROM facebook_ad_creatives WHERE id = ? AND email_client_id = ?').get(req.params.id, req.params.emailClientId);
+  if (!cr) return res.status(404).json({ error: 'Creative not found' });
+  try {
+    const nv = await regenerateAdCopy(cust.rag_content, cr);
+    db.prepare(`UPDATE facebook_ad_creatives SET hook_label=?, primary_text=?, headline=?, cta=?, image_brief=?, updated_at=datetime('now') WHERE id=?`)
+      .run(nv.hook_label, nv.primary_text, nv.headline, nv.cta, nv.image_brief, req.params.id);
+    res.json({ ok: true, creative: db.prepare('SELECT * FROM facebook_ad_creatives WHERE id=?').get(req.params.id) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Make a fresh image for one creative (keeps the copy). Resets per-creative logo
+// overrides so the new image and its logo-less copy always match (same fix as
+// the LinkedIn colour-revert bug — never keep a previous image's pre-logo).
+router.post('/:emailClientId/creatives/:id/regenerate-image', async (req, res) => {
+  const cust = fbCustomer(req.params.emailClientId);
+  if (!cust) return res.status(404).json({ error: 'Not found' });
+  const cr = db.prepare('SELECT * FROM facebook_ad_creatives WHERE id = ? AND email_client_id = ?').get(req.params.id, req.params.emailClientId);
+  if (!cr) return res.status(404).json({ error: 'Creative not found' });
+  try {
+    const img = await regenerateAdImage(cust, cr);
+    db.prepare(`UPDATE facebook_ad_creatives SET image_url=?, pre_logo_image_url=?, logo_position=NULL, logo_panel=NULL, logo_size=NULL, updated_at=datetime('now') WHERE id=?`)
+      .run(img.image_url, img.pre_logo_image_url, req.params.id);
+    res.json({ ok: true, creative: db.prepare('SELECT * FROM facebook_ad_creatives WHERE id=?').get(req.params.id) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Re-place the logo on one creative (position/size/background) — recomposites
+// onto the stored logo-less copy, never regenerates.
+router.post('/:emailClientId/creatives/:id/recomposite-logo', async (req, res) => {
+  const cust = fbCustomer(req.params.emailClientId);
+  if (!cust) return res.status(404).json({ error: 'Not found' });
+  const cr = db.prepare('SELECT * FROM facebook_ad_creatives WHERE id = ? AND email_client_id = ?').get(req.params.id, req.params.emailClientId);
+  if (!cr) return res.status(404).json({ error: 'Creative not found' });
+  if (!cr.pre_logo_image_url) return res.status(400).json({ error: 'pre_logo_unavailable', message: 'Click New image first to enable the logo controls on this ad.' });
+  const b = req.body || {};
+  const overrides = {
+    logo_position: b.logo_position ?? cr.logo_position ?? cust.logo_position,
+    logo_size:     b.logo_size     ?? cr.logo_size     ?? cust.logo_size,
+    logo_panel:    b.logo_panel    ?? cr.logo_panel    ?? cust.logo_panel,
+  };
+  try {
+    const clientObj = { ...cust, ...overrides };
+    const r = await recompositeLogoFromUrl(cr.pre_logo_image_url, clientObj, overrides);
+    const image_url = await uploadImageToR2(r.data, r.mimeType, req.params.emailClientId, 'fbad-recomp');
+    db.prepare(`UPDATE facebook_ad_creatives SET image_url=?, logo_position=?, logo_panel=?, logo_size=?, updated_at=datetime('now') WHERE id=?`)
+      .run(image_url, overrides.logo_position, overrides.logo_panel, overrides.logo_size, req.params.id);
+    res.json({ ok: true, creative: db.prepare('SELECT * FROM facebook_ad_creatives WHERE id=?').get(req.params.id) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Save hand-edited copy on one creative.
+router.put('/:emailClientId/creatives/:id/text', (req, res) => {
+  const cr = db.prepare('SELECT * FROM facebook_ad_creatives WHERE id = ? AND email_client_id = ?').get(req.params.id, req.params.emailClientId);
+  if (!cr) return res.status(404).json({ error: 'Creative not found' });
+  const b = req.body || {};
+  const headline     = b.headline     !== undefined ? b.headline     : cr.headline;
+  const primary_text = b.primary_text !== undefined ? b.primary_text : cr.primary_text;
+  const cta          = b.cta          !== undefined ? normalizeCta(b.cta) : cr.cta;
+  db.prepare(`UPDATE facebook_ad_creatives SET headline=?, primary_text=?, cta=?, updated_at=datetime('now') WHERE id=?`).run(headline, primary_text, cta, req.params.id);
+  res.json({ ok: true });
+});
+
+// Approve / un-approve one creative.
+router.post('/:emailClientId/creatives/:id/approve', (req, res) => {
+  const cr = db.prepare('SELECT id FROM facebook_ad_creatives WHERE id = ? AND email_client_id = ?').get(req.params.id, req.params.emailClientId);
+  if (!cr) return res.status(404).json({ error: 'Creative not found' });
+  const approved = req.body?.approved !== false;
+  db.prepare(`UPDATE facebook_ad_creatives SET status=?, updated_at=datetime('now') WHERE id=?`).run(approved ? 'approved' : 'draft', req.params.id);
+  res.json({ ok: true, status: approved ? 'approved' : 'draft' });
+});
+
+// Delete one creative.
+router.delete('/:emailClientId/creatives/:id', (req, res) => {
+  db.prepare('DELETE FROM facebook_ad_creatives WHERE id = ? AND email_client_id = ?').run(req.params.id, req.params.emailClientId);
+  res.json({ ok: true });
 });
 
 export default router;

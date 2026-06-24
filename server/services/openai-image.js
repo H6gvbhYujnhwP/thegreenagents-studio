@@ -77,6 +77,9 @@ function buildPrompt(imagePrompt, client = {}, post = {}) {
 
   const headline = shortHeadline(topic || angle || brandName, 60);
   const layout   = pickLayout(`${topic}|${angle}|${brandName}`);
+  // CTA button label. Defaults to the LinkedIn wording; Facebook ads pass their
+  // own Meta call-to-action label (e.g. "Get quote", "Book now").
+  const cta = (post.cta || '').trim() || 'Find out more';
 
   // The corner to keep clear — matches where the real logo will be composited.
   const logoPosition = client.logo_position || 'bottom-right';
@@ -107,7 +110,7 @@ function buildPrompt(imagePrompt, client = {}, post = {}) {
     ``,
     `HEADLINE TEXT — render these exact words, do not change, add or remove any word, and spell every word exactly as written: "${headline}". Large, bold, mobile-legible, with strong visual hierarchy.`,
     angle ? `TONE (guidance only, do not render as text): ${angle}` : ``,
-    `CALL TO ACTION: one clear rounded-rectangle button in a brand colour containing exactly the text "Find out more". No other words on the button.`,
+    `CALL TO ACTION: one clear rounded-rectangle button in a brand colour containing exactly the text "${cta}". No other words on the button.`,
     colourLine,
     styleLine,
     `TYPOGRAPHY: ${typeStyle}.`,

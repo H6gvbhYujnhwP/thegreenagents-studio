@@ -1,24 +1,25 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Facebook Ads — creative generation (decision #106, stage 2).
+// Facebook Ads — creative generation (decision #106, REVIVED + upgraded).
 //
 // Studio generates ad creatives for a customer: ad COPY via Claude (in the
-// customer's RAG voice + the agency playbook) and an IMAGE via the same Gemini
-// pipeline used for LinkedIn posts (with the customer's logo composited on),
-// hosted in R2. NOTHING here touches Facebook — that's stage 3.
+// customer's RAG voice + the agency playbook) and a designed-ad IMAGE via
+// gpt-image-2 (the same engine LinkedIn uses), on the customer's brand colours,
+// with the customer's logo composited on, hosted in R2. NOTHING here touches
+// Facebook — pushing approved ads to Facebook is the next stage.
 //
-// Reuses the proven LinkedIn building blocks:
-//   - generateImage()    from services/gemini.js  (image + logo composite)
-//   - uploadImageToR2()   from services/r2.js
+// Reuses the proven building blocks:
+//   - generateGptImage()  from services/openai-image.js  (designed ad + logo)
+//   - uploadImageToR2()    from services/r2.js
 // Copy uses the Anthropic SDK directly (same pattern as the other services).
 //
-// Pure helpers (buildCopyPrompt / parseVariations / normalizeCreative) are
-// exported so they can be unit-tested without any network calls.
+// Standalone from LinkedIn: the brand block (colours, type, visual style) comes
+// from the customer's FACEBOOK row (facebook_ads.*), passed in on `customer`.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import Anthropic from '@anthropic-ai/sdk';
-import { generateImage } from './gemini.js';
+import { generateGptImage } from './openai-image.js';
 import { uploadImageToR2 } from './r2.js';
-import { buildCopyPrompt, parseVariations, normalizeCreative } from './facebook-ads-playbook.js';
+import { buildCopyPrompt, parseVariations, normalizeCreative, ALLOWED_CTAS } from './facebook-ads-playbook.js';
 
 const COPY_MODEL = process.env.FB_ADS_COPY_MODEL || 'claude-sonnet-4-5';
 
@@ -50,15 +51,20 @@ async function callClaude(prompt, jsonOnly = false) {
     .trim();
 }
 
-// Build the client-shaped object the Gemini pipeline expects. Reads the
-// customer's saved Brand Panel defaults (position/panel/size) — falling back to
-// bottom-right / white / small (the LinkedIn defaults). If the customer has no
-// logo_url, generateImage simply skips compositing.
+// Build the client-shaped object the image pipeline expects. Carries the
+// customer's FACEBOOK brand block (colours/type/visual style — extracted from
+// the Facebook RAG) so gpt-image-2 renders on-brand, plus the logo + saved
+// Brand Panel defaults (position/panel/size). If there's no logo_url, the
+// compositor simply skips compositing.
 function clientObjFor(customer) {
   return {
     id:            customer.id,
     name:          customer.name || 'Brand',
-    brand:         customer.name || 'Brand',
+    brand:         customer.brand || customer.name || 'Brand',
+    brand_colors:     customer.brand_colors     || null,
+    type_style:       customer.type_style       || null,
+    visual_style:     customer.visual_style     || null,
+    logo_description: customer.logo_description  || null,
     logo_url:      customer.logo_url || null,
     logo_position: customer.logo_position || 'bottom-right',
     logo_panel:    customer.logo_panel    || 'white',
@@ -66,13 +72,20 @@ function clientObjFor(customer) {
   };
 }
 
-// Generate one image for a variation and host it in R2. Returns
+// Generate one designed ad for a variation and host it in R2. Returns
 // { image_url, pre_logo_image_url }. Image failure is non-fatal — the creative
 // is still saved with copy and a null image (the UI shows "New image" to retry).
-async function makeImage(customer, v) {
+async function makeImage(customer, v, overrides = {}) {
   const brief = v.image_brief || v.headline || v.primary_text || `${customer.name} advert`;
-  const post = { format: 'image', topic: v.hook_label, angle: v.headline, buyer_segment: '' };
-  const img = await generateImage(brief, clientObjFor(customer), post);
+  // headline → rendered into the designed ad; hook_label → tone/layout guidance;
+  // cta → the friendly label baked onto the button.
+  const post = {
+    topic: v.headline || v.hook_label || '',
+    angle: v.hook_label || '',
+    cta: ALLOWED_CTAS[v.cta] || 'Find out more',
+    buyer_segment: '',
+  };
+  const img = await generateGptImage(brief, clientObjFor({ ...customer, ...overrides }), post);
   const image_url = await uploadImageToR2(img.data, img.mimeType, customer.id, 'fbad');
   let pre_logo_image_url = null;
   if (img.preLogoData) {
@@ -141,9 +154,10 @@ primary_text: ${existing.primary_text || ''}`;
 // { image_url, pre_logo_image_url }.
 export async function regenerateAdImage(customer, creative) {
   return makeImage(customer, {
-    image_brief: creative.image_brief,
-    headline: creative.headline,
+    image_brief:  creative.image_brief,
+    headline:     creative.headline,
     primary_text: creative.primary_text,
-    hook_label: creative.hook_label,
+    hook_label:   creative.hook_label,
+    cta:          creative.cta,
   });
 }
