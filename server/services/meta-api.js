@@ -206,6 +206,10 @@ export async function checkCreatePermission(adAccountId = cfg().adAccountId) {
         objective: 'OUTCOME_LEADS',
         status: 'PAUSED',
         special_ad_categories: '[]',
+        // Meta now requires this true/false flag on campaign create when the
+        // campaign isn't using a campaign-level budget. false = ad sets keep
+        // their own budgets (no 20% sharing). Needed for the real push too.
+        is_adset_budget_sharing_enabled: 'false',
       },
     });
     campaignId = created.id || null;
