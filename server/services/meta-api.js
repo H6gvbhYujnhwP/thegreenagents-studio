@@ -154,6 +154,82 @@ export async function listPixels() {
   return Array.isArray(json.data) ? json.data : [];
 }
 
+// ── Phase-2 pre-flight: can this token actually CREATE ads? ───────────────────
+// Studio only READS Facebook today. Before we build "push approved ads as paused
+// drafts", we must confirm the system-user token carries write permission AND
+// that a create call genuinely succeeds on the target ad account. The only
+// definitive way is to create something and see if Meta accepts it — so this
+// creates a PAUSED campaign shell (no ad sets, no ads, spends nothing) and then
+// deletes it again. Fully self-cleaning. Returns a plain result object and never
+// throws, so the route can always show a clear pass/fail verdict.
+export async function checkCreatePermission(adAccountId = cfg().adAccountId) {
+  const id = String(adAccountId).replace(/^act_/, '');
+  const result = {
+    ad_account_id: `act_${id}`,
+    permissions: null,         // granted permission names, if the token exposes them
+    has_ads_management: null,  // true / false / null (couldn't tell)
+    account_status: null,      // 1 = active
+    create_ok: false,
+    delete_ok: false,
+    campaign_id: null,
+    error: null,
+  };
+
+  // 1) What permissions does the token carry? (read-only, best-effort)
+  try {
+    const perms = await metaRequest('me/permissions', { params: { limit: 200 } });
+    const granted = (perms.data || []).filter(p => p.status === 'granted').map(p => p.permission);
+    result.permissions = granted;
+    result.has_ads_management = granted.includes('ads_management');
+  } catch (e) {
+    // Some system-user tokens don't expose /me/permissions — not fatal, the
+    // create test below is the real proof anyway.
+    result.permissions = `could not read permissions (${e.message})`;
+  }
+
+  // 2) Is the target ad account readable / active? (read-only)
+  try {
+    const acct = await getAdAccount(id);
+    result.account_status = acct.account_status;
+  } catch (e) {
+    result.error = `could not read ad account act_${id}: ${e.message}`;
+    return result; // no point attempting a create on an unreadable account
+  }
+
+  // 3) The definitive test: create a PAUSED campaign, then delete it.
+  let campaignId = null;
+  try {
+    const created = await metaRequest(`act_${id}/campaigns`, {
+      method: 'POST',
+      body: {
+        name: 'TGA Studio — create-permission test (safe to delete)',
+        objective: 'OUTCOME_LEADS',
+        status: 'PAUSED',
+        special_ad_categories: '[]',
+      },
+    });
+    campaignId = created.id || null;
+    result.campaign_id = campaignId;
+    result.create_ok = !!campaignId;
+  } catch (e) {
+    result.error = e.message; // create refused — that IS the answer
+    return result;
+  }
+
+  // 4) Clean up — remove the test campaign so nothing lingers in the account.
+  if (campaignId) {
+    try {
+      await metaRequest(campaignId, { method: 'DELETE' });
+      result.delete_ok = true;
+    } catch (e) {
+      result.delete_ok = false;
+      result.error = `created OK but auto-delete failed — please delete the test campaign manually in Ads Manager (${e.message})`;
+    }
+  }
+
+  return result;
+}
+
 // ── Reading ads + stats (Stage 2: read) ──────────────────────────────────────
 
 // The date windows the admin screen offers, mapped to Meta's date_preset values.

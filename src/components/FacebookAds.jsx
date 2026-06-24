@@ -48,6 +48,10 @@ export default function FacebookAds() {
   const [acctInput, setAcctInput] = useState('');
   const [savingAcct, setSavingAcct] = useState(false);
 
+  // Phase-2 pre-flight: "Test create-ad permission" button result.
+  const [permTest, setPermTest] = useState(null);
+  const [permLoading, setPermLoading] = useState(false);
+
   const selected = customers.find(c => c.id === selId) || null;
 
   async function loadCustomers() { try { const r = await fetch('/api/facebook-ads/customers'); if (r.ok) setCustomers(await r.json()); } catch {} }
@@ -88,6 +92,20 @@ export default function FacebookAds() {
     if (okSaved) { setEditAcct(false); loadAds(selId, window); }
   }
 
+  // Run the create-ad permission test for the selected customer's account.
+  async function runPermTest() {
+    if (!selId) return;
+    setPermLoading(true); setPermTest(null);
+    try {
+      const r = await fetch(`/api/facebook-ads/test-create-permission?customer=${encodeURIComponent(selId)}`);
+      setPermTest(await r.json());
+    } catch {
+      setPermTest({ verdict: 'Could not reach Studio. Try again in a moment.' });
+    } finally {
+      setPermLoading(false);
+    }
+  }
+
   const currency = (data && data.account && data.account.currency) || 'GBP';
   const fmtMoney = (n) => (n===null||n===undefined) ? '—' : (()=>{ try { return new Intl.NumberFormat('en-GB',{style:'currency',currency}).format(n); } catch { return `£${Number(n).toFixed(2)}`; } })();
   const fmtNum = (n) => (n===null||n===undefined) ? '—' : Number(n).toLocaleString('en-GB');
@@ -108,11 +126,16 @@ export default function FacebookAds() {
 
       {/* Customer selector */}
       <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', marginBottom:12 }}>
-        <select value={selId} onChange={e=>{ setSelId(e.target.value); setEditAcct(false); }} style={{ minWidth:240, padding:'8px 9px', border:`1px solid ${BORDER}`, borderRadius:6, fontSize:13, background:'#fff', color:TEXT }}>
+        <select value={selId} onChange={e=>{ setSelId(e.target.value); setEditAcct(false); setPermTest(null); }} style={{ minWidth:240, padding:'8px 9px', border:`1px solid ${BORDER}`, borderRadius:6, fontSize:13, background:'#fff', color:TEXT }}>
           <option value="">{customers.length ? 'Select a customer…' : 'No Facebook Ads customers yet'}</option>
           {customers.map(c => <option key={c.id} value={c.id}>{c.name}{c.has_account ? '' : ' (no account)'}</option>)}
         </select>
         <button onClick={()=>{ setAddOpen(o=>!o); setError(null); }} style={btn(GREEN_BG, GREEN_HI, { border:`1px solid ${GREEN}` })}>+ Add customer</button>
+        {selected && selected.has_account && (
+          <button onClick={runPermTest} disabled={permLoading} style={btn(BLUE_BG, BLUE, { border:`1px solid ${BLUE}`, ...(permLoading?{opacity:0.6}:{}) })}>
+            {permLoading ? 'Testing…' : 'Test create-ad permission'}
+          </button>
+        )}
         <div style={{ flex:1 }} />
         {selected && (connected
           ? <span style={{ fontSize:12, padding:'5px 10px', borderRadius:6, background:GREEN_BG, color:GREEN_HI }}>● Connected</span>
@@ -124,7 +147,24 @@ export default function FacebookAds() {
         </div>
       </div>
 
-      {/* Add-customer panel */}
+      {/* Create-ad permission test result */}
+      {permTest && (() => {
+        const pass = !!permTest.create_ok;
+        const c = pass ? { fg:GREEN_HI, bg:GREEN_BG, br:GREEN } : { fg:RED, bg:RED_BG, br:RED };
+        return (
+          <div style={{ ...cardStyle, background:c.bg, border:`1px solid ${c.br}`, marginBottom:14 }}>
+            <div style={{ fontSize:13, fontWeight:500, color:c.fg }}>{permTest.verdict}</div>
+            <div style={{ fontSize:12, color:MUTED, marginTop:6, lineHeight:1.6 }}>
+              {permTest.ad_account_id && <div>Ad account: {permTest.ad_account_id}</div>}
+              {permTest.has_ads_management !== null && permTest.has_ads_management !== undefined &&
+                <div>Manage-ads permission: {permTest.has_ads_management === true ? 'yes' : (permTest.has_ads_management === false ? 'no' : '—')}</div>}
+              {permTest.account_status !== null && permTest.account_status !== undefined &&
+                <div>Account status: {permTest.account_status === 1 ? 'active' : permTest.account_status}</div>}
+              {permTest.error && <div style={{ color:RED }}>Detail: {permTest.error}</div>}
+            </div>
+          </div>
+        );
+      })()}
       {addOpen && (
         <div style={{ ...cardStyle, marginBottom:14 }}>
           <div style={{ fontSize:13, fontWeight:500, marginBottom:8 }}>Add a Facebook Ads customer</div>

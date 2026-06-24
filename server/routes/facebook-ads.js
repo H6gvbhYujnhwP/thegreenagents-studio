@@ -18,7 +18,7 @@ import express from 'express';
 import { v4 as uuid } from 'uuid';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
-import { metaConfigured, testConnection, getAdsOverview, META } from '../services/meta-api.js';
+import { metaConfigured, testConnection, getAdsOverview, checkCreatePermission, META } from '../services/meta-api.js';
 
 const router = express.Router();
 router.use(requireAuth);
@@ -37,6 +37,39 @@ router.get('/connection-status', async (req, res) => {
     api_version: META.apiVersion,
     ad_account_id: `act_${META.adAccountId}`,
   });
+});
+
+// ── PHASE-2 PRE-FLIGHT: can Studio CREATE ads? ───────────────────────────────
+// Diagnostic for the "Test create-ad permission" button. Creates a PAUSED test
+// campaign on the selected customer's ad account and deletes it again, proving
+// the token can write ads before we build the real push. Spends nothing.
+// Pass ?customer=<email_client_id> to test that customer's account, or
+// ?ad_account=<id> directly; otherwise the default configured account is used.
+router.get('/test-create-permission', async (req, res) => {
+  if (!metaConfigured()) {
+    return res.json({ configured: false, verdict: 'Meta API is not configured — META_ACCESS_TOKEN is missing.' });
+  }
+
+  let adAccountId = req.query.ad_account ? String(req.query.ad_account) : null;
+  if (!adAccountId && req.query.customer) {
+    const fa = db.prepare('SELECT ad_account_id FROM facebook_ads WHERE email_client_id = ?').get(req.query.customer);
+    if (!fa || !fa.ad_account_id) {
+      return res.json({ configured: true, verdict: 'This customer has no ad account set yet — add their ad account ID first.' });
+    }
+    adAccountId = fa.ad_account_id;
+  }
+
+  try {
+    const result = await checkCreatePermission(adAccountId || undefined);
+    const verdict = result.create_ok
+      ? (result.delete_ok
+          ? 'PASS — Studio can create ads. A test campaign was created and removed automatically.'
+          : 'PASS — Studio can create ads. The test campaign was created but not auto-removed — please delete it in Ads Manager.')
+      : 'FAIL — Studio cannot create ads with the current token / account. See the detail below.';
+    res.json({ configured: true, verdict, ...result });
+  } catch (err) {
+    res.json({ configured: true, verdict: 'FAIL — unexpected error.', error: err.message });
+  }
 });
 
 // ── ADS + STATS (read-only) ──────────────────────────────────────────────────
