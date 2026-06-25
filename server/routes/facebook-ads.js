@@ -180,6 +180,47 @@ router.post('/:emailClientId/account', (req, res) => {
   res.json({ ok: true, ad_account_id: acct });
 });
 
+// ── ADD a Facebook Ads customer (existing OR brand-new, account optional) ─────
+// Supports generate-only customers we make ads for but never push to Facebook:
+//   - email_client_id given  → add that existing customer
+//   - name given (no id)     → create a new name-only customer first
+//   - ad_account_id optional → blank is fine; push stays blocked until one is set
+router.post('/add-customer', (req, res) => {
+  const body = req.body || {};
+  let id = body.email_client_id ? String(body.email_client_id) : null;
+  const name = (body.name || '').trim();
+  const acct = String(body.ad_account_id || '').trim().replace(/^act_/i, '').replace(/\D/g, '') || null;
+
+  if (!id && !name) return res.status(400).json({ error: 'Pick a customer or enter a new customer name.' });
+
+  if (!id) {
+    // Reuse an existing customer with the same name rather than duplicate it.
+    const existing = db.prepare('SELECT id FROM email_clients WHERE LOWER(name) = ?').get(name.toLowerCase());
+    if (existing) {
+      id = existing.id;
+    } else {
+      id = uuid();
+      const slug = db._portalUniqueSlug
+        ? db._portalUniqueSlug(name, id)
+        : name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+      db.prepare('INSERT INTO email_clients (id, name, color, slug, source) VALUES (?, ?, ?, ?, ?)')
+        .run(id, name, '#1D9E75', slug, 'manual');
+    }
+  } else {
+    const ec = db.prepare('SELECT id FROM email_clients WHERE id = ?').get(id);
+    if (!ec) return res.status(404).json({ error: 'Customer not found' });
+  }
+
+  const existingFa = db.prepare('SELECT id FROM facebook_ads WHERE email_client_id = ?').get(id);
+  if (existingFa) {
+    if (acct) db.prepare(`UPDATE facebook_ads SET ad_account_id = ?, updated_at = datetime('now') WHERE email_client_id = ?`).run(acct, id);
+  } else {
+    db.prepare(`INSERT INTO facebook_ads (id, email_client_id, status, ad_account_id) VALUES (?, ?, 'not_connected', ?)`).run(uuid(), id, acct);
+    db.prepare(`INSERT OR IGNORE INTO customer_services (email_client_id, service_key, linked_external_id, enabled_by) VALUES (?, 'facebook_ads', NULL, 'admin')`).run(id);
+  }
+  res.json({ ok: true, id });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AD APPROVALS — generation, RAG/brand setup, per-creative controls (decision
 // #106 revived + upgraded to gpt-image-2). All admin, behind requireAuth.

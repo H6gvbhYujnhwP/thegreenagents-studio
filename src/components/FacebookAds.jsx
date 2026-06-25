@@ -50,6 +50,7 @@ export default function FacebookAds() {
 
   const [addOpen, setAddOpen] = useState(false);
   const [addSel, setAddSel] = useState('');
+  const [addName, setAddName] = useState('');
   const [addAcct, setAddAcct] = useState('');
   const [editAcct, setEditAcct] = useState(false);
   const [acctInput, setAcctInput] = useState('');
@@ -87,9 +88,19 @@ export default function FacebookAds() {
   }
 
   async function onAddCustomer() {
-    if (!addSel || !addAcct.trim()) { setError('Pick a customer and enter their ad account ID.'); return; }
-    const okSaved = await saveAccount(addSel, addAcct.trim());
-    if (okSaved) { await loadAvailable(); setSelId(addSel); setAddOpen(false); setAddSel(''); setAddAcct(''); }
+    const name = addName.trim();
+    if (!addSel && !name) { setError('Pick a customer or enter a new customer name.'); return; }
+    setSavingAcct(true); setError(null);
+    try {
+      const r = await fetch('/api/facebook-ads/add-customer', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ email_client_id: addSel||undefined, name: name||undefined, ad_account_id: addAcct.trim()||undefined }),
+      });
+      const j = await r.json().catch(()=>({}));
+      if (!r.ok) throw new Error(j.error || 'Could not add customer');
+      await loadCustomers(); await loadAvailable();
+      setSelId(j.id); setAddOpen(false); setAddSel(''); setAddName(''); setAddAcct('');
+    } catch(e){ setError(e.message); } finally { setSavingAcct(false); }
   }
 
   async function onSaveEditAcct() {
@@ -174,15 +185,17 @@ export default function FacebookAds() {
         <div style={{ ...cardStyle, marginBottom:14 }}>
           <div style={{ fontSize:13, fontWeight:500, marginBottom:8 }}>Add a Facebook Ads customer</div>
           <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' }}>
-            <select value={addSel} onChange={e=>setAddSel(e.target.value)} style={{ minWidth:220, padding:'8px 9px', border:`1px solid ${BORDER}`, borderRadius:6, fontSize:13, background:'#fff' }}>
-              <option value="">Choose customer…</option>
+            <select value={addSel} onChange={e=>{ setAddSel(e.target.value); if(e.target.value) setAddName(''); }} style={{ minWidth:190, padding:'8px 9px', border:`1px solid ${BORDER}`, borderRadius:6, fontSize:13, background:'#fff' }}>
+              <option value="">Choose existing…</option>
               {available.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
-            <input value={addAcct} onChange={e=>setAddAcct(e.target.value)} placeholder="Ad account ID (e.g. 1754809155683350)" style={{ width:280, padding:'8px 9px', border:`1px solid ${BORDER}`, borderRadius:6, fontSize:13 }} />
+            <span style={{ fontSize:12, color:TERTIARY }}>or</span>
+            <input value={addName} onChange={e=>{ setAddName(e.target.value); if(e.target.value) setAddSel(''); }} placeholder="New customer name (e.g. Sunbear Care)" style={{ width:240, padding:'8px 9px', border:`1px solid ${BORDER}`, borderRadius:6, fontSize:13 }} />
+            <input value={addAcct} onChange={e=>setAddAcct(e.target.value)} placeholder="Ad account ID — optional" style={{ width:200, padding:'8px 9px', border:`1px solid ${BORDER}`, borderRadius:6, fontSize:13 }} />
             <button disabled={savingAcct} onClick={onAddCustomer} style={btn(GREEN_HI, '#fff', savingAcct?{opacity:0.6}:{})}>{savingAcct?'Saving…':'Add'}</button>
-            <button onClick={()=>setAddOpen(false)} style={btn('#fff', MUTED, { border:`1px solid ${BORDER}` })}>Cancel</button>
+            <button onClick={()=>{ setAddOpen(false); setAddSel(''); setAddName(''); setAddAcct(''); }} style={btn('#fff', MUTED, { border:`1px solid ${BORDER}` })}>Cancel</button>
           </div>
-          <div style={{ fontSize:11, color:TERTIARY, marginTop:8 }}>The ad account ID is the number in Meta Ads Manager (with or without the “act_” prefix). One account per customer.</div>
+          <div style={{ fontSize:11, color:TERTIARY, marginTop:8 }}>Pick an existing customer or type a new name. <strong>Ad account is optional</strong> — leave it blank for a generate-only customer (generate the ads, then save the images and copy the text yourself). You can add an ad account later if you ever want to push.</div>
         </div>
       )}
 
