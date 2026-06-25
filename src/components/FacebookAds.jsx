@@ -317,6 +317,7 @@ const LOGO_POSITIONS = [ ['bottom-right','Bottom right'], ['bottom-left','Bottom
 const LOGO_SIZES = [ ['small','Small'], ['medium','Medium'], ['large','Large'] ];
 const LOGO_PANELS = [ ['white','White panel'], ['none','No panel'] ];
 const AD_COUNTS = [3,4,5,6,8,10];
+const GEN_STAGES = ['Reading the RAG', 'Writing the ad copy', 'Designing the images', 'Adding the logo'];
 
 function AdApprovals({ customerId, customerName, view='approvals' }) {
   const [ov, setOv] = useState(null);
@@ -324,6 +325,10 @@ function AdApprovals({ customerId, customerName, view='approvals' }) {
   const [err, setErr] = useState(null);
   const [count, setCount] = useState(6);
   const [generating, setGenerating] = useState(false);
+  const [genOpen, setGenOpen] = useState(false);
+  const [genStage, setGenStage] = useState(0);
+  const [genError, setGenError] = useState(null);
+  const genTimer = useRef(null);
   const [newRag, setNewRag] = useState(null);
   const [uploadingRag, setUploadingRag] = useState(false);
   const [newLogo, setNewLogo] = useState(null);
@@ -454,14 +459,32 @@ function AdApprovals({ customerId, customerName, view='approvals' }) {
     } catch { setExtractMsg('Extraction failed'); }
     finally { setExtracting(false); setTimeout(()=>setExtractMsg(''),4000); }
   }
+  // Advance the indicative stages while generating (the backend does it all in
+  // one call, so these are timed cues, not a live feed). Stops on error/done.
+  useEffect(() => {
+    clearInterval(genTimer.current);
+    if (genOpen && generating && !genError) {
+      genTimer.current = setInterval(() => {
+        setGenStage(s => Math.min(s + 1, GEN_STAGES.length - 1));
+      }, 5000);
+    }
+    return () => clearInterval(genTimer.current);
+  }, [genOpen, generating, genError]);
+
   async function generate() {
-    setGenerating(true); setErr(null);
+    setGenOpen(true); setGenError(null); setGenStage(0); setGenerating(true); setErr(null);
     try {
       const r = await fetch(`/api/facebook-ads/${customerId}/generate`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ count }) });
       const j = await r.json().catch(()=>({}));
-      if (!r.ok) throw new Error(j.error||'Generation failed');
+      if (!r.ok) throw new Error(j.error || 'Generation failed');
       await load();
-    } catch(e){ setErr(e.message); } finally { setGenerating(false); }
+      setGenStage(GEN_STAGES.length); // all ticks + Done
+      setGenerating(false);
+      setTimeout(()=>setGenOpen(false), 1200);
+    } catch(e){
+      setGenError(e.message || 'Generation failed');
+      setGenerating(false);
+    }
   }
 
   async function creativeAction(id, kind, path, body) {
@@ -499,6 +522,51 @@ function AdApprovals({ customerId, customerName, view='approvals' }) {
 
   return (
     <div>
+      {genOpen && (
+        <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.35)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 }}>
+          <style>{`@keyframes fbspin{to{transform:rotate(360deg)}}`}</style>
+          <div style={{ background:'#fff', borderRadius:12, padding:'22px 26px', width:460, maxWidth:'90vw', boxShadow:'0 12px 44px rgba(0,0,0,0.22)' }}>
+            {genError ? (
+              <>
+                <div style={{ fontSize:15, fontWeight:600, color:RED, marginBottom:6 }}>Generation failed</div>
+                <div style={{ fontSize:12, color:MUTED, marginBottom:10 }}>No ads were created. The error from the server:</div>
+                <div style={{ fontSize:12, color:RED, background:RED_BG, border:`1px solid ${RED}`, borderRadius:8, padding:'10px 12px', whiteSpace:'pre-wrap', fontFamily:'ui-monospace, Menlo, monospace', wordBreak:'break-word', marginBottom:14 }}>{genError}</div>
+                <div style={{ display:'flex', justifyContent:'flex-end', gap:8 }}>
+                  <button onClick={()=>{ setGenOpen(false); setGenError(null); }} style={btn('#fff', MUTED, { border:`1px solid ${BORDER}` })}>Close</button>
+                  <button onClick={generate} style={btn(GREEN_HI,'#fff')}>Try again</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize:15, fontWeight:600, color:TEXT, marginBottom:3 }}>{genStage>=GEN_STAGES.length ? 'Done — ads ready' : `Generating ${count} Facebook ad${count===1?'':'s'}…`}</div>
+                <div style={{ fontSize:12, color:MUTED, marginBottom:16 }}>From the RAG. This usually takes about a minute.</div>
+                <div style={{ display:'flex', flexDirection:'column', gap:11 }}>
+                  {GEN_STAGES.map((label, i) => {
+                    const done = i < genStage || genStage>=GEN_STAGES.length;
+                    const active = i === genStage && genStage < GEN_STAGES.length;
+                    return (
+                      <div key={label} style={{ display:'flex', alignItems:'center', gap:11 }}>
+                        {done
+                          ? <span style={{ width:22,height:22,borderRadius:'50%',background:GREEN_BG,color:GREEN_HI,display:'flex',alignItems:'center',justifyContent:'center',fontSize:12,flex:'none' }}>✓</span>
+                          : active
+                          ? <span style={{ width:22,height:22,borderRadius:'50%',border:`2px solid ${BLUE}`,borderTopColor:'transparent',display:'inline-block',flex:'none',animation:'fbspin 0.8s linear infinite' }} />
+                          : <span style={{ width:22,height:22,borderRadius:'50%',background:GREY_BG,color:TERTIARY,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,flex:'none' }}>{i+1}</span>}
+                        <span style={{ fontSize:13, color: done?MUTED:(active?TEXT:TERTIARY), fontWeight: active?500:400 }}>{label}</span>
+                      </div>
+                    );
+                  })}
+                  <div style={{ display:'flex', alignItems:'center', gap:11 }}>
+                    <span style={{ width:22,height:22,borderRadius:'50%',background: genStage>=GEN_STAGES.length?GREEN_BG:GREY_BG, color: genStage>=GEN_STAGES.length?GREEN_HI:TERTIARY, display:'flex',alignItems:'center',justifyContent:'center',fontSize:12,flex:'none' }}>{genStage>=GEN_STAGES.length?'✓':GEN_STAGES.length+1}</span>
+                    <span style={{ fontSize:13, color: genStage>=GEN_STAGES.length?MUTED:TERTIARY }}>Done</span>
+                  </div>
+                </div>
+                <div style={{ fontSize:11, color:TERTIARY, marginTop:16 }}>Keep this tab open — your ads will appear below when they’re ready.</div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {err && <div style={{ ...cardStyle, background:RED_BG, border:`1px solid ${RED}`, color:RED, marginBottom:14, fontSize:13 }}>{err}</div>}
 
       {/* ── SETUP VIEW ──────────────────────────────────────────────────── */}
