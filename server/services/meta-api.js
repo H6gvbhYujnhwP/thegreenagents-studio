@@ -362,6 +362,9 @@ export async function pushAdsToFacebook({
         billing_event: 'IMPRESSIONS',
         optimization_goal: 'LEAD_GENERATION',
         bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
+        // Instant lead form opens ON the ad — required when the ad's creative
+        // has a lead form attached, or Meta refuses to bind them at the ad step.
+        destination_type: 'ON_AD',
         promoted_object: JSON.stringify({ page_id: String(pageId) }),
         targeting: JSON.stringify({
           geo_locations: { countries: countries.length ? countries : ['GB'] },
