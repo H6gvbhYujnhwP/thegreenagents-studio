@@ -512,6 +512,21 @@ router.get('/:emailClientId/lead-forms', async (req, res) => {
 });
 
 // Push all APPROVED, not-yet-pushed creatives to Facebook as PAUSED drafts.
+// History — every ad that's been pushed to Facebook for this customer, newest
+// first. Keyed directly by the customer's own id (no cross-table hop). The
+// frontend groups these by pushed_campaign_id into dated push blocks.
+router.get('/:emailClientId/history', (req, res) => {
+  const id = req.params.emailClientId;
+  const ads = db.prepare(`
+    SELECT id, hook_label, headline, primary_text, cta, image_url,
+           fb_ad_id, pushed_campaign_id, pushed_campaign_name, pushed_at
+    FROM facebook_ad_creatives
+    WHERE email_client_id = ? AND status = 'pushed' AND fb_ad_id IS NOT NULL AND fb_ad_id != ''
+    ORDER BY pushed_at DESC, rowid ASC
+  `).all(id);
+  res.json({ ads });
+});
+
 // Creates one Leads campaign + one ad set + one ad per creative. Stamps each
 // creative with its Facebook ad id (so it won't be pushed twice) or its error.
 router.post('/:emailClientId/push', async (req, res) => {
@@ -561,11 +576,11 @@ router.post('/:emailClientId/push', async (req, res) => {
 
   // Persist: stamp pushed creatives with their ad id, failures with the reason,
   // and record the campaign/ad-set on the customer row.
-  const stampOk  = db.prepare(`UPDATE facebook_ad_creatives SET status='pushed', fb_ad_id=?, fb_creative_id=?, push_error=NULL, pushed_at=datetime('now'), updated_at=datetime('now') WHERE id=?`);
+  const stampOk  = db.prepare(`UPDATE facebook_ad_creatives SET status='pushed', fb_ad_id=?, fb_creative_id=?, pushed_campaign_id=?, pushed_campaign_name=?, push_error=NULL, pushed_at=datetime('now'), updated_at=datetime('now') WHERE id=?`);
   const stampErr = db.prepare(`UPDATE facebook_ad_creatives SET push_error=?, updated_at=datetime('now') WHERE id=?`);
   const tx = db.transaction(() => {
     for (const r of result.results) {
-      if (r.ok) stampOk.run(r.ad_id, r.creative_id, r.id);
+      if (r.ok) stampOk.run(r.ad_id, r.creative_id, result.campaign_id, campaignName, r.id);
       else stampErr.run(r.error || 'push failed', r.id);
     }
     if (result.campaign_id) {

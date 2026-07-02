@@ -229,6 +229,7 @@ export default function FacebookAds() {
           {tabBtn('results','Results')}
           {tabBtn('approvals','Ad approvals')}
           {tabBtn('setup','Setup')}
+          {tabBtn('history','History')}
         </div>
       )}
 
@@ -304,6 +305,101 @@ export default function FacebookAds() {
       {selected && (tab==='approvals' || tab==='setup') && (
         <AdApprovals key={selId} customerId={selId} customerName={selected.name} view={tab} />
       )}
+
+      {/* ── HISTORY TAB ─────────────────────────────────────────────────────── */}
+      {selected && tab==='history' && (
+        <AdHistory key={selId+':hist'} customerId={selId} />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// History tab — every ad that's been pushed to Facebook for this customer,
+// grouped by push (each push = one dated campaign), newest first. Read-only.
+// ─────────────────────────────────────────────────────────────────────────────
+const CTA_LABELS = { LEARN_MORE:'Learn more', SIGN_UP:'Sign up', GET_QUOTE:'Get quote', SUBSCRIBE:'Subscribe', APPLY_NOW:'Apply now', DOWNLOAD:'Download' };
+// Mirror the server's push-time CTA rule so History shows the button the ad
+// ACTUALLY went out with (anything not lead-form-valid becomes "Learn more").
+function ctaLabel(cta) {
+  const t = String(cta || '').toUpperCase().trim();
+  return CTA_LABELS[t] || 'Learn more';
+}
+function fmtPushed(s) {
+  if (!s) return '';
+  const d = new Date(String(s).replace(' ', 'T') + 'Z');
+  if (isNaN(d)) return String(s);
+  return d.toLocaleString('en-GB', { day:'numeric', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' });
+}
+
+function AdHistory({ customerId }) {
+  const [loading, setLoading] = useState(true);
+  const [ads, setAds] = useState([]);
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    fetch(`/api/facebook-ads/${customerId}/history`)
+      .then(r => r.ok ? r.json() : { ads: [] })
+      .then(j => { if (live) { setAds(j.ads || []); setLoading(false); } })
+      .catch(() => { if (live) { setAds([]); setLoading(false); } });
+    return () => { live = false; };
+  }, [customerId]);
+
+  // Group by campaign (fall back to a per-date bucket for ads pushed before the
+  // campaign was recorded). Ads arrive newest-first, so first-seen order = newest.
+  const groups = [];
+  const byKey = new Map();
+  for (const a of ads) {
+    const key = a.pushed_campaign_id || ('date:' + String(a.pushed_at || '').slice(0, 10));
+    let g = byKey.get(key);
+    if (!g) { g = { key, name: a.pushed_campaign_name || 'Earlier push', pushed_at: a.pushed_at, ads: [] }; byKey.set(key, g); groups.push(g); }
+    g.ads.push(a);
+  }
+
+  if (loading) return <div style={{ ...cardStyle, color:TERTIARY, fontSize:13 }}>Loading history…</div>;
+
+  if (!ads.length) return (
+    <div style={{ ...cardStyle, textAlign:'center', padding:'32px 16px' }}>
+      <div style={{ fontSize:14, fontWeight:500, color:TEXT, marginBottom:6 }}>No ads pushed yet</div>
+      <div style={{ fontSize:12, color:TERTIARY, maxWidth:420, margin:'0 auto' }}>Approve ads on the Ad approvals tab and push them to Facebook — every ad shows here with the date it was pushed.</div>
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{ fontSize:12, color:MUTED, marginBottom:16 }}>
+        {ads.length} {ads.length===1?'ad':'ads'} pushed across {groups.length} {groups.length===1?'push':'pushes'} · everything paused on Facebook
+      </div>
+
+      {groups.map(g => (
+        <div key={g.key} style={{ marginBottom:20 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
+            <span style={{ fontSize:13, fontWeight:500, color:TEXT }}>{fmtPushed(g.pushed_at)}</span>
+            <span style={{ fontSize:12, color:TERTIARY }}>· {g.name}</span>
+            <span style={{ marginLeft:'auto', fontSize:11, padding:'3px 8px', borderRadius:6, background:AMBER_BG, color:AMBER }}>{g.ads.length} {g.ads.length===1?'ad':'ads'} · paused</span>
+          </div>
+
+          <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+            {g.ads.map(a => (
+              <div key={a.id} style={{ display:'flex', gap:12, padding:10, border:`1px solid ${BORDER}`, borderRadius:8 }}>
+                {a.image_url
+                  ? <img src={a.image_url} alt="" style={{ width:64, height:64, objectFit:'cover', borderRadius:6, flex:'none', background:BG }} />
+                  : <div style={{ width:64, height:64, borderRadius:6, flex:'none', background:BG, display:'flex', alignItems:'center', justifyContent:'center', color:TERTIARY, fontSize:18 }}>▦</div>}
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:13, fontWeight:500, color:TEXT, marginBottom:2 }}>{a.headline || 'Untitled ad'}</div>
+                  {a.hook_label && <div style={{ fontSize:11, color:TERTIARY, marginBottom:6 }}>{a.hook_label}</div>}
+                  <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center' }}>
+                    <span style={{ fontSize:11, padding:'2px 7px', borderRadius:6, background:BLUE_BG, color:BLUE }}>Button: {ctaLabel(a.cta)}</span>
+                    {a.fb_ad_id && <span style={{ fontSize:11, color:TERTIARY }}>ad {a.fb_ad_id}</span>}
+                    <a href="https://business.facebook.com/adsmanager" target="_blank" rel="noreferrer" style={{ marginLeft:'auto', fontSize:11, color:BLUE, textDecoration:'none' }}>View in Ads Manager ↗</a>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

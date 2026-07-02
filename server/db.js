@@ -1310,6 +1310,11 @@ try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN fb_ad_id TEXT"); } c
 try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN fb_creative_id TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN pushed_at TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN push_error TEXT"); } catch (_) {}
+// Which campaign each ad was pushed into — stamped at push time so the History
+// tab can group past pushes by campaign + date. Ads pushed before this column
+// existed keep a null campaign and fall into an "Earlier push" group by date.
+try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN pushed_campaign_id TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN pushed_campaign_name TEXT"); } catch (_) {}
 
 // 14m. Backfill customer_services from the legacy columns. Idempotent — uses
 // INSERT OR IGNORE on the unique (email_client_id, service_key) index, so
