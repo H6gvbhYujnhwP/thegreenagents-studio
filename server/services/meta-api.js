@@ -319,6 +319,19 @@ function toExternalUrl(u) {
   return 'https://' + s.replace(/^\/+/, '');
 }
 
+// CTA buttons Meta accepts on a LEAD-FORM creative. Attaching a lead form to any
+// other button (e.g. CONTACT_US) is rejected at the creative step with
+// "Invalid value field lead_gen_form_id for CTA type: …". So any CTA the ad
+// generator picks that isn't on this list falls back to LEARN_MORE, which is
+// always valid for lead forms — the push can never fail on the button choice.
+const LEAD_FORM_CTAS = new Set([
+  'SIGN_UP', 'LEARN_MORE', 'GET_QUOTE', 'SUBSCRIBE', 'APPLY_NOW', 'DOWNLOAD',
+]);
+function safeLeadCta(cta) {
+  const t = String(cta == null ? '' : cta).toUpperCase().trim();
+  return LEAD_FORM_CTAS.has(t) ? t : 'LEARN_MORE';
+}
+
 // The orchestrator the push route calls. Creates ONE Leads campaign (PAUSED) →
 // ONE ad set (PAUSED, broad location+age targeting, optimised for lead-form
 // submissions, tied to the Page, with the daily budget) → ONE ad per creative
@@ -411,7 +424,7 @@ export async function pushAdsToFacebook({
           name: c.headline || '',
           link,
           call_to_action: {
-            type: c.cta || 'LEARN_MORE',
+            type: safeLeadCta(c.cta),
             value: { lead_gen_form_id: String(leadFormId) },
           },
         },
