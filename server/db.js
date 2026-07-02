@@ -1288,6 +1288,9 @@ try { db.exec("ALTER TABLE facebook_ad_creatives ADD COLUMN image_brief TEXT"); 
 //   page_id / page_name       — the Facebook Page the ad posts "as" (required)
 //   lead_form_id / _name       — the instant Lead form the CTA opens (required)
 //   target_countries           — CSV of country codes for ad-set targeting (default GB)
+//   website_url                — the advertiser's own website the ad links to (required
+//                                for lead ads: Meta rejects a creative whose link points
+//                                at a Facebook page rather than external content)
 //   pushed_campaign_id/_adset_id/_at — what the last push created (for reference)
 // daily_budget_pence already exists on facebook_ads (reused as the ad-set budget).
 // All additive ALTERs wrapped in try/catch so they're no-ops once present.
@@ -1296,6 +1299,7 @@ try { db.exec("ALTER TABLE facebook_ads ADD COLUMN page_name TEXT"); } catch (_)
 try { db.exec("ALTER TABLE facebook_ads ADD COLUMN lead_form_id TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE facebook_ads ADD COLUMN lead_form_name TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE facebook_ads ADD COLUMN target_countries TEXT DEFAULT 'GB'"); } catch (_) {}
+try { db.exec("ALTER TABLE facebook_ads ADD COLUMN website_url TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE facebook_ads ADD COLUMN pushed_campaign_id TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE facebook_ads ADD COLUMN pushed_adset_id TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE facebook_ads ADD COLUMN pushed_at TEXT"); } catch (_) {}

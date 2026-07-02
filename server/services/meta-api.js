@@ -309,6 +309,16 @@ async function uploadAdImage(adAccountId, imageUrl) {
   return first.hash;
 }
 
+// Normalise a customer-typed website into a valid external URL for the ad link.
+// Accepts "example.co.uk", "www.example.com", "https://example.com/path" etc;
+// adds https:// when no scheme is present. Returns '' for blank/unusable input.
+function toExternalUrl(u) {
+  const s = String(u == null ? '' : u).trim();
+  if (!s) return '';
+  if (/^https?:\/\//i.test(s)) return s;
+  return 'https://' + s.replace(/^\/+/, '');
+}
+
 // The orchestrator the push route calls. Creates ONE Leads campaign (PAUSED) →
 // ONE ad set (PAUSED, broad location+age targeting, optimised for lead-form
 // submissions, tied to the Page, with the daily budget) → ONE ad per creative
@@ -322,7 +332,7 @@ async function uploadAdImage(adAccountId, imageUrl) {
 // `ok` is true if at least one ad was created. A campaign/ad-set level failure
 // comes back with `error` + `failed_step` set and no ads created.
 export async function pushAdsToFacebook({
-  adAccountId, pageId, leadFormId, dailyBudgetPence,
+  adAccountId, pageId, leadFormId, dailyBudgetPence, websiteUrl,
   countries = ['GB'], ageMin = 18, ageMax = 65, campaignName, creatives = [],
 }) {
   const id = String(adAccountId || '').replace(/^act_/, '');
@@ -332,6 +342,10 @@ export async function pushAdsToFacebook({
   if (!pageId)     { out.error = 'no Facebook Page set'; out.failed_step = 'setup'; return out; }
   if (!leadFormId) { out.error = 'no Lead form set'; out.failed_step = 'setup'; return out; }
   if (!(Number(dailyBudgetPence) > 0)) { out.error = 'no daily budget set'; out.failed_step = 'setup'; return out; }
+  // Meta requires a lead ad's creative to link to external content (the
+  // advertiser's own website), never a Facebook page — so a website is required.
+  const link = toExternalUrl(websiteUrl);
+  if (!link) { out.error = 'no website URL set'; out.failed_step = 'setup'; return out; }
 
   // 1) Campaign — Leads, PAUSED. Exact call proven by checkCreatePermission.
   let campaign;
@@ -380,8 +394,8 @@ export async function pushAdsToFacebook({
   out.adset_id = adset.id || null;
 
   // 3) One ad per creative — image → creative → ad, all PAUSED. Per-ad failures
-  // are recorded and the loop continues to the next ad.
-  const link = `https://www.facebook.com/${String(pageId)}`;
+  // are recorded and the loop continues to the next ad. `link` (the advertiser's
+  // website) was resolved + validated up top.
   for (const c of creatives) {
     const r = { id: c.id, ok: false, ad_id: null, creative_id: null, error: null, step: null };
     try {

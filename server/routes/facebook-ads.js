@@ -259,6 +259,7 @@ router.get('/:emailClientId/overview', (req, res) => {
     lead_form_name: row.lead_form_name,
     daily_budget_pence: row.daily_budget_pence,
     target_countries: row.target_countries || 'GB',
+    website_url: row.website_url || '',
     pushed_campaign_id: row.pushed_campaign_id,
     pushed_adset_id: row.pushed_adset_id,
     pushed_at: row.pushed_at,
@@ -298,6 +299,7 @@ router.put('/:emailClientId/overview', upload.single('rag'), async (req, res) =>
   const lead_form_id    = b.lead_form_id    !== undefined ? (b.lead_form_id || null)    : row.lead_form_id;
   const lead_form_name  = b.lead_form_name  !== undefined ? (b.lead_form_name || null)  : row.lead_form_name;
   const target_countries = b.target_countries !== undefined ? (b.target_countries || 'GB') : (row.target_countries || 'GB');
+  const website_url      = b.website_url      !== undefined ? (String(b.website_url || '').trim() || null) : row.website_url;
   let daily_budget_pence = row.daily_budget_pence;
   if (b.daily_budget_pence !== undefined) {
     const n = parseInt(b.daily_budget_pence, 10);
@@ -326,13 +328,13 @@ router.put('/:emailClientId/overview', upload.single('rag'), async (req, res) =>
       brand_colors=?, logo_description=?, type_style=?, visual_style=?,
       ad_count=?, logo_position=?, logo_panel=?, logo_size=?,
       page_id=?, page_name=?, lead_form_id=?, lead_form_name=?,
-      daily_budget_pence=?, target_countries=?,
+      daily_budget_pence=?, target_countries=?, website_url=?,
       updated_at=datetime('now')
     WHERE email_client_id=?
   `).run(rag_filename, rag_content, brand_colors, logo_description, type_style, visual_style,
          ad_count, logo_position, logo_panel, logo_size,
          page_id, page_name, lead_form_id, lead_form_name,
-         daily_budget_pence, target_countries, id);
+         daily_budget_pence, target_countries, website_url, id);
   res.json({ ok: true });
 });
 
@@ -528,6 +530,7 @@ router.post('/:emailClientId/push', async (req, res) => {
   if (!row.page_id)       return res.status(400).json({ error: 'Choose a Facebook Page first.' });
   if (!row.lead_form_id)  return res.status(400).json({ error: 'Choose a Lead form first.' });
   if (!(Number(row.daily_budget_pence) > 0)) return res.status(400).json({ error: 'Set a daily budget first.' });
+  if (!row.website_url) return res.status(400).json({ error: 'Set the customer’s website URL first — Meta rejects lead ads that link to a Facebook page.' });
 
   const creatives = db.prepare(`
     SELECT * FROM facebook_ad_creatives
@@ -546,6 +549,7 @@ router.post('/:emailClientId/push', async (req, res) => {
       pageId: row.page_id,
       leadFormId: row.lead_form_id,
       dailyBudgetPence: row.daily_budget_pence,
+      websiteUrl: row.website_url,
       countries,
       campaignName,
       creatives: creatives.map(c => ({

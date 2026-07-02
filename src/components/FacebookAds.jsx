@@ -348,11 +348,13 @@ function AdApprovals({ customerId, customerName, view='approvals' }) {
   const [manualPage, setManualPage] = useState(false);
   const [manualForm, setManualForm] = useState(false);
   const [budget, setBudget] = useState('');
+  const [website, setWebsite] = useState('');
   const [pushing, setPushing] = useState(false);
   const [pushResult, setPushResult] = useState(null);
   const [mPage, setMPage] = useState('');
   const [mForm, setMForm] = useState('');
   const budgetTimer = useRef(null);
+  const websiteTimer = useRef(null);
 
   async function loadPages() {
     setPagePick(p=>({ ...p, loading:true, error:null }));
@@ -393,6 +395,13 @@ function AdApprovals({ customerId, customerName, view='approvals' }) {
       saveSetup({ daily_budget_pence: pence });
     }, 700);
   }
+  function onWebsiteChange(v) {
+    setWebsite(v);
+    clearTimeout(websiteTimer.current);
+    websiteTimer.current = setTimeout(()=>{
+      saveSetup({ website_url: String(v).trim() || null });
+    }, 700);
+  }
   async function doPush() {
     setPushing(true); setErr(null); setPushResult(null);
     try {
@@ -414,6 +423,7 @@ function AdApprovals({ customerId, customerName, view='approvals' }) {
       setCount(j.ad_count || 6);
       setBrand({ brand_colors:j.brand_colors||'', logo_description:j.logo_description||'', type_style:j.type_style||'', visual_style:j.visual_style||'' });
       setBudget(j.daily_budget_pence ? (j.daily_budget_pence/100).toFixed(2) : '');
+      setWebsite(j.website_url || '');
       if (j.page_id) loadForms(j.page_id); else setFormPick({ loading:false, ok:null, forms:[], error:null, no_page:true });
     } catch(e){ setErr(e.message); setOv(null); }
     finally { setLoading(false); }
@@ -801,7 +811,7 @@ function AdApprovals({ customerId, customerName, view='approvals' }) {
 
       {/* ── PUSH TO FACEBOOK ──────────────────────────────────────────────── */}
       {creatives.length > 0 && (() => {
-        const canPush = !!(ov && ov.page_id && ov.lead_form_id && Number(ov.daily_budget_pence) > 0 && approvedCount > 0 && !pushing);
+        const canPush = !!(ov && ov.page_id && ov.lead_form_id && Number(ov.daily_budget_pence) > 0 && ov.website_url && approvedCount > 0 && !pushing);
         const pushedCount = creatives.filter(c=>c.status==='pushed').length;
         const COUNTRIES = [ ['GB','United Kingdom'], ['IE','Ireland'], ['US','United States'] ];
         const country = (ov && ov.target_countries) || 'GB';
@@ -879,6 +889,18 @@ function AdApprovals({ customerId, customerName, view='approvals' }) {
                   {COUNTRIES.map(([v,l])=><option key={v} value={v}>{l}</option>)}
                 </select>
                 <div style={{ fontSize:10, color:TERTIARY, marginTop:3 }}>Broad targeting — location + age 18–65.</div>
+              </div>
+            </div>
+
+            {/* Website URL — Meta requires lead ads to link to the advertiser's
+                own site, not a Facebook page. Required; no silent default. */}
+            <div style={{ marginBottom:12 }}>
+              <div style={{ fontSize:11, color:TERTIARY, marginBottom:4 }}>Website URL</div>
+              <input value={website} onChange={e=>onWebsiteChange(e.target.value)} placeholder="regangroupservices.co.uk" style={fieldStyle} />
+              <div style={{ fontSize:10, color:(ov&&ov.website_url)?TERTIARY:RED, marginTop:3 }}>
+                {(ov&&ov.website_url)
+                  ? 'Where the ad’s button links. Meta requires a real website here.'
+                  : 'Required — Meta rejects lead ads that link to a Facebook page.'}
               </div>
             </div>
 
